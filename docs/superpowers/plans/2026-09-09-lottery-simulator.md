@@ -61,7 +61,6 @@
 import unittest
 
 from lottery_simulator.rules.base import DrawState
-from lottery_simulator.rules.base import DrawState
 from lottery_simulator.rules.rule_1 import Rule1
 
 
@@ -673,6 +672,7 @@ from typing import TextIO
 
 from lottery_simulator.analysis import distribution_stats
 from lottery_simulator.engine import SimulationResult, simulate
+from lottery_simulator.rules.base import DrawState
 from lottery_simulator.rules.rule_1 import Rule1
 
 
