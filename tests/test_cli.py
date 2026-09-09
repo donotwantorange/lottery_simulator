@@ -4,7 +4,16 @@ import subprocess
 import sys
 import unittest
 
-from lottery_simulator.cli import main
+from lottery_simulator.cli import RULES, main
+from lottery_simulator.rules.rule_1 import Rule1
+
+
+class DelayedSixStarRule(Rule1):
+    name = "delayed-six-star"
+
+    def probability(self, state):
+        super().probability(state)
+        return 1.0 if state.misses_since_six_star == self.max_pity - 1 else 0.0
 
 
 class CliTest(unittest.TestCase):
@@ -34,7 +43,41 @@ class CliTest(unittest.TestCase):
         self.assertEqual(payload["initial_pity"], 60)
         self.assertNotIn("records", payload)
         self.assertIn("mean_count_error", payload)
+        self.assertAlmostEqual(
+            payload["mean_count_relative_error"],
+            payload["mean_count_error"] / payload["theoretical_expected_count"],
+        )
         self.assertEqual(sum(payload["count_distribution"].values()), 2)
+
+    def test_analyze_text_includes_variance_and_quantiles(self):
+        code, output = self.run_cli("analyze")
+        self.assertEqual(code, 0)
+        self.assertIn("方差：512.20160", output)
+        for level, draw in ((90, 72), (95, 73), (99, 75)):
+            with self.subTest(level=level):
+                self.assertIn(f"{level}% 分位数：第 {draw} 抽", output)
+
+    def test_zero_expectation_simulation_formats(self):
+        RULES[DelayedSixStarRule.name] = DelayedSixStarRule
+        self.addCleanup(RULES.pop, DelayedSixStarRule.name)
+        for output_format in ("json", "text"):
+            with self.subTest(output_format=output_format):
+                code, output = self.run_cli(
+                    "simulate", "--rule", DelayedSixStarRule.name,
+                    "--draws", "1", "--trials", "2", "--seed", "42",
+                    "--format", output_format,
+                )
+                self.assertEqual(code, 0)
+                if output_format == "json":
+                    payload = json.loads(output)
+                    self.assertEqual(payload["theoretical_expected_count"], 0.0)
+                    self.assertEqual(payload["mean_count_error"], 0.0)
+                    self.assertIsNone(payload["mean_count_relative_error"])
+                    self.assertEqual(payload["count_distribution"], {"0": 2})
+                else:
+                    self.assertIn("理论六星期望：0.000000", output)
+                    self.assertIn("期望误差：+0.000000", output)
+                    self.assertIn("期望相对误差：不可用", output)
 
     def test_trace_prints_each_draw(self):
         code, output = self.run_cli(

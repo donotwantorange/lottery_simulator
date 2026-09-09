@@ -74,7 +74,10 @@ def _simulation_payload(result: SimulationResult, rule, include_records: bool):
         "theoretical_mean_interval": theoretical_mean_interval,
         "theoretical_expected_count": result.theoretical_expected_count,
         "mean_count_error": mean_count_error,
-        "mean_count_relative_error": mean_count_error / result.theoretical_expected_count,
+        "mean_count_relative_error": (
+            mean_count_error / result.theoretical_expected_count
+            if result.theoretical_expected_count != 0.0 else None
+        ),
     }
     if include_records:
         payload["records"] = [asdict(record) for record in result.records]
@@ -85,9 +88,12 @@ def _write_text_analysis(payload, output: TextIO) -> None:
     print(f"规则：{payload['rule']}", file=output)
     print(f"六星平均间隔：{payload['mean']:.5f} 抽", file=output)
     print(f"长期综合六星率：{payload['long_run_rate']:.5%}", file=output)
+    print(f"方差：{payload['variance']:.5f} 抽²", file=output)
     print(f"标准差：{payload['standard_deviation']:.5f} 抽", file=output)
     print(f"中位数：第 {payload['median']} 抽", file=output)
     print(f"众数：第 {payload['mode']} 抽", file=output)
+    for level, pull in payload["quantiles"].items():
+        print(f"{float(level):.0%} 分位数：第 {pull} 抽", file=output)
     print("抽次  条件六星概率  首次出六星概率  累计概率", file=output)
     for row in payload["probability_table"]:
         print(
@@ -108,7 +114,9 @@ def _write_text_simulation(payload, output: TextIO, trace: bool) -> None:
     print(f"至少一个六星：{payload['at_least_one_rate']:.4%}", file=output)
     print(f"理论六星期望：{payload['theoretical_expected_count']:.6f}", file=output)
     print(f"期望误差：{payload['mean_count_error']:+.6f}", file=output)
-    print(f"期望相对误差：{payload['mean_count_relative_error']:+.4%}", file=output)
+    relative_error = payload["mean_count_relative_error"]
+    relative_error_text = "不可用" if relative_error is None else f"{relative_error:+.4%}"
+    print(f"期望相对误差：{relative_error_text}", file=output)
     print("六星数量分布：", file=output)
     for count, frequency in sorted(payload["count_distribution"].items()):
         print(f"  {count} 个：{frequency / payload['trials']:.4%}", file=output)

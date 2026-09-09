@@ -1,3 +1,5 @@
+from fractions import Fraction
+from itertools import product
 import unittest
 
 from lottery_simulator.analysis import (
@@ -6,6 +8,36 @@ from lottery_simulator.analysis import (
     waiting_time_distribution,
 )
 from lottery_simulator.rules.rule_1 import Rule1
+
+
+class InvalidProbabilityRule(Rule1):
+    def __init__(self, invalid_state, probability):
+        self.invalid_state = invalid_state
+        self.invalid_probability = probability
+
+    def probability(self, state):
+        if state.misses_since_six_star == self.invalid_state:
+            return self.invalid_probability
+        return super().probability(state)
+
+
+def enumerate_rule_1_expectation(draws, initial_pity):
+    """Enumerate event sequences using exact, spec-derived probabilities."""
+    expected = Fraction(0)
+    for outcomes in product((False, True), repeat=draws):
+        misses = initial_pity
+        weight = Fraction(1)
+        for success in outcomes:
+            if misses == 79:
+                probability = Fraction(1)
+            else:
+                probability = Fraction(8, 1000) + max(0, misses - 63) * Fraction(5, 100)
+            weight *= probability if success else 1 - probability
+            if not weight:
+                break
+            misses = 0 if success else misses + 1
+        expected += weight * sum(outcomes)
+    return float(expected)
 
 
 class AnalysisTest(unittest.TestCase):
@@ -37,11 +69,36 @@ class AnalysisTest(unittest.TestCase):
         value = expected_six_stars(self.rule, 80)
         self.assertAlmostEqual(value, 1.2628497757227852)
 
+    def test_dp_matches_independent_exhaustive_outcomes(self):
+        for initial_pity in (0, 63, 64, 78, 79):
+            for draws in range(1, 6):
+                with self.subTest(initial_pity=initial_pity, draws=draws):
+                    self.assertAlmostEqual(
+                        expected_six_stars(self.rule, draws, initial_pity),
+                        enumerate_rule_1_expectation(draws, initial_pity),
+                        places=12,
+                    )
+
     def test_invalid_analysis_inputs_are_rejected(self):
         with self.assertRaises(ValueError):
             expected_six_stars(self.rule, 0)
         with self.assertRaises(ValueError):
             waiting_time_distribution(self.rule, initial_pity=80)
+
+    def test_invalid_probabilities_are_rejected_at_each_reached_dp_state(self):
+        for value in (-0.1, 1.1, float("nan"), float("inf"), -float("inf")):
+            for initial_pity, invalid_state, draws in ((0, 0, 1), (0, 1, 2), (79, 0, 2)):
+                with self.subTest(value=value, initial_pity=initial_pity, invalid_state=invalid_state):
+                    rule = InvalidProbabilityRule(invalid_state, value)
+                    with self.assertRaisesRegex(ValueError, r"probability outside \[0, 1\]"):
+                        expected_six_stars(rule, draws, initial_pity)
+
+    def test_waiting_distribution_rejects_invalid_probabilities(self):
+        for value in (-0.1, 1.1, float("nan"), float("inf"), -float("inf")):
+            for invalid_state in (0, 1):
+                with self.subTest(value=value, invalid_state=invalid_state):
+                    with self.assertRaisesRegex(ValueError, r"probability outside \[0, 1\]"):
+                        waiting_time_distribution(InvalidProbabilityRule(invalid_state, value))
 
 
 if __name__ == "__main__":

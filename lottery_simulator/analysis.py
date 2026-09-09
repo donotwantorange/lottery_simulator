@@ -16,9 +16,16 @@ class DistributionStats:
     long_run_rate: float
 
 
+def _probability(rule: LotteryRule, state: DrawState) -> float:
+    probability = rule.probability(state)
+    if not 0.0 <= probability <= 1.0:
+        raise ValueError("rule returned a probability outside [0, 1]")
+    return probability
+
+
 def _state(initial_pity: int, rule: LotteryRule) -> DrawState:
     state = DrawState(initial_pity)
-    rule.probability(state)
+    _probability(rule, state)
     return state
 
 
@@ -29,9 +36,7 @@ def waiting_time_distribution(
     survival = 1.0
     probabilities: list[float] = []
     for _ in range(rule.max_pity - initial_pity):
-        probability = rule.probability(state)
-        if not 0.0 <= probability <= 1.0:
-            raise ValueError("rule returned a probability outside [0, 1]")
+        probability = _probability(rule, state)
         probabilities.append(survival * probability)
         survival *= 1.0 - probability
         if probability == 1.0:
@@ -81,7 +86,7 @@ def expected_six_stars(
     for _ in range(draws):
         next_states: dict[DrawState, float] = {}
         for state, mass in states.items():
-            probability = rule.probability(state)
+            probability = _probability(rule, state)
             success_mass = mass * probability
             expected += success_mass
             success_state = rule.advance(state, True)
