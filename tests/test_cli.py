@@ -1,5 +1,7 @@
 from io import StringIO
 import json
+import subprocess
+import sys
 import unittest
 
 from lottery_simulator.cli import main
@@ -45,6 +47,21 @@ class CliTest(unittest.TestCase):
     def test_trace_rejects_multiple_trials(self):
         with self.assertRaises(SystemExit):
             self.run_cli("simulate", "--draws", "2", "--trials", "2", "--trace")
+
+    def test_real_module_entry_point_returns_json(self):
+        completed = subprocess.run(
+            [
+                sys.executable, "-m", "lottery_simulator", "simulate",
+                "--draws", "1", "--trials", "1", "--seed", "7",
+                "--format", "json",
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        payload = json.loads(completed.stdout)
+        self.assertEqual(payload["seed"], 7)
+        self.assertEqual(payload["draws"], 1)
 
 
 if __name__ == "__main__":
