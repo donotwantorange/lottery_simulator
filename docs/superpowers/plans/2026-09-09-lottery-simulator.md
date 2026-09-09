@@ -61,6 +61,7 @@
 import unittest
 
 from lottery_simulator.rules.base import DrawState
+from lottery_simulator.rules.base import DrawState
 from lottery_simulator.rules.rule_1 import Rule1
 
 
@@ -227,12 +228,12 @@ class AnalysisTest(unittest.TestCase):
 
     def test_rule_1_reference_statistics(self):
         stats = distribution_stats(self.rule)
-        self.assertAlmostEqual(stats.mean, 53.32595004118383)
-        self.assertAlmostEqual(stats.standard_deviation, 22.63186543215742)
+        self.assertAlmostEqual(stats.mean, 53.32595362219928)
+        self.assertAlmostEqual(stats.standard_deviation, 22.631871302420425)
         self.assertEqual(stats.median, 67)
         self.assertEqual(stats.mode, 68)
         self.assertEqual(stats.quantiles, {0.90: 72, 0.95: 73, 0.99: 75})
-        self.assertAlmostEqual(stats.long_run_rate, 0.01875263711977098)
+        self.assertAlmostEqual(stats.long_run_rate, 0.018752594788735404)
 
     def test_one_draw_expectation_is_its_probability(self):
         self.assertAlmostEqual(expected_six_stars(self.rule, 1), 0.008)
@@ -617,8 +618,10 @@ class CliTest(unittest.TestCase):
         code, output = self.run_cli("analyze", "--format", "json")
         self.assertEqual(code, 0)
         payload = json.loads(output)
-        self.assertAlmostEqual(payload["mean"], 53.32595004118383)
+        self.assertAlmostEqual(payload["mean"], 53.32595362219928)
         self.assertEqual(payload["hard_pity"], 80)
+        self.assertEqual(len(payload["probability_table"]), 80)
+        self.assertEqual(payload["probability_table"][64]["conditional_probability"], 0.058)
 
     def test_simulate_json_contains_reproduction_parameters(self):
         code, output = self.run_cli(
@@ -631,6 +634,8 @@ class CliTest(unittest.TestCase):
         self.assertEqual(payload["seed"], 42)
         self.assertEqual(payload["initial_pity"], 60)
         self.assertNotIn("records", payload)
+        self.assertIn("mean_count_error", payload)
+        self.assertEqual(sum(payload["count_distribution"].values()), 2)
 
     def test_trace_prints_each_draw(self):
         code, output = self.run_cli(
@@ -698,10 +703,20 @@ Add focused helpers in `lottery_simulator/cli.py`:
 ```python
 def _analysis_payload(rule):
     stats = distribution_stats(rule)
+    cumulative = 0.0
+    table = []
+    for pull, first_six_star_probability in enumerate(stats.probabilities, start=1):
+        cumulative += first_six_star_probability
+        table.append({
+            "pull": pull,
+            "conditional_probability": rule.probability(DrawState(pull - 1)),
+            "first_six_star_probability": first_six_star_probability,
+            "cumulative_probability": cumulative,
+        })
     return {
         "rule": rule.name,
         "hard_pity": rule.max_pity,
-        "probabilities": list(stats.probabilities),
+        "probability_table": table,
         "mean": stats.mean,
         "variance": stats.variance,
         "standard_deviation": stats.standard_deviation,
@@ -712,7 +727,9 @@ def _analysis_payload(rule):
     }
 
 
-def _simulation_payload(result: SimulationResult, include_records: bool):
+def _simulation_payload(result: SimulationResult, rule, include_records: bool):
+    theoretical_mean_interval = distribution_stats(rule).mean
+    mean_count_error = result.mean_six_stars - result.theoretical_expected_count
     payload = {
         "rule": result.rule_name,
         "draws": result.draws,
@@ -723,7 +740,12 @@ def _simulation_payload(result: SimulationResult, include_records: bool):
         "mean_six_stars": result.mean_six_stars,
         "at_least_one_rate": result.at_least_one_rate,
         "observed_mean_interval": result.observed_mean_interval,
+        "theoretical_mean_interval": theoretical_mean_interval,
         "theoretical_expected_count": result.theoretical_expected_count,
+        "mean_count_error": mean_count_error,
+        "mean_count_relative_error": (
+            mean_count_error / result.theoretical_expected_count
+        ),
     }
     if include_records:
         payload["records"] = [asdict(record) for record in result.records]
@@ -737,6 +759,14 @@ def _write_text_analysis(payload, output: TextIO) -> None:
     print(f"标准差：{payload['standard_deviation']:.5f} 抽", file=output)
     print(f"中位数：第 {payload['median']} 抽", file=output)
     print(f"众数：第 {payload['mode']} 抽", file=output)
+    print("抽次  条件六星概率  首次出六星概率  累计概率", file=output)
+    for row in payload["probability_table"]:
+        print(
+            f"{row['pull']}  {row['conditional_probability']:.4%}  "
+            f"{row['first_six_star_probability']:.6%}  "
+            f"{row['cumulative_probability']:.6%}",
+            file=output,
+        )
 
 
 def _write_text_simulation(payload, output: TextIO, trace: bool) -> None:
@@ -748,6 +778,18 @@ def _write_text_simulation(payload, output: TextIO, trace: bool) -> None:
     print(f"平均六星数：{payload['mean_six_stars']:.6f}", file=output)
     print(f"至少一个六星：{payload['at_least_one_rate']:.4%}", file=output)
     print(f"理论六星期望：{payload['theoretical_expected_count']:.6f}", file=output)
+    print(f"期望误差：{payload['mean_count_error']:+.6f}", file=output)
+    print(f"期望相对误差：{payload['mean_count_relative_error']:+.4%}", file=output)
+    print("六星数量分布：", file=output)
+    for count, frequency in sorted(payload["count_distribution"].items()):
+        print(f"  {count} 个：{frequency / payload['trials']:.4%}", file=output)
+    observed = payload["observed_mean_interval"]
+    if observed is not None:
+        print(f"已完成周期平均间隔：{observed:.5f} 抽", file=output)
+    print(
+        f"完整周期理论平均间隔：{payload['theoretical_mean_interval']:.5f} 抽",
+        file=output,
+    )
     if trace:
         print("抽次  保底位置  六星概率  结果  抽后保底", file=output)
         for record in payload["records"]:
@@ -786,7 +828,7 @@ def main(argv=None, stdout=None) -> int:
         )
     except (TypeError, ValueError) as error:
         parser.error(str(error))
-    payload = _simulation_payload(result, include_records=args.trace)
+    payload = _simulation_payload(result, rule, include_records=args.trace)
     if args.format == "json":
         json.dump(payload, output, ensure_ascii=False, indent=2)
         print(file=output)
@@ -810,7 +852,7 @@ Expected: 4 tests run and all report `ok`.
 
 Run: `python -m lottery_simulator analyze --format json`
 
-Expected: exit 0 and JSON with `"mean": 53.32595004118383` and `"hard_pity": 80`.
+Expected: exit 0 and JSON with `"mean": 53.32595362219928`, an 80-row `probability_table`, and `"hard_pity": 80`.
 
 Run: `python -m lottery_simulator simulate --draws 3 --trials 1 --seed 42 --initial-pity 78 --trace`
 
@@ -901,6 +943,8 @@ Create `README.md` with these exact sections and executable examples:
 
 `analyze` 是由概率公式计算的精确理论结果。`simulate` 是伪随机实验；指定相同参数和种子可复现。长期综合六星率为平均完整保底周期的倒数；有限抽数内的理论六星数量由状态动态规划计算。
 
+批量模拟中的“期望误差”比较模拟平均六星数和相同有限抽数下的精确期望，可以用于检查抽样收敛，但单次小样本偏差不能证明实现错误。“已完成周期平均间隔”忽略模拟结束时尚未完成的周期，短模拟会有截尾偏差，不能单独用于验证规则。
+
 ## 测试
 
 `python -m unittest discover -v`
@@ -939,4 +983,3 @@ git status --short
 ```
 
 Expected: commit succeeds and `git status --short` prints nothing.
-
