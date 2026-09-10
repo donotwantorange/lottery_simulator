@@ -35,10 +35,11 @@
 - 文本汇总验证初始累计数 29、结束累计数 31。
 - JSON 验证 `initial_main_draws`、`final_main_draws` 及每条记录的 `main_draws_completed`；批量实验中的起止值按每轮表示，不随 `trials` 累加。
 - 真实文本与 JSON 入口验收通过。
-- 独立审查发现公开结果 dataclass 的位置参数兼容风险；已恢复原字段顺序，并以回归测试验证旧构造方式。
+- 独立审查发现公开结果 dataclass 的位置参数兼容风险。第一轮修复错误地选择了更早版本的 5/11 参数签名；复审通过 `cc22983` 确认本功能的真实兼容基线为 `DrawRecord` 8 参数、`SimulationResult` 17 参数。第二轮已严格恢复该顺序，只将累计抽数字段追加到末尾，并以真实旧构造方式做回归测试。
 - 完整测试：41 项通过。
 
 ## Git 提交
 
 - `1ca3a90 feat: display cumulative main draw count`
 - `577ae28 fix: preserve result constructor compatibility`
+- `36a5fbe fix: preserve bonus-era result signatures`
