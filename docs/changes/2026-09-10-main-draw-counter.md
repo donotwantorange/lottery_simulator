@@ -2,7 +2,7 @@
 
 ## 状态
 
-设计已确认，待实现。
+已完成，位于 `feature/bonus-subrule` 分支，尚未合并到 `master`。
 
 ## 目标
 
@@ -21,7 +21,7 @@
 
 `--initial-pity 29 --draws 2` 的来源与累计数顺序为：主池 30、赠送 1–10 均为 30、下一次主池为 31。
 
-## 预计涉及文件
+## 涉及文件
 
 - `lottery_simulator/engine.py`
 - `lottery_simulator/cli.py`
@@ -31,8 +31,12 @@
 
 ## 验证结果
 
-实现后补充。
+- 自动化测试固定了 `29 → 主池30 → 10次赠送均保持30 → 主池31` 的完整序列。
+- 文本汇总验证初始累计数 29、结束累计数 31。
+- JSON 验证 `initial_main_draws`、`final_main_draws` 及每条记录的 `main_draws_completed`。
+- 真实文本与 JSON 入口验收通过。
+- 完整测试：39 项通过。
 
 ## Git 提交
 
-实现后补充。
+- `1ca3a90 feat: display cumulative main draw count`
