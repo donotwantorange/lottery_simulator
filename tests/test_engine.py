@@ -111,6 +111,18 @@ class EngineTest(unittest.TestCase):
         )
         self.assertEqual(main_records[1].pity_position, 2)
 
+    def test_main_draw_counter_advances_only_for_main_draws(self):
+        result = simulate(
+            NoEarlySixRule(), draws=2, trials=1, seed=42, initial_pity=29
+        )
+
+        self.assertEqual(result.initial_main_draws, 29)
+        self.assertEqual(result.final_main_draws, 31)
+        self.assertEqual(
+            [record.main_draws_completed for record in result.records],
+            [30] + [30] * 10 + [31],
+        )
+
     def test_omitted_seed_is_returned(self):
         result = simulate(self.rule, draws=1)
         self.assertIsInstance(result.seed, int)

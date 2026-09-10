@@ -82,6 +82,29 @@ class CliTest(unittest.TestCase):
         self.assertIn("赠送  1", output)
         self.assertIn("赠送  10", output)
 
+    def test_main_draw_counter_is_in_text_and_json_results(self):
+        code, text_output = self.run_cli(
+            "simulate", "--draws", "2", "--trials", "1", "--seed", "42",
+            "--initial-pity", "29", "--trace",
+        )
+        self.assertEqual(code, 0)
+        self.assertIn("初始主池累计抽数：29", text_output)
+        self.assertIn("结束主池累计抽数：31", text_output)
+        self.assertIn("主池累计抽数", text_output)
+
+        code, json_output = self.run_cli(
+            "simulate", "--draws", "2", "--trials", "1", "--seed", "42",
+            "--initial-pity", "29", "--trace", "--format", "json",
+        )
+        self.assertEqual(code, 0)
+        payload = json.loads(json_output)
+        self.assertEqual(payload["initial_main_draws"], 29)
+        self.assertEqual(payload["final_main_draws"], 31)
+        self.assertEqual(
+            [record["main_draws_completed"] for record in payload["records"]],
+            [30] + [30] * 10 + [31],
+        )
+
     def test_analyze_text_includes_variance_and_quantiles(self):
         code, output = self.run_cli("analyze")
         self.assertEqual(code, 0)

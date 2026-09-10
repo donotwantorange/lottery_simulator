@@ -70,6 +70,8 @@ def _simulation_payload(result: SimulationResult, rule, include_records: bool):
         "trials": result.trials,
         "seed": result.seed,
         "initial_pity": result.initial_pity,
+        "initial_main_draws": result.initial_main_draws,
+        "final_main_draws": result.final_main_draws,
         "count_distribution": result.count_distribution,
         "mean_main_six_stars": result.mean_main_six_stars,
         "mean_bonus_six_stars": result.mean_bonus_six_stars,
@@ -119,6 +121,8 @@ def _write_text_simulation(payload, output: TextIO, trace: bool) -> None:
     print(f"实验轮数：{payload['trials']}", file=output)
     print(f"随机种子：{payload['seed']}", file=output)
     print(f"初始保底：{payload['initial_pity']}", file=output)
+    print(f"初始主池累计抽数：{payload['initial_main_draws']}", file=output)
+    print(f"结束主池累计抽数：{payload['final_main_draws']}", file=output)
     print(f"主池平均六星数：{payload['mean_main_six_stars']:.6f}", file=output)
     print(f"赠送平均六星数：{payload['mean_bonus_six_stars']:.6f}", file=output)
     print(f"总平均六星数：{payload['mean_six_stars']:.6f}", file=output)
@@ -148,7 +152,7 @@ def _write_text_simulation(payload, output: TextIO, trace: bool) -> None:
     )
     if trace:
         print(
-            "抽次  来源  来源序号  保底位置  六星概率  结果  抽后主池保底",
+            "抽次  来源  来源序号  主池累计抽数  保底位置  六星概率  结果  抽后主池保底",
             file=output,
         )
         for record in payload["records"]:
@@ -157,6 +161,7 @@ def _write_text_simulation(payload, output: TextIO, trace: bool) -> None:
             source = "主池" if record["source"] == "main" else "赠送"
             print(
                 f"{record['draw_index']}  {source}  {record['source_index']}  "
+                f"{record['main_draws_completed']}  "
                 f"{record['pity_position']}  "
                 f"{record['probability']:.1%}  {result}  {after}",
                 file=output,

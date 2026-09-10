@@ -15,6 +15,7 @@ class DrawRecord:
     draw_index: int
     source: str
     source_index: int
+    main_draws_completed: int
     bonus_event: str | None
     pity_position: int
     probability: float
@@ -29,6 +30,8 @@ class SimulationResult:
     trials: int
     seed: int
     initial_pity: int
+    initial_main_draws: int
+    final_main_draws: int
     bonus_draws: int
     total_draws: int
     count_distribution: dict[int, int]
@@ -97,6 +100,7 @@ def simulate(
                         actual_draw_index,
                         "main",
                         main_draw_index,
+                        main_draws_completed + 1,
                         None,
                         pity_position,
                         probability,
@@ -118,6 +122,7 @@ def simulate(
                                 actual_draw_index,
                                 "bonus",
                                 bonus_draw_index,
+                                main_draws_completed,
                                 event.name,
                                 state.misses_since_six_star,
                                 event.six_star_probability,
@@ -142,6 +147,8 @@ def simulate(
         trials=trials,
         seed=actual_seed,
         initial_pity=initial_pity,
+        initial_main_draws=initial_pity,
+        final_main_draws=initial_pity + draws,
         bonus_draws=bonus_draws_per_trial,
         total_draws=draws + bonus_draws_per_trial,
         count_distribution=count_distribution,
