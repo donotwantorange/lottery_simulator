@@ -99,6 +99,18 @@ from lottery_simulator.engine import SimulationCancelled
         with self.assertRaises(SimulationCancelled):
             simulate(self.rule, 100, trials=2, seed=42, cancel_check=cancelled)
 
+    def test_cancel_is_checked_before_first_draw_probability(self):
+        class CountingRule(Rule1):
+            def __init__(self):
+                self.probability_calls = 0
+            def probability(self, state):
+                self.probability_calls += 1
+                return super().probability(state)
+        rule = CountingRule()
+        with self.assertRaises(SimulationCancelled):
+            simulate(rule, 10, seed=42, cancel_check=lambda: True)
+        self.assertEqual(rule.probability_calls, 1)
+
     def test_progress_interval_must_be_positive(self):
         with self.assertRaisesRegex(ValueError, "progress_interval"):
             simulate(self.rule, 1, progress_interval=0)
@@ -113,7 +125,7 @@ Append to `tests/test_rule_1.py`:
 
 - [ ] **Step 2: Verify RED**
 
-Run: `python3 -m unittest tests.test_engine.EngineTest.test_progress_hooks_do_not_change_seeded_result tests.test_engine.EngineTest.test_cancel_check_stops_without_returning_partial_result tests.test_rule_1.Rule1Test.test_rule_version_identifies_bonus_rule_behavior -v`
+Run: `python3 -m unittest tests.test_engine.EngineTest.test_progress_hooks_do_not_change_seeded_result tests.test_engine.EngineTest.test_cancel_check_stops_without_returning_partial_result tests.test_engine.EngineTest.test_cancel_is_checked_before_first_draw_probability tests.test_rule_1.Rule1Test.test_rule_version_identifies_bonus_rule_behavior -v`
 
 Expected: FAIL because the hook arguments, exception, and version do not exist.
 
@@ -157,7 +169,7 @@ streamlit[auth]==1.63.0
 
 Run: `python3 -m unittest tests.test_engine tests.test_rule_1 -v`
 
-Expected: all focused tests pass. Temporarily move the cancel check after `rng.random()`, rerun `test_progress_hooks_do_not_change_seeded_result`, and confirm it still passes; then add a cancel-at-first-check assertion that a tracking RNG path is never entered, observe it fail under the mutation, restore the pre-draw check, and observe it pass.
+Expected: all focused tests pass. Temporarily move the cancel check below the per-draw `rule.probability` call, rerun `test_cancel_is_checked_before_first_draw_probability`, and confirm it fails with two probability calls; restore the pre-draw check and confirm it passes with one initial validation call.
 
 - [ ] **Step 5: Commit**
 
@@ -206,6 +218,8 @@ class DashboardModelsTest(unittest.TestCase):
         self.assertEqual(payload["rule_version"], "1.1")
         self.assertEqual(payload["duration_seconds"], 0.25)
         self.assertEqual(json.loads(json.dumps(payload)), payload)
+        self.assertEqual(set(payload["count_distribution"]), {"0"})
+        self.assertIsInstance(payload["records"], list)
 
     def test_json_write_is_atomic_and_readable(self):
         with TemporaryDirectory() as directory:
@@ -227,9 +241,9 @@ Expected: `ModuleNotFoundError: No module named 'dashboard'`.
 
 - [ ] **Step 3: Implement exact data contracts**
 
-Use frozen slotted dataclasses. `RunParameters` fields are `rule_name`, `draws`, `trials`, `initial_pity`, `seed`, `trace`; limits are 10,000,000 main draws and 1,000,000 trials, and `draws * trials <= 100,000,000`. `JobState` fields are `job_id`, `status`, `parameters`, `completed_units`, `total_units`, `pid=None`, `started_at=None`, `updated_at=None`, `duration_seconds=None`, `error=None`, `result=None`, with statuses exactly `queued/running/completed/cancelled/failed`.
+Use frozen slotted dataclasses. `RunParameters` fields are `rule_name`, `draws`, `trials`, `initial_pity`, `seed`, `trace`; limits are 10,000,000 main draws and 1,000,000 trials, `draws * trials <= 100,000,000`, and traced runs have `draws <= 100,000`. `JobState` fields are `job_id`, `status`, `parameters`, `completed_units`, `total_units`, `pid=None`, `started_at=None`, `updated_at=None`, `duration_seconds=None`, `error=None`, `result_path=None`, `persistence_error=None`, with statuses exactly `queued/running/completed/cancelled/failed`. The state JSON never embeds the result payload.
 
-Implement `result_payload` from `dataclasses.asdict(result)` and add `rule_version` and `duration_seconds`. Implement `write_json` with `tempfile.NamedTemporaryFile(dir=path.parent, delete=False)`, `json.dump`, `flush`, `os.fsync`, and `os.replace`; unlink the temp file on exceptions. `read_json` returns a dict and rejects non-dict roots.
+Implement `result_payload` by canonicalizing `dataclasses.asdict(result)` through `json.loads(json.dumps(...))`, which turns distribution keys into strings and record tuples into lists; then add `rule_version` and `duration_seconds`. Implement `write_json` with `tempfile.NamedTemporaryFile(dir=path.parent, delete=False)`, `json.dump`, `flush`, `os.fsync`, and `os.replace`; unlink the temp file on exceptions. `read_json` returns a dict and rejects non-dict roots.
 
 - [ ] **Step 4: Verify and commit**
 
@@ -269,6 +283,8 @@ self.assertIsNone(repository.get_run(run_id))
 
 Add a non-trace run and assert `SELECT count(*) FROM draw_records` is zero. Install a test-only SQLite trigger that aborts the second draw-record insert; assert `save_run` raises and both table counts remain zero. Set `PRAGMA user_version=0`, initialize, and assert it becomes 1. Back up to a second path and query the copied run.
 
+Also save and reload a payload with `seed = 18_446_744_073_709_551_615` and assert exact equality; this proves seeds are not truncated to SQLite's signed integer range.
+
 - [ ] **Step 2: Verify RED**
 
 Run: `python3 -m unittest tests.test_repository -v`
@@ -277,7 +293,58 @@ Expected: import failure for `dashboard.repository`.
 
 - [ ] **Step 3: Implement schema version 1 and repository methods**
 
-Use `sqlite3.connect`, set `row_factory=sqlite3.Row`, execute `PRAGMA foreign_keys=ON`, and create the exact two tables and columns from the design spec. Store booleans as 0/1 and JSON with `sort_keys=True`. Wrap `save_run` and `delete_run` in `with connection:` transactions. Insert records only when `trace_enabled` is true. Use `ON DELETE CASCADE`. Validate `limit` in 1–100 and nonnegative offset. Filters accept only `rule_name`, `trace_enabled`, `created_from`, and `created_to`; build SQL from this fixed key map, never interpolate arbitrary columns. Use `Connection.backup` for `backup_to`.
+Use `sqlite3.connect`, set `row_factory=sqlite3.Row`, execute `PRAGMA foreign_keys=ON`, and create the exact two tables and columns from the design spec. Store seeds as decimal text and convert them back to Python integers on read; store booleans as 0/1 and JSON with `sort_keys=True`. Wrap `save_run` and `delete_run` in `with connection:` transactions. Insert records only when `trace_enabled` is true. Use `ON DELETE CASCADE`. Validate `limit` in 1–100 and nonnegative offset. Filters accept only `rule_name`, `trace_enabled`, `created_from`, and `created_to`; build SQL from this fixed key map, never interpolate arbitrary columns. Use `Connection.backup` for `backup_to`.
+
+Use this schema verbatim for version 1:
+
+```sql
+CREATE TABLE simulation_runs (
+    id TEXT PRIMARY KEY,
+    created_at TEXT NOT NULL,
+    rule_name TEXT NOT NULL,
+    rule_version TEXT NOT NULL,
+    main_draws INTEGER NOT NULL,
+    trials INTEGER NOT NULL,
+    initial_pity INTEGER NOT NULL,
+    seed TEXT NOT NULL,
+    trace_enabled INTEGER NOT NULL CHECK (trace_enabled IN (0, 1)),
+    bonus_draws INTEGER NOT NULL,
+    total_draws INTEGER NOT NULL,
+    initial_main_draws INTEGER NOT NULL,
+    final_main_draws INTEGER NOT NULL,
+    mean_main_six_stars REAL NOT NULL,
+    mean_bonus_six_stars REAL NOT NULL,
+    mean_six_stars REAL NOT NULL,
+    theoretical_expected_main_count REAL NOT NULL,
+    theoretical_expected_bonus_count REAL NOT NULL,
+    theoretical_expected_count REAL NOT NULL,
+    mean_count_error REAL NOT NULL,
+    mean_count_relative_error REAL,
+    at_least_one_rate REAL NOT NULL,
+    observed_mean_interval REAL,
+    theoretical_mean_interval REAL NOT NULL,
+    count_distribution_json TEXT NOT NULL,
+    duration_seconds REAL NOT NULL,
+    result_json TEXT NOT NULL,
+    schema_version INTEGER NOT NULL
+);
+CREATE INDEX simulation_runs_created_at ON simulation_runs(created_at DESC);
+CREATE INDEX simulation_runs_rule_name ON simulation_runs(rule_name);
+CREATE TABLE draw_records (
+    run_id TEXT NOT NULL REFERENCES simulation_runs(id) ON DELETE CASCADE,
+    draw_index INTEGER NOT NULL,
+    source TEXT NOT NULL,
+    source_index INTEGER NOT NULL,
+    bonus_event TEXT,
+    main_draws_completed INTEGER NOT NULL,
+    pity_position INTEGER NOT NULL,
+    probability REAL NOT NULL,
+    is_six_star INTEGER NOT NULL CHECK (is_six_star IN (0, 1)),
+    misses_after_draw INTEGER NOT NULL,
+    PRIMARY KEY (run_id, draw_index)
+);
+PRAGMA user_version = 1;
+```
 
 - [ ] **Step 4: Verify rollback causally**
 
@@ -315,7 +382,7 @@ Expected: import failure for `dashboard.jobs`.
 
 - [ ] **Step 3: Implement file-backed job lifecycle**
 
-Each job has `data/jobs/<uuid>/state.json`, `parameters.json`, and optional `cancel.request`. Use `fcntl.flock` on `data/jobs/active.lock` while checking/creating active state. Launch with:
+Each job has `data/jobs/<uuid>/state.json`, `parameters.json`, `result.json`, and optional `cancel.request`; `result.json` exists only after simulation completes and may contain Trace, while `state.json` remains small. Use `fcntl.flock` on `data/jobs/active.lock` while checking/creating active state. Launch with:
 
 ```python
 subprocess.Popen(
@@ -327,7 +394,7 @@ subprocess.Popen(
 )
 ```
 
-The worker selects the rule from the shared CLI registry, marks running with PID/time, calls `simulate` with callbacks, writes completed progress atomically, saves to SQLite, then writes completed result. On `SimulationCancelled`, write cancelled and do not save. On other exceptions, log the traceback server-side and write only `模拟任务失败` to public state. `cancel` creates `cancel.request`; the engine checks it before main draws. `reconcile_after_restart` changes every queued/running state to failed and sends SIGTERM only to a positive PID whose command line is verified as `dashboard.worker` on Linux; if verification is unavailable, do not signal.
+The worker selects the rule from the shared CLI registry, marks running with PID/time, calls `simulate` with callbacks, and atomically writes the complete payload to `result.json`. It then attempts one SQLite transaction. If persistence succeeds, write completed state with `result_path` and no persistence error. If persistence fails, still write completed state with `result_path` and public `persistence_error="历史保存失败"`, so the page can display and download the result. On `SimulationCancelled`, remove any partial result file, write cancelled, and do not save. On other simulation exceptions, log the traceback server-side and write only `模拟任务失败` to public state. `cancel` creates `cancel.request`; the engine checks it before main draws. `reconcile_after_restart` changes every queued/running state to failed and sends SIGTERM only to a positive PID whose command line is verified as `dashboard.worker` on Linux; if verification is unavailable, do not signal.
 
 - [ ] **Step 4: Verify real process behavior and commit**
 
@@ -405,7 +472,7 @@ Run `python3 -m unittest tests.test_charts -v`, observe import failure, then imp
 
 - [ ] **Step 3: Implement result renderer with a recording Streamlit test double**
 
-The renderer creates metric cards, three native charts, summary/source tabs, a trace dataframe only when enabled and records exist, an explicit no-trace message otherwise, and JSON download bytes encoded UTF-8. A recording test double must assert all visible labels and that no records are passed to a dataframe for a non-trace payload.
+The renderer creates metric cards, three native charts, summary/source tabs, a trace dataframe only when enabled and records exist, an explicit no-trace message otherwise, and JSON download bytes encoded UTF-8. Each chart is followed by an expandable numeric data table so its information is available without color or pointer hover. A recording test double must assert all visible labels, all three numeric tables, and that no records are passed to a dataframe for a non-trace payload.
 
 - [ ] **Step 4: Verify and commit**
 
@@ -506,6 +573,8 @@ git commit -m "feat: add simulation history comparison"
 - Create: `Caddyfile`
 - Create: `.dockerignore`
 - Create: `scripts/backup_db.py`
+- Create: `deploy/lottery-backup.service`
+- Create: `deploy/lottery-backup.timer`
 - Create: `docs/deployment.md`
 - Create: `tests/test_deployment_files.py`
 - Modify: `README.md`
@@ -517,7 +586,7 @@ git commit -m "feat: add simulation history comparison"
 
 - [ ] **Step 1: Add failing deployment contract tests**
 
-Parse Compose YAML text conservatively without a YAML dependency and assert: Caddy image is `caddy:2.11.4-alpine`; app has no `ports:`; Caddy alone maps 80/443; app environment fixes production/OIDC; data and Caddy certificate volumes exist. Assert Dockerfile starts with `python:3.12.14-slim-trixie`, creates a non-root user, runs Streamlit on `0.0.0.0:8501`, and has health check. Assert Caddyfile uses `${DOMAIN}` and `reverse_proxy app:8501`.
+Parse Compose YAML text conservatively without a YAML dependency and assert: Caddy image is `caddy:2.11.4-alpine`; app has no `ports:`; Caddy alone maps 80/443; app environment fixes production/OIDC; data, backup, and Caddy certificate volumes exist. Assert Dockerfile starts with `python:3.12.14-slim-trixie`, creates a non-root user, runs Streamlit on `0.0.0.0:8501`, and has health check. Assert Caddyfile uses `${DOMAIN}` and `reverse_proxy app:8501`. Assert the systemd timer uses `OnCalendar=daily` and the service runs `docker compose exec -T app python3 scripts/backup_db.py /app/data/lottery.sqlite3 /app/backups/lottery-$(date +%%F).sqlite3` from an explicitly configured project working directory.
 
 - [ ] **Step 2: Verify RED**
 
@@ -536,6 +605,33 @@ Dockerfile installs `requirements.txt`, copies project files, creates `/app/data
 }
 ```
 
+Use these exact backup units; deployment documentation instructs replacing `/opt/lottery-simulator` if the checkout lives elsewhere:
+
+```ini
+# deploy/lottery-backup.service
+[Unit]
+Description=Back up lottery simulator SQLite database
+Requires=docker.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/lottery-simulator
+ExecStart=/bin/sh -c '/usr/bin/docker compose exec -T app python3 scripts/backup_db.py /app/data/lottery.sqlite3 /app/backups/lottery-$(date +%%F).sqlite3'
+```
+
+```ini
+# deploy/lottery-backup.timer
+[Unit]
+Description=Daily lottery simulator backup
+
+[Timer]
+OnCalendar=daily
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+```
+
 - [ ] **Step 4: Implement and verify online backup**
 
 `scripts/backup_db.py SOURCE DESTINATION` resolves both paths, refuses identical paths, creates the destination parent, opens source read-only, uses `source.backup(destination)`, runs `PRAGMA integrity_check` on the destination, and exits nonzero unless result is `ok`. Test it against a temporary repository and query the backup.
@@ -543,6 +639,8 @@ Dockerfile installs `requirements.txt`, copies project files, creates `/app/data
 - [ ] **Step 5: Write operational documentation**
 
 Document exact `.env` variables (`DOMAIN`, `ALLOWED_EMAILS`), OIDC secrets file shape, callback `https://${DOMAIN}/oauth2callback`, DNS A/AAAA, ports 80/443, `docker compose up -d --build`, health/log commands, daily backup command, restore to a stopped app, image upgrade, and rollback to a named Git commit. State that HTTPS/OIDC must be tested from the public domain and cannot be proven by unit tests alone.
+
+Document installing and enabling `deploy/lottery-backup.timer`, replacing its `WorkingDirectory` with the actual deployment directory before installation. The backup volume is mounted at `/app/backups` so the timer's container command writes persistent files.
 
 - [ ] **Step 6: Run full verification**
 
@@ -557,6 +655,8 @@ docker build -t lottery-simulator-dashboard:test .
 
 Expected: all tests pass; local Streamlit health endpoint returns 200; Compose config shows no app host port; Docker build succeeds and image health command exists. Stop the local Streamlit process after the health check.
 
+Perform a browser acceptance pass at desktop width and a narrow viewport: tab through every control in visual order, confirm focus remains visible, confirm chart values are also available in tables, confirm no key metric disappears at narrow width, and confirm delete requires an explicit second action. Record each observation in the change record.
+
 If Docker is unavailable, record this as an unverified deployment item; do not claim image or Compose runtime success.
 
 - [ ] **Step 7: Update change record and commit**
@@ -564,6 +664,6 @@ If Docker is unavailable, record this as an unverified deployment item; do not c
 Replace the change record status with implemented, list actual test count and verified/unverified deployment checks, and append every implementation commit SHA.
 
 ```bash
-git add Dockerfile docker-compose.yml Caddyfile .dockerignore scripts/backup_db.py docs/deployment.md tests/test_deployment_files.py README.md docs/changes/2026-09-10-web-dashboard.md
+git add Dockerfile docker-compose.yml Caddyfile .dockerignore scripts/backup_db.py deploy docs/deployment.md tests/test_deployment_files.py README.md docs/changes/2026-09-10-web-dashboard.md
 git commit -m "feat: add secure Linux dashboard deployment"
 ```
