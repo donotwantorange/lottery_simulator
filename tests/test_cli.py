@@ -105,6 +105,17 @@ class CliTest(unittest.TestCase):
             [30] + [30] * 10 + [31],
         )
 
+    def test_batch_main_draw_counters_are_per_trial(self):
+        code, output = self.run_cli(
+            "simulate", "--draws", "2", "--trials", "3", "--seed", "42",
+            "--initial-pity", "29", "--format", "json",
+        )
+
+        self.assertEqual(code, 0)
+        payload = json.loads(output)
+        self.assertEqual(payload["initial_main_draws"], 29)
+        self.assertEqual(payload["final_main_draws"], 31)
+
     def test_analyze_text_includes_variance_and_quantiles(self):
         code, output = self.run_cli("analyze")
         self.assertEqual(code, 0)

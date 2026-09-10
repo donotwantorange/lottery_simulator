@@ -13,14 +13,20 @@ from lottery_simulator.rules.base import (
 @dataclass(frozen=True, slots=True)
 class DrawRecord:
     draw_index: int
-    source: str
-    source_index: int
-    main_draws_completed: int
-    bonus_event: str | None
     pity_position: int
     probability: float
     is_six_star: bool
     state_after: DrawState
+    source: str = "main"
+    source_index: int | None = None
+    bonus_event: str | None = None
+    main_draws_completed: int | None = None
+
+    def __post_init__(self) -> None:
+        if self.source_index is None:
+            object.__setattr__(self, "source_index", self.draw_index)
+        if self.main_draws_completed is None:
+            object.__setattr__(self, "main_draws_completed", self.pity_position)
 
 
 @dataclass(frozen=True, slots=True)
@@ -30,20 +36,32 @@ class SimulationResult:
     trials: int
     seed: int
     initial_pity: int
-    initial_main_draws: int
-    final_main_draws: int
-    bonus_draws: int
-    total_draws: int
     count_distribution: dict[int, int]
-    mean_main_six_stars: float
-    mean_bonus_six_stars: float
     mean_six_stars: float
     at_least_one_rate: float
     observed_mean_interval: float | None
-    theoretical_expected_main_count: float
-    theoretical_expected_bonus_count: float
     theoretical_expected_count: float
     records: tuple[DrawRecord, ...]
+    bonus_draws: int = 0
+    total_draws: int | None = None
+    mean_main_six_stars: float | None = None
+    mean_bonus_six_stars: float = 0.0
+    theoretical_expected_main_count: float | None = None
+    theoretical_expected_bonus_count: float = 0.0
+    initial_main_draws: int | None = None
+    final_main_draws: int | None = None
+
+    def __post_init__(self) -> None:
+        defaults = {
+            "total_draws": self.draws,
+            "mean_main_six_stars": self.mean_six_stars,
+            "theoretical_expected_main_count": self.theoretical_expected_count,
+            "initial_main_draws": self.initial_pity,
+            "final_main_draws": self.initial_pity + self.draws,
+        }
+        for name, value in defaults.items():
+            if getattr(self, name) is None:
+                object.__setattr__(self, name, value)
 
 
 def _positive_integer(value: int, name: str) -> None:
@@ -97,15 +115,14 @@ def simulate(
             if trials == 1:
                 records.append(
                     DrawRecord(
-                        actual_draw_index,
-                        "main",
-                        main_draw_index,
-                        main_draws_completed + 1,
-                        None,
-                        pity_position,
-                        probability,
-                        is_six_star,
-                        state_after,
+                        draw_index=actual_draw_index,
+                        pity_position=pity_position,
+                        probability=probability,
+                        is_six_star=is_six_star,
+                        state_after=state_after,
+                        source="main",
+                        source_index=main_draw_index,
+                        main_draws_completed=main_draws_completed + 1,
                     )
                 )
             state = state_after
@@ -119,15 +136,15 @@ def simulate(
                     if trials == 1:
                         records.append(
                             DrawRecord(
-                                actual_draw_index,
-                                "bonus",
-                                bonus_draw_index,
-                                main_draws_completed,
-                                event.name,
-                                state.misses_since_six_star,
-                                event.six_star_probability,
-                                bonus_is_six_star,
-                                state,
+                                draw_index=actual_draw_index,
+                                pity_position=state.misses_since_six_star,
+                                probability=event.six_star_probability,
+                                is_six_star=bonus_is_six_star,
+                                state_after=state,
+                                source="bonus",
+                                source_index=bonus_draw_index,
+                                bonus_event=event.name,
+                                main_draws_completed=main_draws_completed,
                             )
                         )
         if trial == 0:

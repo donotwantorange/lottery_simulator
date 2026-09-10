@@ -1,7 +1,7 @@
 import unittest
 
-from lottery_simulator.engine import simulate
-from lottery_simulator.rules.base import BonusEvent
+from lottery_simulator.engine import DrawRecord, SimulationResult, simulate
+from lottery_simulator.rules.base import BonusEvent, DrawState
 from lottery_simulator.rules.rule_1 import Rule1
 
 
@@ -132,6 +132,22 @@ class EngineTest(unittest.TestCase):
             with self.subTest(draws=draws, trials=trials):
                 with self.assertRaises(ValueError):
                     simulate(self.rule, draws=draws, trials=trials)
+
+    def test_existing_positional_result_constructors_remain_compatible(self):
+        record = DrawRecord(1, 1, 0.008, False, DrawState(1))
+        result = SimulationResult(
+            "rule1", 3, 1, 42, 2, {0: 1}, 0.0, 0.0, None, 0.024, (record,)
+        )
+
+        self.assertEqual(record.source, "main")
+        self.assertEqual(record.source_index, 1)
+        self.assertEqual(record.main_draws_completed, 1)
+        self.assertEqual(result.bonus_draws, 0)
+        self.assertEqual(result.total_draws, 3)
+        self.assertEqual(result.initial_main_draws, 2)
+        self.assertEqual(result.final_main_draws, 5)
+        self.assertEqual(result.mean_main_six_stars, 0.0)
+        self.assertEqual(result.theoretical_expected_main_count, 0.024)
 
 
 if __name__ == "__main__":
