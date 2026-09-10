@@ -31,3 +31,4 @@
 ## Git 提交
 
 - `5ec945e docs: design secure interactive web dashboard`
+- `f2d61e4 docs: clarify dashboard trace and auth boundaries`
