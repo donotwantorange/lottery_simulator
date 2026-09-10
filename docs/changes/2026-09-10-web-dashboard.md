@@ -12,6 +12,7 @@
 
 - Streamlit 单体应用，SQLite 保存历史；
 - Trace 开启时保存逐抽记录，否则只保存参数和汇总；
+- Trace 仅允许单轮模拟启用；
 - 左侧参数、右侧指标与图表的明亮数据工具布局；
 - 参数标签使用“假设主池已累计多少抽仍未出6星”；
 - 历史使用双运行卡片对比；
@@ -29,4 +30,4 @@
 
 ## Git 提交
 
-设计提交后补充。
+- `5ec945e docs: design secure interactive web dashboard`
