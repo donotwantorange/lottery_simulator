@@ -49,6 +49,39 @@ class CliTest(unittest.TestCase):
         )
         self.assertEqual(sum(payload["count_distribution"].values()), 2)
 
+    def test_bonus_statistics_are_separate_in_json(self):
+        code, output = self.run_cli(
+            "simulate", "--draws", "30", "--trials", "2", "--seed", "42",
+            "--format", "json",
+        )
+
+        self.assertEqual(code, 0)
+        payload = json.loads(output)
+        self.assertEqual(payload["main_draws"], 30)
+        self.assertEqual(payload["bonus_draws"], 10)
+        self.assertEqual(payload["total_draws"], 40)
+        self.assertIn("mean_main_six_stars", payload)
+        self.assertIn("mean_bonus_six_stars", payload)
+        self.assertAlmostEqual(payload["theoretical_expected_bonus_count"], 0.08)
+        self.assertAlmostEqual(
+            payload["theoretical_expected_count"],
+            payload["theoretical_expected_main_count"] + 0.08,
+        )
+
+    def test_trace_displays_main_and_bonus_sources_separately(self):
+        code, output = self.run_cli(
+            "simulate", "--draws", "30", "--trials", "1", "--seed", "42",
+            "--trace",
+        )
+
+        self.assertEqual(code, 0)
+        self.assertIn("主池抽数：30", output)
+        self.assertIn("赠送抽数：10", output)
+        self.assertIn("总抽数：40", output)
+        self.assertIn("来源  来源序号", output)
+        self.assertIn("赠送  1", output)
+        self.assertIn("赠送  10", output)
+
     def test_analyze_text_includes_variance_and_quantiles(self):
         code, output = self.run_cli("analyze")
         self.assertEqual(code, 0)

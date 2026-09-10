@@ -1,9 +1,11 @@
 from lottery_simulator.rules.base import DrawState
+from lottery_simulator.rules.first_thirty_bonus import FirstThirtyBonusRule
 
 
 class Rule1:
     name = "rule1"
     max_pity = 80
+    subrules = (FirstThirtyBonusRule(),)
 
     def _validate(self, state: DrawState) -> None:
         misses = state.misses_since_six_star

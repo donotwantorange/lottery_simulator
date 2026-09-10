@@ -1,8 +1,15 @@
-from lottery_simulator.rules.base import DrawState, LotteryRule
+from lottery_simulator.rules.base import (
+    BonusEvent,
+    DrawState,
+    LotteryRule,
+    LotterySubRule,
+)
+from lottery_simulator.rules.first_thirty_bonus import FirstThirtyBonusRule
 from lottery_simulator.rules.rule_1 import Rule1
 from lottery_simulator.analysis import (
     DistributionStats,
     distribution_stats,
+    expected_bonus_six_stars,
     expected_six_stars,
     waiting_time_distribution,
 )
@@ -10,12 +17,16 @@ from lottery_simulator.engine import DrawRecord, SimulationResult, simulate
 
 __all__ = [
     "DistributionStats",
+    "BonusEvent",
     "DrawRecord",
     "DrawState",
     "LotteryRule",
+    "LotterySubRule",
+    "FirstThirtyBonusRule",
     "Rule1",
     "SimulationResult",
     "distribution_stats",
+    "expected_bonus_six_stars",
     "expected_six_stars",
     "simulate",
     "waiting_time_distribution",

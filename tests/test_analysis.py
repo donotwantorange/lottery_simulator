@@ -4,6 +4,7 @@ import unittest
 
 from lottery_simulator.analysis import (
     distribution_stats,
+    expected_bonus_six_stars,
     expected_six_stars,
     waiting_time_distribution,
 )
@@ -68,6 +69,20 @@ class AnalysisTest(unittest.TestCase):
     def test_eighty_draw_expectation_accounts_for_reset(self):
         value = expected_six_stars(self.rule, 80)
         self.assertAlmostEqual(value, 1.2628497757227852)
+
+    def test_bonus_expectation_only_applies_when_crossing_main_draw_thirty(self):
+        cases = (
+            (29, 0, 0.0),
+            (30, 0, 0.08),
+            (1, 29, 0.08),
+            (1, 30, 0.0),
+        )
+        for draws, initial_pity, expected in cases:
+            with self.subTest(draws=draws, initial_pity=initial_pity):
+                self.assertAlmostEqual(
+                    expected_bonus_six_stars(self.rule, draws, initial_pity),
+                    expected,
+                )
 
     def test_dp_matches_independent_exhaustive_outcomes(self):
         for initial_pity in (0, 63, 64, 78, 79):

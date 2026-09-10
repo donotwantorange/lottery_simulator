@@ -1,7 +1,11 @@
 from dataclasses import dataclass
 from math import sqrt
 
-from lottery_simulator.rules.base import DrawState, LotteryRule
+from lottery_simulator.rules.base import (
+    DrawState,
+    LotteryRule,
+    bonus_events_after_main_draw,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -100,3 +104,18 @@ def expected_six_stars(
                 )
         states = next_states
     return expected
+
+
+def expected_bonus_six_stars(
+    rule: LotteryRule, draws: int, initial_pity: int = 0
+) -> float:
+    if isinstance(draws, bool) or not isinstance(draws, int) or draws <= 0:
+        raise ValueError("draws must be a positive integer")
+    _state(initial_pity, rule)
+    return sum(
+        event.draws * event.six_star_probability
+        for completed_main_draws in range(
+            initial_pity + 1, initial_pity + draws + 1
+        )
+        for event in bonus_events_after_main_draw(rule, completed_main_draws)
+    )

@@ -64,14 +64,21 @@ def _simulation_payload(result: SimulationResult, rule, include_records: bool):
     payload = {
         "rule": result.rule_name,
         "draws": result.draws,
+        "main_draws": result.draws,
+        "bonus_draws": result.bonus_draws,
+        "total_draws": result.total_draws,
         "trials": result.trials,
         "seed": result.seed,
         "initial_pity": result.initial_pity,
         "count_distribution": result.count_distribution,
+        "mean_main_six_stars": result.mean_main_six_stars,
+        "mean_bonus_six_stars": result.mean_bonus_six_stars,
         "mean_six_stars": result.mean_six_stars,
         "at_least_one_rate": result.at_least_one_rate,
         "observed_mean_interval": result.observed_mean_interval,
         "theoretical_mean_interval": theoretical_mean_interval,
+        "theoretical_expected_main_count": result.theoretical_expected_main_count,
+        "theoretical_expected_bonus_count": result.theoretical_expected_bonus_count,
         "theoretical_expected_count": result.theoretical_expected_count,
         "mean_count_error": mean_count_error,
         "mean_count_relative_error": (
@@ -106,13 +113,25 @@ def _write_text_analysis(payload, output: TextIO) -> None:
 
 def _write_text_simulation(payload, output: TextIO, trace: bool) -> None:
     print(f"规则：{payload['rule']}", file=output)
-    print(f"每轮抽数：{payload['draws']}", file=output)
+    print(f"主池抽数：{payload['main_draws']}", file=output)
+    print(f"赠送抽数：{payload['bonus_draws']}", file=output)
+    print(f"总抽数：{payload['total_draws']}", file=output)
     print(f"实验轮数：{payload['trials']}", file=output)
     print(f"随机种子：{payload['seed']}", file=output)
     print(f"初始保底：{payload['initial_pity']}", file=output)
-    print(f"平均六星数：{payload['mean_six_stars']:.6f}", file=output)
+    print(f"主池平均六星数：{payload['mean_main_six_stars']:.6f}", file=output)
+    print(f"赠送平均六星数：{payload['mean_bonus_six_stars']:.6f}", file=output)
+    print(f"总平均六星数：{payload['mean_six_stars']:.6f}", file=output)
     print(f"至少一个六星：{payload['at_least_one_rate']:.4%}", file=output)
-    print(f"理论六星期望：{payload['theoretical_expected_count']:.6f}", file=output)
+    print(
+        f"主池理论六星期望：{payload['theoretical_expected_main_count']:.6f}",
+        file=output,
+    )
+    print(
+        f"赠送理论六星期望：{payload['theoretical_expected_bonus_count']:.6f}",
+        file=output,
+    )
+    print(f"总理论六星期望：{payload['theoretical_expected_count']:.6f}", file=output)
     print(f"期望误差：{payload['mean_count_error']:+.6f}", file=output)
     relative_error = payload["mean_count_relative_error"]
     relative_error_text = "不可用" if relative_error is None else f"{relative_error:+.4%}"
@@ -128,12 +147,17 @@ def _write_text_simulation(payload, output: TextIO, trace: bool) -> None:
         file=output,
     )
     if trace:
-        print("抽次  保底位置  六星概率  结果  抽后保底", file=output)
+        print(
+            "抽次  来源  来源序号  保底位置  六星概率  结果  抽后主池保底",
+            file=output,
+        )
         for record in payload["records"]:
             result = "六星" if record["is_six_star"] else "未出"
             after = record["state_after"]["misses_since_six_star"]
+            source = "主池" if record["source"] == "main" else "赠送"
             print(
-                f"{record['draw_index']}  {record['pity_position']}  "
+                f"{record['draw_index']}  {source}  {record['source_index']}  "
+                f"{record['pity_position']}  "
                 f"{record['probability']:.1%}  {result}  {after}",
                 file=output,
             )
