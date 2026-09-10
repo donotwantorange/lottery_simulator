@@ -25,6 +25,8 @@ class BonusEvent:
 
 
 class LotterySubRule(Protocol):
+    """无状态子规则；相同累计主抽数必须始终返回相同事件。"""
+
     def events_after_main_draw(
         self, completed_main_draws: int
     ) -> tuple[BonusEvent, ...]: ...
