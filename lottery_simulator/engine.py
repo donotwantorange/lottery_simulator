@@ -13,18 +13,16 @@ from lottery_simulator.rules.base import (
 @dataclass(frozen=True, slots=True)
 class DrawRecord:
     draw_index: int
+    source: str
+    source_index: int
+    bonus_event: str | None
     pity_position: int
     probability: float
     is_six_star: bool
     state_after: DrawState
-    source: str = "main"
-    source_index: int | None = None
-    bonus_event: str | None = None
     main_draws_completed: int | None = None
 
     def __post_init__(self) -> None:
-        if self.source_index is None:
-            object.__setattr__(self, "source_index", self.draw_index)
         if self.main_draws_completed is None:
             object.__setattr__(self, "main_draws_completed", self.pity_position)
 
@@ -36,26 +34,23 @@ class SimulationResult:
     trials: int
     seed: int
     initial_pity: int
+    bonus_draws: int
+    total_draws: int
     count_distribution: dict[int, int]
+    mean_main_six_stars: float
+    mean_bonus_six_stars: float
     mean_six_stars: float
     at_least_one_rate: float
     observed_mean_interval: float | None
+    theoretical_expected_main_count: float
+    theoretical_expected_bonus_count: float
     theoretical_expected_count: float
     records: tuple[DrawRecord, ...]
-    bonus_draws: int = 0
-    total_draws: int | None = None
-    mean_main_six_stars: float | None = None
-    mean_bonus_six_stars: float = 0.0
-    theoretical_expected_main_count: float | None = None
-    theoretical_expected_bonus_count: float = 0.0
     initial_main_draws: int | None = None
     final_main_draws: int | None = None
 
     def __post_init__(self) -> None:
         defaults = {
-            "total_draws": self.draws,
-            "mean_main_six_stars": self.mean_six_stars,
-            "theoretical_expected_main_count": self.theoretical_expected_count,
             "initial_main_draws": self.initial_pity,
             "final_main_draws": self.initial_pity + self.draws,
         }
@@ -122,6 +117,7 @@ def simulate(
                         state_after=state_after,
                         source="main",
                         source_index=main_draw_index,
+                        bonus_event=None,
                         main_draws_completed=main_draws_completed + 1,
                     )
                 )

@@ -134,16 +134,23 @@ class EngineTest(unittest.TestCase):
                     simulate(self.rule, draws=draws, trials=trials)
 
     def test_existing_positional_result_constructors_remain_compatible(self):
-        record = DrawRecord(1, 1, 0.008, False, DrawState(1))
+        record = DrawRecord(
+            1, "main", 1, None, 1, 0.008, False, DrawState(1)
+        )
         result = SimulationResult(
-            "rule1", 3, 1, 42, 2, {0: 1}, 0.0, 0.0, None, 0.024, (record,)
+            "rule1", 3, 1, 42, 2, 0, 3, {0: 1}, 0.0, 0.0, 0.0,
+            0.0, None, 0.024, 0.0, 0.024, (record,)
         )
 
         self.assertEqual(record.source, "main")
         self.assertEqual(record.source_index, 1)
         self.assertEqual(record.main_draws_completed, 1)
+        self.assertEqual(record.pity_position, 1)
+        self.assertEqual(record.probability, 0.008)
+        self.assertEqual(record.state_after, DrawState(1))
         self.assertEqual(result.bonus_draws, 0)
         self.assertEqual(result.total_draws, 3)
+        self.assertEqual(result.count_distribution, {0: 1})
         self.assertEqual(result.initial_main_draws, 2)
         self.assertEqual(result.final_main_draws, 5)
         self.assertEqual(result.mean_main_six_stars, 0.0)
