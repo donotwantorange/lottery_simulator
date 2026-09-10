@@ -4,6 +4,7 @@ from lottery_simulator.rules.first_thirty_bonus import FirstThirtyBonusRule
 
 class Rule1:
     name = "rule1"
+    version = "1.1"
     max_pity = 80
     subrules = (FirstThirtyBonusRule(),)
 

@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from collections.abc import Callable
 import random
 import secrets
 
@@ -59,6 +60,14 @@ class SimulationResult:
                 object.__setattr__(self, name, value)
 
 
+ProgressCallback = Callable[[int, int], None]
+CancelCheck = Callable[[], bool]
+
+
+class SimulationCancelled(RuntimeError):
+    pass
+
+
 def _positive_integer(value: int, name: str) -> None:
     if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
         raise ValueError(f"{name} must be a positive integer")
@@ -70,11 +79,19 @@ def simulate(
     trials: int = 1,
     seed: int | None = None,
     initial_pity: int = 0,
+    progress_callback: ProgressCallback | None = None,
+    cancel_check: CancelCheck | None = None,
+    progress_interval: int = 1000,
 ) -> SimulationResult:
     _positive_integer(draws, "draws")
     _positive_integer(trials, "trials")
+    _positive_integer(progress_interval, "progress_interval")
     initial_state = DrawState(initial_pity)
     rule.probability(initial_state)
+    total_units = draws * trials
+    completed_units = 0
+    if progress_callback is not None:
+        progress_callback(completed_units, total_units)
     actual_seed = secrets.randbits(64) if seed is None else seed
     if isinstance(actual_seed, bool) or not isinstance(actual_seed, int):
         raise ValueError("seed must be an integer")
@@ -96,6 +113,8 @@ def simulate(
         trial_bonus_draws = 0
         actual_draw_index = 0
         for main_draw_index in range(1, draws + 1):
+            if cancel_check is not None and cancel_check():
+                raise SimulationCancelled("simulation cancelled")
             actual_draw_index += 1
             probability = rule.probability(state)
             if not 0.0 <= probability <= 1.0:
@@ -123,6 +142,12 @@ def simulate(
                 )
             state = state_after
             main_draws_completed += 1
+            completed_units += 1
+            if (
+                progress_callback is not None
+                and (completed_units % progress_interval == 0 or completed_units == total_units)
+            ):
+                progress_callback(completed_units, total_units)
             for event in bonus_events_after_main_draw(rule, main_draws_completed):
                 for bonus_draw_index in range(1, event.draws + 1):
                     actual_draw_index += 1

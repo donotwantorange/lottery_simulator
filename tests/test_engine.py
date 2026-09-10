@@ -1,6 +1,11 @@
 import unittest
 
-from lottery_simulator.engine import DrawRecord, SimulationResult, simulate
+from lottery_simulator.engine import (
+    DrawRecord,
+    SimulationCancelled,
+    SimulationResult,
+    simulate,
+)
 from lottery_simulator.rules.base import BonusEvent, DrawState
 from lottery_simulator.rules.rule_1 import Rule1
 
@@ -155,6 +160,44 @@ class EngineTest(unittest.TestCase):
         self.assertEqual(result.final_main_draws, 5)
         self.assertEqual(result.mean_main_six_stars, 0.0)
         self.assertEqual(result.theoretical_expected_main_count, 0.024)
+
+    def test_progress_hooks_do_not_change_seeded_result(self):
+        updates = []
+        baseline = simulate(self.rule, 20, trials=3, seed=42)
+        instrumented = simulate(
+            self.rule, 20, trials=3, seed=42,
+            progress_callback=lambda done, total: updates.append((done, total)),
+            cancel_check=lambda: False,
+            progress_interval=7,
+        )
+        self.assertEqual(instrumented, baseline)
+        self.assertEqual(updates[0], (0, 60))
+        self.assertEqual(updates[-1], (60, 60))
+
+    def test_cancel_check_stops_without_returning_partial_result(self):
+        checks = 0
+        def cancelled():
+            nonlocal checks
+            checks += 1
+            return checks >= 4
+        with self.assertRaises(SimulationCancelled):
+            simulate(self.rule, 100, trials=2, seed=42, cancel_check=cancelled)
+
+    def test_cancel_is_checked_before_first_draw_probability(self):
+        class CountingRule(Rule1):
+            def __init__(self):
+                self.probability_calls = 0
+            def probability(self, state):
+                self.probability_calls += 1
+                return super().probability(state)
+        rule = CountingRule()
+        with self.assertRaises(SimulationCancelled):
+            simulate(rule, 10, seed=42, cancel_check=lambda: True)
+        self.assertEqual(rule.probability_calls, 1)
+
+    def test_progress_interval_must_be_positive(self):
+        with self.assertRaisesRegex(ValueError, "progress_interval"):
+            simulate(self.rule, 1, progress_interval=0)
 
 
 if __name__ == "__main__":

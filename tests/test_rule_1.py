@@ -36,6 +36,9 @@ class Rule1Test(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.rule.advance(DrawState(79), False)
 
+    def test_rule_version_identifies_bonus_rule_behavior(self):
+        self.assertEqual(self.rule.version, "1.1")
+
 
 if __name__ == "__main__":
     unittest.main()
