@@ -53,3 +53,24 @@
 ### 任务提交
 
 - ✅ 实现提交：`7984dcf715b5934f24a466a62aa4a51c88572f54 feat: add fail-closed dashboard authentication`；本条在后续纯文档提交补记，避免同一提交自引用。
+
+## 任务 6：图表数据适配与结果展示
+
+- ✅ 新增 `dashboard/charts.py`：概率曲线调用现有 `waiting_time_distribution`、`distribution_stats` 与 `rule.probability()`；数量分布按整数键排序；来源对比只映射主池、赠送、总计三组模拟值与理论值。仪表盘未复制概率规则常量。
+- ✅ 新增 `dashboard/views/simulation.py`：展示 15 个指标卡、三张 Streamlit 原生图表、汇总/主池与赠送拆分标签页、Trace 区与 UTF-8 JSON 下载；每张图表后紧邻可展开的数字数据表。
+- ✅ Trace dataframe 仅在 `trace_enabled=True` 且记录非空时渲染；其他情况明确显示“本次运行未保存逐抽记录”。即使 payload 意外仍含记录，关闭 Trace 也不会把记录传给 dataframe。
+- ✅ 新增 `tests/test_charts.py` 与 `tests/test_simulation_view.py`：字面量验证 Rule1 第 65/80 抽概率、数值键排序、来源映射；recording Streamlit double 只替换展示边界，payload 来自真实模拟器和 `result_payload()`，并验证全部组件标签、三张数字表、Trace 门禁及 UTF-8 下载字节。
+
+### 验证
+
+- ✅ RED 1：`.venv/bin/python -m unittest tests.test_charts -v`，预期并实际得到 `ModuleNotFoundError: No module named 'dashboard.charts'`，退出码 1。
+- ✅ GREEN 1：同一 focused 命令，3 tests / OK。
+- ✅ RED 2：`.venv/bin/python -m unittest tests.test_simulation_view -v`，预期并实际得到 `ModuleNotFoundError: No module named 'dashboard.views.simulation'`，退出码 1。
+- ✅ GREEN：`.venv/bin/python -m unittest tests.test_charts tests.test_simulation_view -v`，5 tests / OK；全量 `.venv/bin/python -m unittest discover -v`，98 tests / OK。
+- ✅ 因果验证：用 apply_patch 临时把 `if trace_enabled and records` 改为 `if records`；非 Trace 目标测试按预期失败，得到 `AssertionError: 4 != 3`。恢复门禁后 focused 5 tests / OK。
+- ✅ `git diff --check` 通过。
+- ⚠️ 这些测试能确认适配数据、展示调用顺序、Trace 数据边界与下载编码，不能替代真实浏览器的响应式布局、颜色对比和辅助技术人工验收。全量测试的 `--trace requires --trials 1` stderr 来自既有负例，测试最终通过。
+
+### 任务提交
+
+- 实现提交：待提交后记录 SHA（避免同一提交自引用）。
