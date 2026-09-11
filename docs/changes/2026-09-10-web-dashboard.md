@@ -52,4 +52,4 @@
 
 ### 任务提交
 
-- 实现提交：待提交后记录 SHA（避免同一提交自引用）。
+- ✅ 实现提交：`7984dcf715b5934f24a466a62aa4a51c88572f54 feat: add fail-closed dashboard authentication`；本条在后续纯文档提交补记，避免同一提交自引用。
