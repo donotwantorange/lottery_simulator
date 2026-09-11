@@ -2,7 +2,7 @@
 
 ## 状态
 
-设计已确认，待实施计划与实现。
+设计已确认；模拟页面、后台任务、认证与结果展示已实现，历史页面与部署集成继续按计划推进。
 
 ## 目标
 
@@ -74,3 +74,22 @@
 ### 任务提交
 
 - ✅ 实现提交：`b12109553e404b388e405f73246618aac508ffdf feat: add dashboard result visualizations`；本条在后续纯文档提交补记，避免同一提交自引用。
+
+## 任务 7：模拟页面、实时进度与 AppTest
+
+- ✅ 新增可运行的 `dashboard/app.py`：宽屏“抽奖概率实验室”、侧栏参数与主区状态/结果；可见标签精确为“假设主池已累计多少抽仍未出6星”。Trace 在多轮时禁用并解释原因，提交时再次限制为单轮；无效工作量和种子保留控件输入，不创建任务。
+- ✅ 完整页面和轮询 fragment 均先执行认证门禁，再访问任务/数据库；沿用既有环境变量。生产环境明确拒绝 `DASHBOARD_SYNC_JOBS=1`，未登录不渲染业务控件、不创建数据文件。
+- ✅ 活跃任务每 0.5 秒轮询进度和用时、禁用开始按钮；轮询发现终态时完整 rerun，恢复开始按钮并展示结果。停止按钮只请求 `JobManager.cancel()`，不保存历史。
+- ✅ 开发同步适配器复用 JobManager 文件协议、锁、读取/取消方法和真实 worker；worker 独占完成后的自动保存职责。完成展示 15 个指标和 JSON 下载；取消/失败不保存结果或历史；历史保存失败保留完成结果、下载与安全提示。业务 Session State 仅新增 `current_job_id`，不保存 payload 或 manager。
+- ✅ 修复任务 6 展示回归：图表和 dataframe 改用 Streamlit 1.63 支持的 `width="stretch"`；“绝对误差/相对误差”展示绝对值，原始 payload、SQLite 和下载仍保留带符号误差。
+- ✅ 修复脚本入口的包解析：Streamlit console 只加入脚本目录时，入口补入项目根，不依赖启动目录或外部 `PYTHONPATH`。
+
+### 验证
+
+- ✅ 首轮 RED：页面缺失、负误差展示和真实渲染的 7 条弃用警告，三项均按预期失败；修复后页面/展示 focused 5 tests / OK。
+- ✅ 生命周期 RED：完成、失败、保存故障、活跃禁用、停止、批量 Trace、生产同步拒绝共七项预期失败；最小接入后 AppTest 11 tests / OK。
+- ✅ 隔离入口 RED：在临时工作目录以 `.venv/bin/python -I` 执行真实 AppTest，确认 `ModuleNotFoundError: No module named 'dashboard'`；补入项目根后通过。
+- ✅ 最终 AppTest 14 项；focused `.venv/bin/python -m unittest tests.test_dashboard_app tests.test_simulation_view tests.test_charts tests.test_auth -v`，34 tests / OK；全量 `.venv/bin/python -m unittest discover -v`，112 tests / OK。
+- ✅ 因果验证三组：撤回误差绝对值后出现 `-0.096000 != 0.096000`；将一张 dataframe 改回旧宽度参数后弃用告警测试失败；将 fragment 终态 rerun 改为直接返回后 `0 != 15`（未显示指标）。每组均单独恢复并重跑通过。
+- ✅ AppTest 使用真实临时 SQLite、真实模拟和 worker。进度/取消用显式状态文件和同步 worker 推进；终态转换在读文件边界确定性执行 worker，不靠 sleep 或后台进程竞争制造 UI 时序。隔离启动检查是同步执行的独立 AppTest 进程，不是后台模拟任务。
+- ⚠️ 测试验证页面组件、状态流、数据保存边界和渲染 API；不能证明浏览器真实 0.5 秒计时、响应式视觉布局、OIDC 提供商回调或公网部署。AppTest 的 bare-mode ScriptRunContext 警告、故意触发的 worker 失败日志以及既有 CLI 负例 stderr 均非 Streamlit 页面异常；全部 AppTest 最终零异常。
