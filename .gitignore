@@ -3,3 +3,7 @@
 __pycache__/
 *.py[cod]
 .venv/
+.streamlit/secrets.toml
+data/
+backups/
+.env
