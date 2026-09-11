@@ -7,6 +7,8 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, ClassVar
 
+from lottery_simulator.analysis import distribution_stats
+
 
 @dataclass(frozen=True, slots=True)
 class RunParameters:
@@ -82,9 +84,18 @@ class JobState:
         return asdict(self)
 
 
-def result_payload(result: Any, rule_version: str, duration_seconds: float) -> dict[str, Any]:
+def result_payload(result: Any, rule: Any, duration_seconds: float) -> dict[str, Any]:
     payload = json.loads(json.dumps(asdict(result)))
-    payload["rule_version"] = rule_version
+    mean_count_error = result.mean_six_stars - result.theoretical_expected_count
+    payload["rule_version"] = rule.version
+    payload["main_draws"] = result.draws
+    payload["theoretical_mean_interval"] = distribution_stats(rule).mean
+    payload["mean_count_error"] = mean_count_error
+    payload["mean_count_relative_error"] = (
+        mean_count_error / result.theoretical_expected_count
+        if result.theoretical_expected_count != 0.0
+        else None
+    )
     payload["duration_seconds"] = duration_seconds
     return payload
 
