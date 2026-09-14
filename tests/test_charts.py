@@ -14,7 +14,9 @@ class ChartDataTest(unittest.TestCase):
 
         self.assertEqual(len(rows), 80)
         self.assertEqual(rows[64]["抽次"], 65)
-        self.assertAlmostEqual(rows[64]["条件六星概率"], 0.058)
+        self.assertAlmostEqual(rows[64]["条件六星概率"], 0.008)
+        self.assertEqual(rows[65]["抽次"], 66)
+        self.assertAlmostEqual(rows[65]["条件六星概率"], 0.058)
         self.assertEqual(rows[79]["抽次"], 80)
         self.assertEqual(rows[79]["条件六星概率"], 1.0)
         self.assertGreater(rows[79]["首次六星累计概率"], 0.999999999999)

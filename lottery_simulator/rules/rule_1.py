@@ -4,7 +4,7 @@ from lottery_simulator.rules.first_thirty_bonus import FirstThirtyBonusRule
 
 class Rule1:
     name = "rule1"
-    version = "1.1"
+    version = "1.2"
     max_pity = 80
     subrules = (FirstThirtyBonusRule(),)
 
@@ -20,8 +20,8 @@ class Rule1:
         pull = state.misses_since_six_star + 1
         if pull == self.max_pity:
             return 1.0
-        if pull >= 65:
-            return 0.008 + 0.05 * (pull - 64)
+        if pull >= 66:
+            return 0.008 + 0.05 * (pull - 65)
         return 0.008
 
     def advance(self, state: DrawState, is_six_star: bool) -> DrawState:

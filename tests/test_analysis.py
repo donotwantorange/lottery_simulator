@@ -32,7 +32,7 @@ def enumerate_rule_1_expectation(draws, initial_pity):
             if misses == 79:
                 probability = Fraction(1)
             else:
-                probability = Fraction(8, 1000) + max(0, misses - 63) * Fraction(5, 100)
+                probability = Fraction(8, 1000) + max(0, misses - 64) * Fraction(5, 100)
             weight *= probability if success else 1 - probability
             if not weight:
                 break
@@ -49,26 +49,29 @@ class AnalysisTest(unittest.TestCase):
         probabilities = waiting_time_distribution(self.rule)
         self.assertEqual(len(probabilities), 80)
         self.assertAlmostEqual(sum(probabilities), 1.0, places=12)
-        self.assertAlmostEqual(probabilities[-1], 0.00007302369959649657)
+        self.assertAlmostEqual(probabilities[-1], 0.00029933681818068074)
 
     def test_rule_1_reference_statistics(self):
         stats = distribution_stats(self.rule)
-        self.assertAlmostEqual(stats.mean, 53.32595362219928)
-        self.assertAlmostEqual(stats.standard_deviation, 22.631871302420425)
+        self.assertAlmostEqual(stats.mean, 53.89927355371174)
+        self.assertAlmostEqual(stats.standard_deviation, 23.036219232912913)
         self.assertEqual(stats.median, 67)
-        self.assertEqual(stats.mode, 68)
-        self.assertEqual(stats.quantiles, {0.90: 72, 0.95: 73, 0.99: 75})
-        self.assertAlmostEqual(stats.long_run_rate, 0.018752594788735404)
+        self.assertEqual(stats.mode, 69)
+        self.assertEqual(stats.quantiles, {0.90: 73, 0.95: 74, 0.99: 76})
+        self.assertAlmostEqual(stats.long_run_rate, 0.01855312574859621)
 
     def test_one_draw_expectation_is_its_probability(self):
         self.assertAlmostEqual(expected_six_stars(self.rule, 1), 0.008)
         self.assertAlmostEqual(
-            expected_six_stars(self.rule, 1, initial_pity=64), 0.058
+            expected_six_stars(self.rule, 1, initial_pity=64), 0.008
+        )
+        self.assertAlmostEqual(
+            expected_six_stars(self.rule, 1, initial_pity=65), 0.058
         )
 
     def test_eighty_draw_expectation_accounts_for_reset(self):
         value = expected_six_stars(self.rule, 80)
-        self.assertAlmostEqual(value, 1.2628497757227852)
+        self.assertAlmostEqual(value, 1.2533176900565965)
 
     def test_bonus_expectation_only_applies_when_crossing_main_draw_thirty(self):
         cases = (

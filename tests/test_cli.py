@@ -26,10 +26,11 @@ class CliTest(unittest.TestCase):
         code, output = self.run_cli("analyze", "--format", "json")
         self.assertEqual(code, 0)
         payload = json.loads(output)
-        self.assertAlmostEqual(payload["mean"], 53.32595362219928)
+        self.assertAlmostEqual(payload["mean"], 53.89927355371174)
         self.assertEqual(payload["hard_pity"], 80)
         self.assertEqual(len(payload["probability_table"]), 80)
-        self.assertEqual(payload["probability_table"][64]["conditional_probability"], 0.058)
+        self.assertEqual(payload["probability_table"][64]["conditional_probability"], 0.008)
+        self.assertEqual(payload["probability_table"][65]["conditional_probability"], 0.058)
 
     def test_simulate_json_contains_reproduction_parameters(self):
         code, output = self.run_cli(
@@ -119,8 +120,8 @@ class CliTest(unittest.TestCase):
     def test_analyze_text_includes_variance_and_quantiles(self):
         code, output = self.run_cli("analyze")
         self.assertEqual(code, 0)
-        self.assertIn("方差：512.20160", output)
-        for level, draw in ((90, 72), (95, 73), (99, 75)):
+        self.assertIn("方差：530.66740", output)
+        for level, draw in ((90, 73), (95, 74), (99, 76)):
             with self.subTest(level=level):
                 self.assertIn(f"{level}% 分位数：第 {draw} 抽", output)
 

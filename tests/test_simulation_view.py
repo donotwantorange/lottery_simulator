@@ -119,7 +119,11 @@ class SimulationResultViewTest(unittest.TestCase):
         self.assertEqual(len(probability_table), 80)
         self.assertEqual(
             (probability_table[64]["抽次"], probability_table[64]["条件六星概率"]),
-            (65, 0.058),
+            (65, 0.008),
+        )
+        self.assertEqual(
+            (probability_table[65]["抽次"], probability_table[65]["条件六星概率"]),
+            (66, 0.058),
         )
         self.assertEqual(
             count_table, [{"六星数量": 0, "实验次数": 1, "占比": 1.0}]

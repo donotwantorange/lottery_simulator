@@ -9,7 +9,14 @@ class Rule1Test(unittest.TestCase):
         self.rule = Rule1()
 
     def test_probability_boundaries(self):
-        expected = {0: 0.008, 63: 0.008, 64: 0.058, 78: 0.758, 79: 1.0}
+        expected = {
+            0: 0.008,
+            63: 0.008,
+            64: 0.008,
+            65: 0.058,
+            78: 0.708,
+            79: 1.0,
+        }
         for misses, probability in expected.items():
             with self.subTest(misses=misses):
                 self.assertAlmostEqual(
@@ -36,8 +43,8 @@ class Rule1Test(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.rule.advance(DrawState(79), False)
 
-    def test_rule_version_identifies_bonus_rule_behavior(self):
-        self.assertEqual(self.rule.version, "1.1")
+    def test_rule_version_identifies_current_behavior(self):
+        self.assertEqual(self.rule.version, "1.2")
 
 
 if __name__ == "__main__":
