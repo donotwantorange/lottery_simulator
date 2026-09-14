@@ -117,8 +117,6 @@ def _add_outcome(counts: dict, outcome: DrawOutcome) -> None:
         )
         counts["categories"][category] += 1
         counts["characters"][outcome.six_star_character] += 1
-    for name, amount in outcome.rewards.items():
-        counts["rewards"][name] += amount
     counts["pity_triggers"]["five_star"] += int(
         outcome.five_star_pity_triggered
     )
@@ -322,6 +320,14 @@ def simulate(
             bonus_draws_per_trial = trial_bonus_draws
         for source in sources:
             counts = trial_counts[source]
+            counts["rewards"] = {
+                reward.name: (
+                    counts["rarities"]["4"] * reward.four_star
+                    + counts["rarities"]["5"] * reward.five_star
+                    + counts["rarities"]["6"] * reward.six_star
+                )
+                for reward in rule.config.rewards
+            }
             _add_counts(total_counts[source], counts)
             distributions = source_distributions[source]
             for rarity, count in counts["rarities"].items():

@@ -1,4 +1,4 @@
-from dataclasses import astuple
+from dataclasses import astuple, replace
 import unittest
 
 from lottery_simulator.engine import (
@@ -9,7 +9,8 @@ from lottery_simulator.engine import (
     draw_once,
     simulate,
 )
-from lottery_simulator.rules.base import BonusEvent, DrawState
+from lottery_simulator.rules.base import BonusEvent, DrawState, RarityProbabilities
+from lottery_simulator.rules.pool_config import RewardRule
 from lottery_simulator.rules.rule_1 import Rule1
 
 
@@ -315,6 +316,40 @@ class EngineTest(unittest.TestCase):
                 ],
             },
         )
+
+    def test_reward_distribution_groups_equal_totals_regardless_of_draw_order(self):
+        config = replace(
+            self.rule.config,
+            rewards=(RewardRule("fractional", 0.1, 0.2, 0.3),),
+        )
+
+        class OrderedRarityRule(Rule1):
+            def __init__(self):
+                super().__init__(config=config, subrules=())
+                self.rarities = iter((4, 5, 6, 6, 5, 4))
+
+            def rarity_probabilities(self, state):
+                return {
+                    4: RarityProbabilities(1.0, 0.0, 0.0),
+                    5: RarityProbabilities(0.0, 1.0, 0.0),
+                    6: RarityProbabilities(0.0, 0.0, 1.0),
+                }[next(self.rarities)]
+
+        result = simulate(
+            OrderedRarityRule(), draws=3, trials=2, seed=42,
+            collect_records=False,
+        )
+
+        for source in ("main", "total"):
+            distribution = result.source_distributions[source]
+            self.assertEqual(
+                distribution["rarity_counts"],
+                {"4": {"1": 2}, "5": {"1": 2}, "6": {"1": 2}},
+            )
+            reward_buckets = distribution["reward_totals"]["fractional"]
+            self.assertEqual(len(reward_buckets), 1)
+            self.assertEqual(sum(reward_buckets.values()), 2)
+            self.assertAlmostEqual(float(next(iter(reward_buckets))), 0.6)
 
     def test_trace_inserts_structured_bonus_records_after_main_draw_thirty(self):
         result = simulate(Rule1(), draws=30, trials=1, seed=42)
