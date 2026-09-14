@@ -22,6 +22,7 @@ class BonusEvent:
     name: str
     draws: int
     six_star_probability: float
+    five_star_hard_pity: int
 
     def __post_init__(self) -> None:
         if (
@@ -32,6 +33,12 @@ class BonusEvent:
             raise ValueError("bonus draws must be a positive integer")
         if not 0.0 <= self.six_star_probability <= 1.0:
             raise ValueError("bonus probability must be inside [0, 1]")
+        if (
+            isinstance(self.five_star_hard_pity, bool)
+            or not isinstance(self.five_star_hard_pity, int)
+            or self.five_star_hard_pity <= 0
+        ):
+            raise ValueError("bonus five-star hard pity must be a positive integer")
 
 
 class LotterySubRule(Protocol):
@@ -59,6 +66,8 @@ class LotteryRule(Protocol):
     def five_star_pity_active(self, state: DrawState) -> bool: ...
 
     def pick_six_star(self, roll: float) -> SixStarCharacter: ...
+
+    def for_bonus(self, event: BonusEvent) -> "LotteryRule": ...
 
 
 def bonus_events_after_main_draw(

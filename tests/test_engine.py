@@ -30,7 +30,7 @@ class NoEarlySixRule(Rule1):
 class GuaranteedTwoDrawBonus:
     def events_after_main_draw(self, completed_main_draws):
         if completed_main_draws == 1:
-            return (BonusEvent("guaranteed_test_bonus", 2, 1.0),)
+            return (BonusEvent("guaranteed_test_bonus", 2, 1.0, 10),)
         return ()
 
 
@@ -179,6 +179,22 @@ class EngineTest(unittest.TestCase):
             {1},
         )
         self.assertEqual(main_records[1].pity_position, 2)
+
+    def test_bonus_records_do_not_change_main_double_pity(self):
+        result = simulate(
+            Rule1(), draws=2, trials=1, seed=42,
+            initial_pity=29, initial_five_star_pity=8,
+            collect_records=True,
+        )
+        bonus = [record for record in result.records if record.source == "bonus"]
+
+        self.assertEqual(len(bonus), 10)
+        self.assertEqual(len({record.state_after for record in bonus}), 1)
+        self.assertEqual(bonus[0].source_state_before, DrawState())
+        self.assertTrue(any(
+            record.source_state_after.misses_since_five_or_higher == 0
+            for record in bonus
+        ))
 
     def test_main_draw_counter_advances_only_for_main_draws(self):
         result = simulate(

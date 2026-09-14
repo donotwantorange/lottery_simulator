@@ -12,5 +12,6 @@ class FirstThirtyBonusRule:
                 name="first_thirty_bonus",
                 draws=10,
                 six_star_probability=0.008,
+                five_star_hard_pity=10,
             ),
         )

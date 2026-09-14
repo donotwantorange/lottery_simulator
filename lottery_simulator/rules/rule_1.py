@@ -1,4 +1,6 @@
-from lottery_simulator.rules.base import DrawState, RarityProbabilities
+from dataclasses import replace
+
+from lottery_simulator.rules.base import BonusEvent, DrawState, RarityProbabilities
 from lottery_simulator.rules.first_thirty_bonus import FirstThirtyBonusRule
 from lottery_simulator.rules.pool_config import (
     PoolConfig,
@@ -14,17 +16,25 @@ class Rule1:
     subrules = (FirstThirtyBonusRule(),)
     config = load_pool_config()
 
-    def __init__(self, config: PoolConfig | None = None) -> None:
+    def __init__(
+        self,
+        config: PoolConfig | None = None,
+        fixed_six_star_probability: float | None = None,
+        subrules: tuple | None = None,
+    ) -> None:
         self.config = load_pool_config() if config is None else config
+        self._fixed_six_star_probability = fixed_six_star_probability
+        self.subrules = type(self).subrules if subrules is None else subrules
         base_five_is_reachable = (
             not self.config.five_star.pity_enabled
             or self.config.five_star.hard_pity > 1
         )
         if base_five_is_reachable:
             for misses in range(self.max_pity - 1):
+                six_star_probability = Rule1.probability(self, DrawState(misses))
                 if (
-                    Rule1.probability(self, DrawState(misses))
-                    + self.config.five_star.base_probability
+                    six_star_probability < 1.0
+                    and six_star_probability + self.config.five_star.base_probability
                     > 1.0
                 ):
                     raise ValueError("five-star and six-star probabilities exceed 1")
@@ -46,12 +56,32 @@ class Rule1:
 
     def probability(self, state: DrawState) -> float:
         self._validate(state)
+        fixed_six_star_probability = getattr(
+            self, "_fixed_six_star_probability", None
+        )
+        if fixed_six_star_probability is not None:
+            return fixed_six_star_probability
         pull = state.misses_since_six_star + 1
         if pull == self.max_pity:
             return 1.0
         if pull >= 66:
             return 0.008 + 0.05 * (pull - 65)
         return 0.008
+
+    def for_bonus(self, event: BonusEvent) -> "Rule1":
+        temporary_config = replace(
+            self.config,
+            five_star=replace(
+                self.config.five_star,
+                pity_enabled=True,
+                hard_pity=event.five_star_hard_pity,
+            ),
+        )
+        return Rule1(
+            config=temporary_config,
+            fixed_six_star_probability=event.six_star_probability,
+            subrules=(),
+        )
 
     def five_star_pity_active(self, state: DrawState) -> bool:
         self._validate(state)

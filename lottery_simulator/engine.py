@@ -34,6 +34,8 @@ class DrawRecord:
     is_six_star: bool
     state_after: DrawState
     main_draws_completed: int | None = None
+    source_state_before: DrawState | None = None
+    source_state_after: DrawState | None = None
 
     def __post_init__(self) -> None:
         if self.main_draws_completed is None:
@@ -124,6 +126,7 @@ def simulate(
     cancel_check: CancelCheck | None = None,
     progress_interval: int = 1000,
     collect_records: bool | None = None,
+    initial_five_star_pity: int = 0,
 ) -> SimulationResult:
     _positive_integer(draws, "draws")
     _positive_integer(trials, "trials")
@@ -134,7 +137,7 @@ def simulate(
         raise ValueError("collect_records must be a boolean or None")
     elif collect_records and trials != 1:
         raise ValueError("collect_records requires trials=1")
-    initial_state = DrawState(initial_pity)
+    initial_state = DrawState(initial_pity, initial_five_star_pity)
     rule.probability(initial_state)
     total_units = draws * trials
     completed_units = 0
@@ -186,6 +189,8 @@ def simulate(
                         source_index=main_draw_index,
                         bonus_event=None,
                         main_draws_completed=main_draws_completed + 1,
+                        source_state_before=state,
+                        source_state_after=state_after,
                     )
                 )
             state = state_after
@@ -197,23 +202,31 @@ def simulate(
             ):
                 progress_callback(completed_units, total_units)
             for event in bonus_events_after_main_draw(rule, main_draws_completed):
+                temporary_rule = rule.for_bonus(event)
+                temporary_state = DrawState()
                 for bonus_draw_index in range(1, event.draws + 1):
                     actual_draw_index += 1
                     trial_bonus_draws += 1
-                    bonus_is_six_star = rng.random() < event.six_star_probability
+                    source_state_before = temporary_state
+                    outcome, temporary_state, probabilities = draw_once(
+                        temporary_rule, temporary_state, rng
+                    )
+                    bonus_is_six_star = outcome.rarity == 6
                     bonus_six_stars += int(bonus_is_six_star)
                     if collect_records:
                         records.append(
                             DrawRecord(
                                 draw_index=actual_draw_index,
                                 pity_position=state.misses_since_six_star,
-                                probability=event.six_star_probability,
+                                probability=probabilities.six_star,
                                 is_six_star=bonus_is_six_star,
                                 state_after=state,
                                 source="bonus",
                                 source_index=bonus_draw_index,
                                 bonus_event=event.name,
                                 main_draws_completed=main_draws_completed,
+                                source_state_before=source_state_before,
+                                source_state_after=temporary_state,
                             )
                         )
         if trial == 0:
