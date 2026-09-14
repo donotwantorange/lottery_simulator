@@ -23,9 +23,9 @@ docker compose ps
 docker compose logs --tail=100 app caddy
 ```
 
-Compose 固定 production/OIDC，仅 Caddy 发布 80/443；页面及 worker 使用 `LOTTERY_DB_PATH=/app/data/lottery.sqlite3`，与每日备份路径一致。数据、备份和证书保存在命名卷，secrets 只读挂载。手册包含定时备份安装、停机恢复、升级与命名 Git 提交回滚命令；不要执行 `docker compose down -v`。
+Compose 固定 production/OIDC，仅 Caddy 发布 80/443，并声明 HSTS `max-age=31536000; includeSubDomains`；页面及 worker 使用 `LOTTERY_DB_PATH=/app/data/lottery.sqlite3`，与每日备份路径一致。数据、备份和证书保存在命名卷，secrets 只读挂载。手册包含定时备份安装、停机恢复、升级与命名 Git 提交回滚命令；不要执行 `docker compose down -v`。
 
-✅ 本地功能及服务器部署接口已实现，部署静态合同已验证。⚠️ 按当前范围，真正服务器部署和测试暂缓；镜像、Compose 运行和公网 HTTPS/OIDC 均为服务器现场未验，不能用本地测试替代。详细证据和验收边界见 [变更记录](docs/changes/2026-09-10-web-dashboard.md)。
+✅ 本地功能及服务器部署接口已实现，部署静态合同已验证。⚠️ 按当前范围，真正服务器部署和测试暂缓；镜像、Compose 运行以及公网 HTTPS/HSTS/OIDC 均为服务器现场未验，不能用本地测试替代。详细证据和验收边界见 [变更记录](docs/changes/2026-09-10-web-dashboard.md)。
 
 ## 精确分析
 

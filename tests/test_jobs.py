@@ -16,8 +16,10 @@ from unittest.mock import patch
 from uuid import uuid4
 
 from dashboard.jobs import JobAlreadyRunning, JobManager
-from dashboard.models import JobState, RunParameters, read_json, write_json
+from dashboard.models import JobState, RunParameters, read_json, result_payload, write_json
 from dashboard.repository import HistoryRepository
+from lottery_simulator.engine import simulate
+from lottery_simulator.rules.rule_1 import Rule1
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -78,6 +80,15 @@ class JobManagerTest(unittest.TestCase):
                 self.fail(f"unexpected terminal state: {state}")
             time.sleep(0.01)
         self.fail(f"job deadline exceeded: {self.manager.get(job_id)}")
+
+    def wait_for_status(self, job_id, status, timeout=3):
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            state = self.manager.get(job_id)
+            if state is not None and state.status == status:
+                return state
+            time.sleep(0.01)
+        self.fail(f"job did not reach {status}: {self.manager.get(job_id)}")
 
     def counts(self):
         with closing(sqlite3.connect(self.database)) as connection:
@@ -170,6 +181,15 @@ class JobManagerTest(unittest.TestCase):
             self.manager.start(self.parameters, synchronous=True)
         self.assertEqual([path.parent.name for path in self.root.glob("*/state.json")],
                          [state.job_id])
+        self.assertEqual(self.counts(), (0, 0))
+
+    def test_start_rejects_initial_pity_outside_the_active_rule_before_creating_a_job(self):
+        invalid = replace(self.parameters, initial_pity=80)
+        with patch("dashboard.jobs.subprocess.Popen",
+                   side_effect=AssertionError("invalid parameters reached worker launch")):
+            with self.assertRaisesRegex(ValueError, "0 到 79"):
+                self.manager.start(invalid)
+        self.assertEqual(list(self.root.glob("*/state.json")), [])
         self.assertEqual(self.counts(), (0, 0))
 
     def test_start_waits_for_flock_before_checking_and_creating(self):
@@ -272,6 +292,59 @@ class JobManagerTest(unittest.TestCase):
         time.sleep(0.05)
         self.assertIsNone(process.poll())
 
+    def test_reaper_marks_an_unexpected_child_exit_failed_without_history(self):
+        real_popen = subprocess.Popen
+
+        def exited_worker(*unused_args, **unused_kwargs):
+            process = real_popen(
+                [sys.executable, "-c", "raise SystemExit(7)"],
+                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+            self.processes.append(process)
+            return process
+
+        with patch("dashboard.jobs.subprocess.Popen", side_effect=exited_worker):
+            state = self.manager.start(self.parameters)
+
+        failed = self.wait_for_status(state.job_id, "failed")
+        self.assertEqual(failed.error, "模拟任务失败")
+        self.assertIsNone(self.manager.get_result(state.job_id))
+        self.assertEqual(self.counts(), (0, 0))
+
+    def test_reaper_never_overwrites_worker_completed_or_cancelled_state(self):
+        class ExitedProcess:
+            def wait(self):
+                return 1
+
+        for status in ("completed", "cancelled"):
+            with self.subTest(status=status):
+                state, _ = self.prepare_job(status)
+                self.manager._reap(ExitedProcess(), state.job_id)
+                self.assertEqual(self.manager.get(state.job_id).status, status)
+
+    def test_reaper_ignores_a_job_root_removed_after_the_child_exits(self):
+        class ExitedProcess:
+            def wait(self):
+                return 1
+
+        self.addCleanup(self.root.mkdir, parents=True, exist_ok=True)
+        self.root.rmdir()
+
+        self.manager._reap(ExitedProcess(), str(uuid4()))
+        self.assertFalse(self.root.exists())
+
+    def test_restart_crash_window_keeps_committed_history_once_when_state_is_active(self):
+        payload = result_payload(simulate(Rule1(), 2, seed=42, initial_pity=29), Rule1(), 0.1)
+        run_id = self.repository.save_run(payload, trace_enabled=True)
+        state, _ = self.prepare_job("running")
+
+        self.manager.reconcile_after_restart()
+
+        self.assertEqual(self.manager.get(state.job_id).status, "failed")
+        self.assertIsNone(self.manager.get_result(state.job_id))
+        self.assertEqual(self.counts(), (1, 12))
+        self.assertEqual([row["id"] for row in self.repository.list_runs({}, 10, 0)], [run_id])
+
     def test_persistence_failure_keeps_completed_result_and_safe_error(self):
         with closing(sqlite3.connect(self.database)) as connection:
             connection.executescript("""
@@ -316,6 +389,17 @@ class JobManagerTest(unittest.TestCase):
         self.assertEqual(state.status, "completed")
         self.assertNotIn("records", self.manager.get_result(state.job_id))
         self.assertEqual(self.counts(), (1, 0))
+
+    def test_non_trace_worker_explicitly_disables_engine_record_collection(self):
+        def require_record_opt_out(*args, **kwargs):
+            self.assertIs(kwargs.get("collect_records"), False)
+            return simulate(*args, **kwargs)
+
+        with patch("dashboard.worker.simulate", side_effect=require_record_opt_out):
+            state = self.manager.start(replace(self.parameters, trace=False), synchronous=True)
+
+        self.assertEqual(state.status, "completed")
+        self.assertNotIn("records", self.manager.get_result(state.job_id))
 
     def test_unknown_and_traversal_ids_cannot_access_job_files(self):
         for job_id in (str(uuid4()), "../outside", "/tmp", "", None):

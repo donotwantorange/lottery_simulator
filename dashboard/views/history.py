@@ -80,7 +80,11 @@ def render_history(st, repository):
         if st.button("取消删除"):
             del st.session_state["pending_delete_id"]
             st.rerun()
-    runs = [repository.get_run(run_id, include_records=True) for run_id in selected]
+    summaries = {row["id"]: row for row in rows}
+    runs = [
+        repository.get_run(run_id, include_records=summaries[run_id]["trace_enabled"])
+        for run_id in selected if run_id in summaries
+    ]
     runs = [run for run in runs if run is not None]
     if len(runs) == 2 and any(runs[0].get(field) != runs[1].get(field)
                               for field in ("rule_name", "rule_version", "schema_version")):

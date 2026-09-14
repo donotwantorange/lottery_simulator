@@ -14,7 +14,12 @@ if str(project_root) not in sys.path:
     sys.path.insert(0, str(project_root))
 
 from dashboard.auth import AuthConfig, require_access
-from dashboard.jobs import ACTIVE_STATUSES, JobAlreadyRunning, JobManager
+from dashboard.jobs import (
+    ACTIVE_STATUSES,
+    JobAlreadyRunning,
+    JobManager,
+    validate_parameters_for_active_rule,
+)
 from dashboard.models import RunParameters
 from dashboard.repository import HistoryRepository
 from dashboard.views.history import apply_pending_reuse, render_history
@@ -34,14 +39,27 @@ def require_dashboard_access():
         st.stop()
 
 
+@st.cache_resource
+def startup_job_manager(job_root: str, database_path: str) -> JobManager:
+    """Reconcile abandoned jobs once for this Streamlit process and data root."""
+    manager = JobManager(job_root, database_path)
+    manager.reconcile_after_restart()
+    return manager
+
+
 st.set_page_config(page_title="抽奖概率实验室", layout="wide")
 require_dashboard_access()
 
 data_dir = Path(os.environ.get("LOTTERY_DATA_DIR", project_root / "data"))
 database_path = Path(os.environ.get("LOTTERY_DB_PATH", data_dir / "history.sqlite3"))
-manager = JobManager(data_dir / "jobs", database_path)
+manager = startup_job_manager(str(data_dir / "jobs"), str(database_path))
 repository = HistoryRepository(database_path)
-repository.initialize()
+try:
+    repository.initialize()
+except Exception:
+    logging.getLogger(__name__).exception("History database initialization failed")
+    st.error("历史数据库暂不可用；当前为只读错误页。请联系管理员检查迁移或从备份恢复。")
+    st.stop()
 apply_pending_reuse(st, repository)
 current_id = st.session_state.get("current_job_id")
 current = manager.get_active()
@@ -59,7 +77,8 @@ with st.sidebar:
     draws = st.number_input("主池抽数", min_value=1, step=1, key="draws")
     trials = st.number_input("实验轮数", min_value=1, step=1, key="trials")
     initial_pity = st.number_input("假设主池已累计多少抽仍未出6星", min_value=0,
-                                   step=1, key="initial_pity")
+                                   step=1, key="initial_pity",
+                                   help="该值同时初始化主池保底位置与累计主池抽数；累计抽数决定首次30抽赠送是已领取还是会在本次模拟中触发。")
     seed_text = st.text_input("随机种子（留空自动生成）", key="seed_text")
     trace = st.toggle("Trace", disabled=trials != 1, help="逐抽记录仅支持单轮模拟", key="trace")
     if st.button("开始模拟", disabled=live):
@@ -69,8 +88,10 @@ with st.sidebar:
             st.error("随机种子必须为整数")
         else:
             try:
-                parameters = RunParameters(rule_name, draws, trials, initial_pity,
-                                           seed, trace and trials == 1).validate()
+                parameters = validate_parameters_for_active_rule(
+                    RunParameters(rule_name, draws, trials, initial_pity,
+                                  seed, trace and trials == 1)
+                )
             except ValueError as error:
                 st.error(str(error))
             else:

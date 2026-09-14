@@ -7,12 +7,14 @@ import sqlite3
 import subprocess
 import sys
 from tempfile import TemporaryDirectory
+import time
 import unittest
 from unittest.mock import patch
 from uuid import uuid4
 
 import streamlit as st
 from streamlit.testing.v1 import AppTest
+from streamlit.runtime.secrets import AttrDict
 
 from dashboard.jobs import JobManager
 from dashboard.models import JobState, RunParameters, result_payload, write_json
@@ -110,6 +112,23 @@ class DashboardAppTest(unittest.TestCase):
         runs = HistoryRepository(database).list_runs({}, 20, 0)
         self.assertEqual(len(runs), 1)
         self.assertEqual(runs[0]["main_draws"], 100)
+
+    def test_repository_initialization_failure_shows_safe_read_only_error_before_business_ui(self):
+        with (patch.object(HistoryRepository, "initialize",
+                           side_effect=sqlite3.DatabaseError("synthetic migration detail")),
+              patch("streamlit.user_info._get_user_info", return_value={"is_logged_in": False}),
+              self.assertLogs(level="ERROR") as logs):
+            app = AppTest.from_file(str(APP)).run()
+
+        self.assertTrue(any("History database initialization failed" in item for item in logs.output))
+        self.assertEqual(len(app.exception), 0)
+        self.assertEqual(
+            [item.value for item in app.error],
+            ["历史数据库暂不可用；当前为只读错误页。请联系管理员检查迁移或从备份恢复。"],
+        )
+        self.assertEqual(len(app.title), 0)
+        self.assertEqual(len(app.number_input), 0)
+        self.assertNotIn("synthetic migration detail", " ".join(item.value for item in app.error))
 
     def repository(self):
         repository = HistoryRepository(self.root / "history.sqlite3")
@@ -215,6 +234,22 @@ class DashboardAppTest(unittest.TestCase):
         self.assertEqual(len(app.metric), 30)
         self.assertTrue(any("统计口径不同" in item.value for item in app.warning))
 
+    def test_history_queries_draw_records_only_for_selected_trace_runs(self):
+        _, ids = self.seed_history()
+        calls = []
+        original_get_run = HistoryRepository.get_run
+
+        def track_get_run(repository, run_id, include_records=False):
+            calls.append((run_id, include_records))
+            return original_get_run(repository, run_id, include_records)
+
+        app = self.load()
+        with patch.object(HistoryRepository, "get_run", new=track_get_run):
+            self.widget(app.multiselect, "选择历史运行").set_value([ids[0], ids[1]]).run()
+
+        self.assertEqual(dict(calls), {ids[0]: True, ids[1]: False})
+        self.assertEqual(len(calls), 2)
+
     def test_history_retired_rule_reuse_is_safe_and_missing_selection_clears(self):
         repository, ids = self.seed_history()
         app = self.load()
@@ -242,6 +277,8 @@ class DashboardAppTest(unittest.TestCase):
 
     def prepare(self, status="queued"):
         self.repository()
+        # Startup reconciliation has already happened before this test creates a live job.
+        self.load()
         parameters = RunParameters("rule1", 2, 1, 29, 42, True)
         state = JobState(str(uuid4()), status, parameters.to_dict(), 1, 2,
                          duration_seconds=2.0)
@@ -253,6 +290,36 @@ class DashboardAppTest(unittest.TestCase):
         app.run()
         self.assertEqual(len(app.exception), 0)
         return app, job_dir
+
+    def wait_for_status(self, manager, job_id, status, timeout=5):
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            state = manager.get(job_id)
+            if state is not None and state.status == status:
+                return state
+            time.sleep(0.01)
+        self.fail(f"job did not reach {status}: {manager.get(job_id)}")
+
+    def test_process_startup_reconciles_only_its_job_root_once(self):
+        parameters = RunParameters("rule1", 10_000, 10_000, 29, 42, False)
+        database = self.root / "history.sqlite3"
+        manager = JobManager(self.root / "jobs", database)
+        unrelated = JobManager(self.root / "unrelated-jobs", self.root / "unrelated.sqlite3")
+        self.addCleanup(manager.reconcile_after_restart)
+        self.addCleanup(unrelated.reconcile_after_restart)
+        stale = manager.start(parameters)
+        outside = unrelated.start(parameters)
+        self.wait_for_status(manager, stale.job_id, "running")
+        self.wait_for_status(unrelated, outside.job_id, "running")
+
+        app = self.load()
+
+        self.assertEqual(manager.get(stale.job_id).status, "failed")
+        self.assertEqual(unrelated.get(outside.job_id).status, "running")
+        fresh = manager.start(parameters)
+        self.wait_for_status(manager, fresh.job_id, "running")
+        app.run()
+        self.assertEqual(manager.get(fresh.job_id).status, "running")
 
     def test_completed_shows_metrics_download_and_saves_once_without_session_payload(self):
         app = self.start_small(self.load())
@@ -350,9 +417,23 @@ class DashboardAppTest(unittest.TestCase):
         self.assertIsNone(manager.get_result(job_dir.name))
         self.assertFalse(self.widget(app.button, "开始模拟").disabled)
 
+    def test_initial_pity_is_rejected_before_job_start_and_its_help_explains_both_meanings(self):
+        app = self.load()
+        input_field = self.widget(app.number_input, PITY_LABEL)
+        self.assertEqual(
+            input_field.help,
+            "该值同时初始化主池保底位置与累计主池抽数；累计抽数决定首次30抽赠送是已领取还是会在本次模拟中触发。",
+        )
+        input_field.set_value(80)
+        self.widget(app.button, "开始模拟").click().run()
+        self.assertEqual(len(app.exception), 0)
+        self.assertEqual([item.value for item in app.error], ["初始保底必须在 0 到 79 之间"])
+        self.assertEqual(self.widget(app.number_input, PITY_LABEL).value, 80)
+        self.assertEqual(list(self.root.glob("jobs/*/state.json")), [])
+        self.assertEqual(self.repository().list_runs({}, 10, 0), [])
+
     def test_failed_shows_only_safe_summary_without_history_or_result(self):
-        with self.assertLogs("dashboard.worker", level="ERROR"):
-            app = self.start_small(self.load(), pity=80)
+        app, _ = self.prepare("failed")
         self.assertEqual([item.value for item in app.error], ["模拟任务失败"])
         self.assertEqual(len(app.metric), 0)
         self.assertEqual(len(app.get("download_button")), 0)
@@ -385,7 +466,14 @@ class DashboardAppTest(unittest.TestCase):
     def test_unauthenticated_never_renders_business_or_touches_database(self):
         with patch.dict(os.environ, {"APP_ENVIRONMENT": "production",
                                     "APP_AUTH_MODE": "oidc", "DASHBOARD_SYNC_JOBS": "0",
-                                    "ALLOWED_EMAILS": "allowed@example.com"}):
+                                    "ALLOWED_EMAILS": "allowed@example.com"}), \
+             patch.object(st, "secrets", AttrDict({"auth": {
+                 "redirect_uri": "https://dashboard.example.invalid/oauth2callback",
+                 "cookie_secret": "x" * 32,
+                 "client_id": "test-client-id",
+                 "client_secret": "test-client-secret",
+                 "server_metadata_url": "https://identity.example.invalid/metadata",
+             }})):
             app = self.load()
         self.assertEqual([button.label for button in app.button], ["登录"])
         self.assertEqual(len(app.title), 0)

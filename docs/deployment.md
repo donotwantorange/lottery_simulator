@@ -6,7 +6,7 @@
 
 部署目录以 `/opt/lottery-simulator` 为例；若位置不同，所有 `cd` 和备份 service 的 `WorkingDirectory` 都必须改成实际目录。以下命令在服务器上的项目根目录执行。Docker 命令需要有 Docker 权限的运维账号；该权限等价于高权限，不授予不可信账号。
 
-✅ 部署接口已实现、静态合同已验证：配置固定生产/OIDC，只有 Caddy 发布 80/443。按用户最新范围，本轮只完成本地功能，服务器实际部署和测试暂缓。⚠️ 当前开发环境没有 Docker/Caddy，镜像构建、Compose 官方解析和运行、卷权限、自动证书与公网 OIDC 均为“服务器现场未验”；下面是未来部署时执行的步骤，不是本轮成功记录。
+✅ 部署接口已实现、静态合同已验证：配置固定生产/OIDC，只有 Caddy 发布 80/443，且 Caddyfile 声明 `Strict-Transport-Security: max-age=31536000; includeSubDomains`。按用户最新范围，本轮只完成本地功能，服务器实际部署和测试暂缓。⚠️ 当前开发环境没有 Docker/Caddy，镜像构建、Compose 官方解析和运行、卷权限、自动证书、HSTS 实际响应与公网 OIDC 均为“服务器现场未验”；下面是未来部署时执行的步骤，不是本轮成功记录。
 
 ## 1. 域名、端口和认证
 
@@ -32,7 +32,7 @@ chmod 600 .env .streamlit/secrets.toml
 python3 -c 'import secrets; print(secrets.token_urlsafe(48))'
 ```
 
-把上一步生成的随机值填入 `cookie_secret`，用编辑器设置 `.streamlit/secrets.toml`：
+把上一步生成的随机值填入 `cookie_secret`，用编辑器设置 `.streamlit/secrets.toml`。生产启动会拒绝缺失、空白或 UTF-8 字节数少于 32 的 `cookie_secret`，并拒绝缺失或空白的 OIDC 必填字段；长度检查不能替代使用高熵随机值：
 
 ```toml
 [auth]
@@ -89,7 +89,7 @@ curl -I http://lottery.example.com
 curl -I https://lottery.example.com
 ```
 
-把 curl 域名替换为 `.env` 中的真实域名。预期本地 health 返回 `200 ok`，公网 HTTP 跳转 HTTPS，HTTPS 证书有效。⚠️ health 只证明 Streamlit 服务存活，不证明脚本成功渲染、数据库可写或登录正常。
+把 curl 域名替换为 `.env` 中的真实域名。预期本地 health 返回 `200 ok`，公网 HTTP 跳转 HTTPS，HTTPS 证书有效，且 HTTPS 响应包含 `Strict-Transport-Security: max-age=31536000; includeSubDomains`。⚠️ health 只证明 Streamlit 服务存活，不证明脚本成功渲染、数据库可写、登录正常或 Caddy 在服务器上实际发送 HSTS。
 
 未来部署时必须使用公网域名进行人工验收（本轮暂缓，不作为本地完成条件）：
 

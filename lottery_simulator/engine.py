@@ -82,10 +82,17 @@ def simulate(
     progress_callback: ProgressCallback | None = None,
     cancel_check: CancelCheck | None = None,
     progress_interval: int = 1000,
+    collect_records: bool | None = None,
 ) -> SimulationResult:
     _positive_integer(draws, "draws")
     _positive_integer(trials, "trials")
     _positive_integer(progress_interval, "progress_interval")
+    if collect_records is None:
+        collect_records = trials == 1
+    elif not isinstance(collect_records, bool):
+        raise ValueError("collect_records must be a boolean or None")
+    elif collect_records and trials != 1:
+        raise ValueError("collect_records requires trials=1")
     initial_state = DrawState(initial_pity)
     rule.probability(initial_state)
     total_units = draws * trials
@@ -126,7 +133,7 @@ def simulate(
                 main_six_stars += 1
                 interval_sum += pity_position
                 completed_intervals += 1
-            if trials == 1:
+            if collect_records:
                 records.append(
                     DrawRecord(
                         draw_index=actual_draw_index,
@@ -154,7 +161,7 @@ def simulate(
                     trial_bonus_draws += 1
                     bonus_is_six_star = rng.random() < event.six_star_probability
                     bonus_six_stars += int(bonus_is_six_star)
-                    if trials == 1:
+                    if collect_records:
                         records.append(
                             DrawRecord(
                                 draw_index=actual_draw_index,

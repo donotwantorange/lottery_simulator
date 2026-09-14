@@ -5,6 +5,7 @@ import unittest
 from unittest.mock import patch
 
 from dashboard.auth import AuthConfig, authorize_email, require_access
+from streamlit.runtime.secrets import AttrDict
 
 
 class Stopped(Exception):
@@ -14,10 +15,19 @@ class Stopped(Exception):
 class StreamlitBoundary:
     """Only UI/session effects are substituted; the access gate remains real."""
 
-    def __init__(self, logged_in=False, email=None, clicked=False, address="127.0.0.1"):
+    def __init__(self, logged_in=False, email=None, clicked=False, address="127.0.0.1",
+                 secrets=None):
         self.user = SimpleNamespace(is_logged_in=logged_in, email=email)
         self.clicked = clicked
         self.address = address
+        # AttrDict is Streamlit 1.63's real nested secrets boundary.
+        self.secrets = secrets if secrets is not None else AttrDict({"auth": {
+            "redirect_uri": "https://dashboard.example.invalid/oauth2callback",
+            "cookie_secret": "x" * 32,
+            "client_id": "test-client-id",
+            "client_secret": "test-client-secret",
+            "server_metadata_url": "https://identity.example.invalid/metadata",
+        }})
         self.buttons = []
         self.errors = []
         self.login_calls = 0
@@ -145,6 +155,57 @@ class AccessGateTests(unittest.TestCase):
         st.user = Identity()
         self.assertEqual(require_access(st, self.config), "owner@example.com")
         self.assertEqual(st.buttons, [])
+
+    def test_oidc_secret_preflight_rejects_missing_blank_and_weak_values_without_leaking_them(self):
+        valid = {
+            "redirect_uri": "https://dashboard.example.invalid/oauth2callback",
+            "cookie_secret": "x" * 32,
+            "client_id": "test-client-id",
+            "client_secret": "test-client-secret",
+            "server_metadata_url": "https://identity.example.invalid/metadata",
+        }
+        invalid_sections = []
+        missing = valid.copy()
+        del missing["client_secret"]
+        invalid_sections.append(missing)
+        blank = valid.copy()
+        blank["server_metadata_url"] = "   "
+        invalid_sections.append(blank)
+        weak = valid.copy()
+        weak["cookie_secret"] = "x" * 31
+        invalid_sections.append(weak)
+
+        st = StreamlitBoundary(
+            logged_in=True, email="owner@example.com", secrets=AttrDict({})
+        )
+        with self.subTest(auth_section="missing"):
+            with self.assertRaisesRegex(ValueError, "OIDC 认证配置无效") as raised:
+                require_access(st, self.config)
+            self.assertEqual(str(raised.exception), "OIDC 认证配置无效")
+
+        for auth_section in invalid_sections:
+            with self.subTest(auth_section=tuple(auth_section)):
+                st = StreamlitBoundary(
+                    logged_in=True, email="owner@example.com",
+                    secrets=AttrDict({"auth": auth_section}),
+                )
+                with self.assertRaisesRegex(ValueError, "OIDC 认证配置无效") as raised:
+                    require_access(st, self.config)
+                self.assertEqual(str(raised.exception), "OIDC 认证配置无效")
+
+    def test_oidc_secret_preflight_accepts_streamlit_nested_default_provider_mapping(self):
+        secrets = AttrDict({"auth": {
+            "redirect_uri": "https://dashboard.example.invalid/oauth2callback",
+            "cookie_secret": "x" * 32,
+            "default": {
+                "client_id": "test-client-id",
+                "client_secret": "test-client-secret",
+                "server_metadata_url": "https://identity.example.invalid/metadata",
+            },
+        }})
+        st = StreamlitBoundary(logged_in=True, email="owner@example.com", secrets=secrets)
+
+        self.assertEqual(require_access(st, self.config), "owner@example.com")
 
     def test_disabled_gate_rejects_actual_public_bind(self):
         config = AuthConfig("development", "disabled", "127.0.0.1", ())

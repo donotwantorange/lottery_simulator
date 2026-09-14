@@ -1,7 +1,13 @@
 """Fail-closed dashboard configuration and Streamlit identity allowlist."""
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 import os
+
+
+_REQUIRED_AUTH_FIELDS = ("redirect_uri", "cookie_secret")
+_REQUIRED_PROVIDER_FIELDS = ("client_id", "client_secret", "server_metadata_url")
+_MIN_COOKIE_SECRET_BYTES = 32
 
 
 @dataclass(frozen=True)
@@ -40,6 +46,27 @@ def authorize_email(email, allowed):
     )
 
 
+def validate_oidc_secrets(secrets) -> None:
+    """Fail closed on the Streamlit 1.63 ``[auth]`` mapping without exposing values."""
+    try:
+        auth = secrets.get("auth")
+        if not isinstance(auth, Mapping):
+            raise ValueError
+        provider = auth.get("default") if "default" in auth else auth
+        if not isinstance(provider, Mapping):
+            raise ValueError
+        values = tuple(auth.get(field) for field in _REQUIRED_AUTH_FIELDS)
+        values += tuple(provider.get(field) for field in _REQUIRED_PROVIDER_FIELDS)
+        if any(not isinstance(value, str) or not value.strip() for value in values):
+            raise ValueError
+        cookie_secret = auth.get("cookie_secret")
+        if len(cookie_secret.encode("utf-8")) < _MIN_COOKIE_SECRET_BYTES:
+            raise ValueError
+    except Exception:
+        # Never include a configured value or parser exception in browser-visible errors.
+        raise ValueError("OIDC 认证配置无效") from None
+
+
 def require_access(st, config: AuthConfig):
     # Revalidate before any return, including a caller-supplied configuration.
     validated = AuthConfig(config.environment, config.mode, config.bind_address, config.allowed_emails)
@@ -47,6 +74,7 @@ def require_access(st, config: AuthConfig):
         # CLI flags override environment variables: check the effective listener too.
         AuthConfig(validated.environment, validated.mode, st.get_option("server.address"), ())
         return None
+    validate_oidc_secrets(st.secrets)
     if not st.user.is_logged_in:
         if st.button("登录"):
             st.login()

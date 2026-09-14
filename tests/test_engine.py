@@ -48,6 +48,15 @@ class EngineTest(unittest.TestCase):
         self.assertEqual(result.records[0].pity_position, 1)
         self.assertEqual(sum(result.count_distribution.values()), 1)
 
+    def test_large_single_trial_can_explicitly_skip_record_collection(self):
+        result = simulate(
+            self.rule, draws=100_001, trials=1, seed=42, collect_records=False
+        )
+
+        self.assertEqual(result.records, ())
+        self.assertEqual(result.total_draws, 100_011)
+        self.assertEqual(sum(result.count_distribution.values()), 1)
+
     def test_multiple_trials_only_keep_aggregates(self):
         result = simulate(self.rule, draws=100, trials=50, seed=42)
         self.assertEqual(result.records, ())

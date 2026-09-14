@@ -100,7 +100,9 @@ class DeploymentFilesTest(unittest.TestCase):
 
     def test_proxy_and_backup_scheduler_contract(self):
         self.assertEqual(self.read("Caddyfile").split(),
-                         ["{$DOMAIN}", "{", "encode", "zstd", "gzip", "reverse_proxy", "app:8501", "}"])
+                         ["{$DOMAIN}", "{", "encode", "zstd", "gzip", "header",
+                          "Strict-Transport-Security", "\"max-age=31536000;",
+                          "includeSubDomains\"", "reverse_proxy", "app:8501", "}"])
         service = configparser.ConfigParser(interpolation=None)
         service.read_string(self.read("deploy/lottery-backup.service"))
         self.assertEqual(service["Service"]["WorkingDirectory"], "/opt/lottery-simulator")
