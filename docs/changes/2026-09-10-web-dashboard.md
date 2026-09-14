@@ -26,7 +26,7 @@
 
 ## 验证结果
 
-✅ 当前全量 `.venv/bin/python -m unittest discover -q`：129 tests / OK；任务 9 focused：41 tests / OK。✅ 本地 Streamlit `/_stcore/health` 返回 `200 ok`，镜像中定义的同一 Python 探针在本地解释器执行退出码 0，临时服务已停止。⚠️ 这些结果证明本地代码、SQLite 与配置合同，不证明镜像构建、容器运行、浏览器视觉或公网认证。
+✅ 当前全量 `.venv/bin/python -m unittest discover -q`：142 tests / OK；最终审查 focused（认证、引擎、任务、页面、部署、仓库）：103 tests / OK；任务 9 历史 focused：41 tests / OK。✅ 本地 Streamlit `/_stcore/health` 返回 `200 ok`，镜像中定义的同一 Python 探针在本地解释器执行退出码 0，临时服务已停止。⚠️ 这些结果证明本地代码、SQLite 与配置合同，不证明镜像构建、容器运行、浏览器视觉或公网认证。
 
 ## Git 提交
 
@@ -169,3 +169,34 @@
 - ✅ 因果验证：仅撤回 `*.crt` 后 `git check-ignore certificate.crt` 返回非零且合同测试 12/13 失败；恢复后匹配并通过。
 - ✅ focused `.venv/bin/python -m unittest tests.test_deployment_files -v`：8 tests / OK；全量 `.venv/bin/python -m unittest discover -q`：129 tests / OK。
 - ⚠️ 未进行 Docker 构建或运行；按用户要求未做额外 SHA 核验。
+
+## 最终审查集中修复
+
+### 功能与安全边界
+
+- ✅ 生产 OIDC 门禁现在在登录按钮出现前预检 Streamlit 1.63 的真实 `[auth]` Mapping 结构：`redirect_uri`、`cookie_secret` 和默认 provider 所需字段都必须非空，`cookie_secret` 至少 32 UTF-8 字节。页面只显示固定的“OIDC 认证配置无效”，不记录或回显任何配置值；测试仅使用 `AttrDict` 的非敏感 double，未读取真实 secrets。
+- ✅ `simulate()` 新增可选 `collect_records`，省略时仍保持原有单轮 Python/CLI records 行为；dashboard worker 显式传入 `parameters.trace`，因此单轮非 Trace 的大任务不会先构造逐抽对象再丢弃。
+- ✅ Caddyfile 增加 `Strict-Transport-Security: max-age=31536000; includeSubDomains` 静态合同；README 与部署手册明确它仍需在真实 HTTPS 服务器上验收。
+- ✅ Streamlit 以 `st.cache_resource` 在每个进程/数据根首次初始化时执行一次 restart reconciliation；同一进程 rerun 不会杀死后续有效任务。worker 子进程异常退出且状态仍 active 时安全转换为 failed；已经 completed/cancelled 的状态不会被覆盖。SQLite 已提交但状态文件仍 active 的崩溃窗口保持一条历史快照、不重复写入，并将活动任务标成 failed。
+- ✅ `initial_pity` 在页面、`JobManager.start()` 和 worker 反序列化边界共用当前规则的 `max_pity` 验证，不复制 Rule1 常量；页面保留输入、在写任务前拒绝，并精确解释它同时初始化保底位置与累计主池抽数（影响首次 30 抽赠送资格）。
+- ✅ 历史对比仅对 Trace 汇总请求 draw records；数据库初始化/迁移异常会停止业务 UI 并显示安全、可操作的只读错误页。
+- ✅ reaper 对测试/运维清理后已不存在的 jobs 目录安全结束，避免后台线程产生未处理异常。
+
+### RED / GREEN / 因果验证
+
+- ✅ OIDC RED：缺失、空白或弱值的 preflight 测试均显示 `ValueError not raised`；GREEN：`tests.test_auth` 17 tests / OK。撤回 preflight 后三组无效配置再次被允许，恢复后目标测试通过。
+- ✅ records RED：`simulate(..., collect_records=False)` 报未知关键字，worker 边界没有收到该参数；GREEN：引擎的大单轮无 records，worker 明确传入 `False`。把两个收集分支临时还原为 `trials == 1` 后，目标测试恢复 100011 条 records；恢复分支后通过。
+- ✅ HSTS RED：部署合同缺少 `header Strict-Transport-Security`；GREEN：静态合同测试通过。此项是配置合同，不进行 Docker/Caddy 现场撤回实验。
+- ✅ 任务恢复 RED：启动测试发现旧任务仍为 `running`，异常 child 保持 `queued`，且 `_reap` 方法不存在；GREEN：真实 jobs 根、无关 roots、一次 rerun、终态竞态和提交后崩溃窗口均通过。撤回启动接线后旧任务回到 `running`；禁用 reaper 写回后 child 保持 `queued`；逐项恢复通过。
+- ✅ `initial_pity` RED：共享准入到达 worker launch，页面帮助为空；GREEN：两层均在 0–79 外拒绝且不写 job。撤掉按规则范围检查后页面重新只显示 worker 的“模拟任务失败”；恢复后通过。
+- ✅ 历史查询 RED：不含 Trace 的已选汇总仍调用 `get_run(..., include_records=True)`；GREEN：Trace 为 True、非 Trace 为 False。临时恢复无条件调用后目标测试失败，恢复后通过。
+- ✅ 数据库错误页 RED：迁移错误形成一个 AppTest exception；GREEN：无页面 exception、无业务控件且只显示固定错误。临时恢复直接初始化后目标测试重新出现 exception，恢复后通过。
+- ✅ reaper 目录清理 RED：child 退出后移除 jobs root 触发 `FileNotFoundError`；GREEN：安全返回。临时重新抛出该异常后目标测试恢复 ERROR，恢复后通过。
+
+### 最终验证与边界
+
+- ✅ `.venv/bin/python -m unittest tests.test_auth tests.test_engine tests.test_jobs tests.test_dashboard_app tests.test_deployment_files tests.test_repository -q`：103 tests / OK。
+- ✅ `.venv/bin/python -m unittest discover -q`：142 tests / OK。
+- ✅ `git diff --check` 通过；实现可回退提交：`a65970e fix: resolve dashboard final review findings`。
+- ⚠️ focused/full 输出中的 Streamlit bare-mode ScriptRunContext 提示和 CLI `--trace`/多轮的既有负例 stderr 均来自受控测试路径，最终退出码为 0。
+- ⚠️ 本轮没有安装或运行 Docker、Caddy、Compose 或服务器 OIDC；HSTS 仅完成 Caddyfile、静态合同与文档，真实 HTTPS 响应/证书/OIDC/浏览器验收仍为服务器现场未验。
