@@ -14,5 +14,9 @@ backups/
 *.db
 *.pem
 *.key
+*.crt
+*.cer
+*.p12
+*.pfx
 caddy_data/
 caddy_config/

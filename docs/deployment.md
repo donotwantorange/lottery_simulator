@@ -51,7 +51,7 @@ sudo chown 10001:10001 .streamlit/secrets.toml
 sudo chmod 600 .streamlit/secrets.toml
 ```
 
-secrets 只读挂载，不进入镜像。`.env`、数据库、备份、私钥、证书目录均由 `.dockerignore` 排除；默认数据和备份路径也由 `.gitignore` 排除。证书实际保存到 Docker 命名卷，不在源码目录中。
+secrets 只读挂载，不进入镜像。`.env`、数据库、备份、私钥以及 `*.pem`、`*.key`、`*.crt`、`*.cer`、`*.p12`、`*.pfx` 证书/密钥文件均由 `.dockerignore` 排除；默认数据和备份路径也由 `.gitignore` 排除。证书实际保存到 Docker 命名卷，不在源码目录中。
 
 ## 2. 构建与启动
 

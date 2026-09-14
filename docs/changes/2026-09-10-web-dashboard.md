@@ -161,3 +161,11 @@
 - ⚠️ 服务器现场未验：Docker 官方配置解析/构建/运行、卷初始化和权限、Caddy 自动证书、DNS/防火墙、真实 OIDC 回调/白名单联调、systemd 定时触发、容器停机恢复。当前无真实域名或 OIDC 凭据，这些保留为未来部署接口验证。
 - ⚠️ 浏览器人工验收本轮暂缓，未产生桌面/窄屏布局、逐控件焦点、图表数值表可见性、15 个指标完整性或点击删除二次确认的真实浏览器观察。本执行环境未提供 in-app browser 工具；现有 AppTest 只验证对应组件与删除状态流，不能替代视觉验收。
 - ⚠️ 备份仅含 SQLite 历史，不含任务文件、secrets 或证书；同名目标会覆盖，失败目标不可用于恢复。手册要求保留独立 pre-restore/pre-upgrade 备份与异机副本；没有添加自动保留/清理策略。未执行额外 SHA 或镜像摘要核验，Git 提交只用于追踪与回滚。
+
+### 任务 9 审查修复 round 1：证书格式忽略边界
+
+- ✅ 扩展部署合同测试，要求 `.dockerignore` 与实际 Git 忽略同时覆盖 `*.crt`、`*.cer`、`*.p12`、`*.pfx`；基线 RED 时 `git check-ignore` 仅匹配 9/13 个路径。
+- ✅ 在 `.gitignore`、`.dockerignore` 补齐四种格式，并在部署文档逐项说明六种证书/密钥格式均不进入提交或镜像。
+- ✅ 因果验证：仅撤回 `*.crt` 后 `git check-ignore certificate.crt` 返回非零且合同测试 12/13 失败；恢复后匹配并通过。
+- ✅ focused `.venv/bin/python -m unittest tests.test_deployment_files -v`：8 tests / OK；全量 `.venv/bin/python -m unittest discover -q`：129 tests / OK。
+- ⚠️ 未进行 Docker 构建或运行；按用户要求未做额外 SHA 核验。

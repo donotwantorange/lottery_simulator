@@ -118,14 +118,17 @@ class DeploymentFilesTest(unittest.TestCase):
     def test_private_state_excluded_from_image_and_git(self):
         excluded = set(self.read(".dockerignore").splitlines())
         for pattern in (".git", ".env", ".streamlit/secrets.toml", "data", "backups",
-                        "*.sqlite3", "*.pem", "*.key", "caddy_data", "caddy_config"):
+                        "*.sqlite3", "*.pem", "*.key", "*.crt", "*.cer", "*.p12", "*.pfx",
+                        "caddy_data", "caddy_config"):
             self.assertIn(pattern, excluded)
         result = subprocess.run(["git", "check-ignore", ".env", ".streamlit/secrets.toml",
                                  "data/lottery.sqlite3", "backups/example.sqlite3",
-                                 "private.key", "certificate.pem", "caddy_data/state.json",
+                                 "private.key", "certificate.pem", "certificate.crt",
+                                 "certificate.cer", "certificate.p12", "certificate.pfx",
+                                 "caddy_data/state.json",
                                  "caddy_config/autosave.json", "snapshot.sqlite3"],
                                 cwd=ROOT, capture_output=True, text=True, check=True)
-        self.assertEqual(len(result.stdout.splitlines()), 9)
+        self.assertEqual(len(result.stdout.splitlines()), 13)
 
 
 class BackupDatabaseTest(unittest.TestCase):
