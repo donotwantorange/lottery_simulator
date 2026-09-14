@@ -1,4 +1,5 @@
 from contextlib import closing
+from dataclasses import replace
 import os
 from pathlib import Path
 import sqlite3
@@ -160,6 +161,46 @@ class DashboardAppTest(unittest.TestCase):
         self.assertFalse(self.widget(app.button, "停止模拟").disabled)
         self.assertEqual(len(app.metric), 0)
 
+    def test_new_session_tracks_and_can_stop_instance_active_job(self):
+        for status in ("queued", "running"):
+            with self.subTest(status=status):
+                _, job_dir = self.prepare(status)
+                app = self.load()
+                self.assertTrue(self.widget(app.button, "开始模拟").disabled)
+                self.assertEqual(app.session_state["current_job_id"], job_dir.name)
+                self.assertEqual(app.get("progress")[0].proto.value, 50)
+                self.widget(app.button, "停止模拟").click().run()
+                self.assertEqual(len(app.exception), 0)
+                self.assertTrue((job_dir / "cancel.request").exists())
+                manager = JobManager(job_dir.parent, self.root / "history.sqlite3")
+                self.assertEqual(manager.get(job_dir.name).status, status)
+                manager.reconcile_after_restart()
+
+    def test_session_with_old_result_follows_another_sessions_active_job(self):
+        app = self.start_small(self.load())
+        previous_id = app.session_state["current_job_id"]
+        _, job_dir = self.prepare("running")
+        app.run()
+        self.assertTrue(self.widget(app.button, "开始模拟").disabled)
+        self.assertEqual(app.session_state["current_job_id"], job_dir.name)
+        self.assertNotEqual(previous_id, job_dir.name)
+        self.assertEqual(len(app.metric), 0)
+        self.assertIn("停止模拟", [button.label for button in app.button])
+
+    def test_sync_ui_honors_shared_start_validation_before_writing_job(self):
+        original_start = JobManager.start
+
+        def reject_at_admission(manager, parameters, **kwargs):
+            return original_start(manager, replace(parameters, draws=0), **kwargs)
+
+        app = self.load()
+        with (patch.object(JobManager, "start", new=reject_at_admission),
+              self.assertLogs(level="ERROR")):
+            self.start_small(app)
+        self.assertEqual([item.value for item in app.error], ["模拟任务启动失败"])
+        self.assertEqual(list(self.root.glob("jobs/*/state.json")), [])
+        self.assertEqual(len(app.metric), 0)
+
     def test_stop_only_requests_cancel_then_terminal_has_no_history_or_result(self):
         app, job_dir = self.prepare()
         self.assertIn("停止模拟", [button.label for button in app.button])
@@ -180,7 +221,8 @@ class DashboardAppTest(unittest.TestCase):
         self.assertFalse(self.widget(app.button, "开始模拟").disabled)
 
     def test_failed_shows_only_safe_summary_without_history_or_result(self):
-        app = self.start_small(self.load(), pity=80)
+        with self.assertLogs("dashboard.worker", level="ERROR"):
+            app = self.start_small(self.load(), pity=80)
         self.assertEqual([item.value for item in app.error], ["模拟任务失败"])
         self.assertEqual(len(app.metric), 0)
         self.assertEqual(len(app.get("download_button")), 0)
@@ -193,7 +235,8 @@ class DashboardAppTest(unittest.TestCase):
                 CREATE TRIGGER fail_save BEFORE INSERT ON simulation_runs
                 BEGIN SELECT RAISE(ABORT, 'private database failure'); END;
             """)
-        app = self.start_small(self.load())
+        with self.assertLogs("dashboard.worker", level="ERROR"):
+            app = self.start_small(self.load())
         self.assertEqual(len(app.metric), 15)
         self.assertEqual(len(app.get("download_button")), 1)
         self.assertEqual([item.value for item in app.warning], ["历史保存失败"])

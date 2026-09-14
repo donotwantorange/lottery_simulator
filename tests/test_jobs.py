@@ -153,6 +153,25 @@ class JobManagerTest(unittest.TestCase):
         self.manager.cancel(state.job_id)
         self.assertEqual(self.wait_for(state.job_id).status, "cancelled")
 
+    def test_synchronous_start_uses_real_worker_and_persistence(self):
+        state = self.manager.start(self.parameters, synchronous=True)
+        self.assertEqual(state.status, "completed")
+        self.assertEqual((state.completed_units, state.total_units), (2, 2))
+        self.assertEqual(state.pid, os.getpid())
+        self.assertEqual(self.manager.get_result(state.job_id)["seed"], 42)
+        self.assertEqual(self.counts(), (1, 12))
+
+    def test_synchronous_start_rejects_invalid_and_already_active_jobs(self):
+        with self.assertRaises(ValueError):
+            self.manager.start(replace(self.parameters, draws=0), synchronous=True)
+        self.assertEqual(list(self.root.glob("*/state.json")), [])
+        state, _ = self.prepare_job()
+        with self.assertRaises(JobAlreadyRunning):
+            self.manager.start(self.parameters, synchronous=True)
+        self.assertEqual([path.parent.name for path in self.root.glob("*/state.json")],
+                         [state.job_id])
+        self.assertEqual(self.counts(), (0, 0))
+
     def test_start_waits_for_flock_before_checking_and_creating(self):
         self.root.mkdir(parents=True, exist_ok=True)
         script = (

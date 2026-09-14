@@ -5,7 +5,6 @@ import logging
 import os
 from pathlib import Path
 import sys
-from uuid import uuid4
 
 import streamlit as st
 
@@ -15,28 +14,10 @@ if str(project_root) not in sys.path:
     sys.path.insert(0, str(project_root))
 
 from dashboard.auth import AuthConfig, require_access
-from dashboard.jobs import ACTIVE_STATUSES, JobAlreadyRunning, JobManager, timestamp
-from dashboard.models import JobState, RunParameters, write_json
+from dashboard.jobs import ACTIVE_STATUSES, JobAlreadyRunning, JobManager
+from dashboard.models import RunParameters
 from dashboard.views.simulation import render_result
-from dashboard.worker import run
 from lottery_simulator.cli import RULES
-
-
-class SynchronousJobManager(JobManager):
-    """Development AppTest adapter; reuse the real worker and persistence path."""
-
-    def start(self, parameters):
-        parameters.validate()
-        with self._locked():
-            if any(self._active_states()):
-                raise JobAlreadyRunning("已有模拟任务正在运行")
-            state = JobState(str(uuid4()), "queued", parameters.to_dict(), 0,
-                             parameters.draws * parameters.trials, updated_at=timestamp())
-            job_dir = self.root / state.job_id
-            write_json(job_dir / "parameters.json", parameters.to_dict())
-            write_json(job_dir / "state.json", state.to_dict())
-        run(job_dir, self.database_path)
-        return self.get(state.job_id)
 
 
 def require_dashboard_access():
@@ -55,10 +36,14 @@ st.set_page_config(page_title="抽奖概率实验室", layout="wide")
 require_dashboard_access()
 
 data_dir = Path(os.environ.get("LOTTERY_DATA_DIR", project_root / "data"))
-manager_type = SynchronousJobManager if os.environ.get("DASHBOARD_SYNC_JOBS") == "1" else JobManager
-manager = manager_type(data_dir / "jobs", data_dir / "history.sqlite3")
+manager = JobManager(data_dir / "jobs", data_dir / "history.sqlite3")
 current_id = st.session_state.get("current_job_id")
-current = manager.get(current_id)
+current = manager.get_active()
+if current is not None:
+    current_id = current.job_id
+    st.session_state["current_job_id"] = current_id
+else:
+    current = manager.get(current_id)
 live = current is not None and current.status in ACTIVE_STATUSES
 
 st.title("抽奖概率实验室")
@@ -83,7 +68,8 @@ with st.sidebar:
                 st.error(str(error))
             else:
                 try:
-                    state = manager.start(parameters)
+                    state = manager.start(
+                        parameters, synchronous=os.environ.get("DASHBOARD_SYNC_JOBS") == "1")
                 except JobAlreadyRunning:
                     st.error("已有模拟任务正在运行")
                 except Exception:

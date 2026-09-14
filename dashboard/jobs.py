@@ -50,7 +50,10 @@ class JobManager:
             if state is not None and state.status in ACTIVE_STATUSES:
                 yield state
 
-    def start(self, parameters: RunParameters) -> JobState:
+    def get_active(self) -> JobState | None:
+        return next(self._active_states(), None)
+
+    def start(self, parameters: RunParameters, *, synchronous=False) -> JobState:
         parameters.validate()
         with self._locked():
             if any(self._active_states()):
@@ -60,25 +63,30 @@ class JobManager:
             job_dir = self.root / state.job_id
             write_json(job_dir / "parameters.json", parameters.to_dict())
             write_json(job_dir / "state.json", state.to_dict())
-            try:
-                process = subprocess.Popen(
-                    [sys.executable, "-m", "dashboard.worker", str(job_dir),
-                     str(self.database_path)],
-                    cwd=Path(__file__).resolve().parents[1], start_new_session=True,
-                    stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                )
-            except OSError:
-                logging.getLogger(__name__).exception("Could not launch job %s", state.job_id)
-                write_json(job_dir / "state.json", replace(
-                    state, status="failed", error="模拟任务失败", updated_at=timestamp()
-                ).to_dict())
-                raise RuntimeError("模拟任务启动失败") from None
-            state = replace(state, pid=process.pid)
-            write_json(job_dir / "state.json", state.to_dict())
-            # Reap the child even when a client stops polling its job.
-            Thread(target=process.wait, daemon=True).start()
-            return state
+            if not synchronous:
+                try:
+                    process = subprocess.Popen(
+                        [sys.executable, "-m", "dashboard.worker", str(job_dir),
+                         str(self.database_path)],
+                        cwd=Path(__file__).resolve().parents[1], start_new_session=True,
+                        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                    )
+                except OSError:
+                    logging.getLogger(__name__).exception("Could not launch job %s", state.job_id)
+                    write_json(job_dir / "state.json", replace(
+                        state, status="failed", error="模拟任务失败", updated_at=timestamp()
+                    ).to_dict())
+                    raise RuntimeError("模拟任务启动失败") from None
+                state = replace(state, pid=process.pid)
+                write_json(job_dir / "state.json", state.to_dict())
+                # Reap the child even when a client stops polling its job.
+                Thread(target=process.wait, daemon=True).start()
+                return state
+        # The inline worker takes the same lock itself; release admission first.
+        from dashboard.worker import run
+        run(job_dir, self.database_path)
+        return self.get(state.job_id)
 
     def get(self, job_id) -> JobState | None:
         job_dir = self._job_dir(job_id)

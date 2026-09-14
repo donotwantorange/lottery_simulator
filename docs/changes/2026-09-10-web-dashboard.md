@@ -80,7 +80,7 @@
 - ✅ 新增可运行的 `dashboard/app.py`：宽屏“抽奖概率实验室”、侧栏参数与主区状态/结果；可见标签精确为“假设主池已累计多少抽仍未出6星”。Trace 在多轮时禁用并解释原因，提交时再次限制为单轮；无效工作量和种子保留控件输入，不创建任务。
 - ✅ 完整页面和轮询 fragment 均先执行认证门禁，再访问任务/数据库；沿用既有环境变量。生产环境明确拒绝 `DASHBOARD_SYNC_JOBS=1`，未登录不渲染业务控件、不创建数据文件。
 - ✅ 活跃任务每 0.5 秒轮询进度和用时、禁用开始按钮；轮询发现终态时完整 rerun，恢复开始按钮并展示结果。停止按钮只请求 `JobManager.cancel()`，不保存历史。
-- ✅ 开发同步适配器复用 JobManager 文件协议、锁、读取/取消方法和真实 worker；worker 独占完成后的自动保存职责。完成展示 15 个指标和 JSON 下载；取消/失败不保存结果或历史；历史保存失败保留完成结果、下载与安全提示。业务 Session State 仅新增 `current_job_id`，不保存 payload 或 manager。
+- ✅ 开发同步模式直接调用 `JobManager.start(..., synchronous=True)`，与后台模式共用参数校验、活跃任务互斥、锁和 queued 文件创建；只在准入结束后同步运行真实 worker。worker 独占完成后的自动保存职责。完成展示 15 个指标和 JSON 下载；取消/失败不保存结果或历史；历史保存失败保留完成结果、下载与安全提示。业务 Session State 仅新增 `current_job_id`，不保存 payload 或 manager。
 - ✅ 修复任务 6 展示回归：图表和 dataframe 改用 Streamlit 1.63 支持的 `width="stretch"`；“绝对误差/相对误差”展示绝对值，原始 payload、SQLite 和下载仍保留带符号误差。
 - ✅ 修复脚本入口的包解析：Streamlit console 只加入脚本目录时，入口补入项目根，不依赖启动目录或外部 `PYTHONPATH`。
 
@@ -93,3 +93,14 @@
 - ✅ 因果验证三组：撤回误差绝对值后出现 `-0.096000 != 0.096000`；将一张 dataframe 改回旧宽度参数后弃用告警测试失败；将 fragment 终态 rerun 改为直接返回后 `0 != 15`（未显示指标）。每组均单独恢复并重跑通过。
 - ✅ AppTest 使用真实临时 SQLite、真实模拟和 worker。进度/取消用显式状态文件和同步 worker 推进；终态转换在读文件边界确定性执行 worker，不靠 sleep 或后台进程竞争制造 UI 时序。隔离启动检查是同步执行的独立 AppTest 进程，不是后台模拟任务。
 - ⚠️ 测试验证页面组件、状态流、数据保存边界和渲染 API；不能证明浏览器真实 0.5 秒计时、响应式视觉布局、OIDC 提供商回调或公网部署。AppTest 的 bare-mode ScriptRunContext 警告、故意触发的 worker 失败日志以及既有 CLI 负例 stderr 均非 Streamlit 页面异常；全部 AppTest 最终零异常。
+
+### 审查修复 round 1
+
+- ✅ 页面先读取实例级 queued/running 任务，优先将其作为当前任务；新会话和保留旧结果的会话在本轮渲染前禁用开始按钮，显示进度和停止入口。没有活跃任务时仍显示本会话的终态结果。
+- ✅ 删除复制准入协议的同步 JobManager 子类；同步与后台任务使用同一个 `start()`，生产进程启动、PID 写入与回收顺序保持不变；同步 worker 在释放准入锁后执行，避免再次获取同一锁造成死锁。生产页面仍禁止同步模式。
+- ✅ 新增五项测试，覆盖 queued/running 跨会话控制、旧结果会话切换、UI 不绕过公共准入校验、同步真实 worker/SQLite 保存，以及同步参数无效／已有任务时拒绝创建。
+- ✅ RED：跨会话的三个 disabled 断言失败；公共 `start()` 边界注入 `draws=0` 的真实校验拒绝时，旧同步适配器仍完成任务，错误提示断言失败。同步 API 两项测试最初因缺少 `synchronous` 参数报 TypeError。
+- ✅ 因果验证：分别撤回实例任务发现逻辑和公共同步启动调用，前者恢复三个 disabled 断言失败，后者恢复“没有预期启动失败提示”；逐项恢复后对应目标测试通过。
+- ✅ `.venv/bin/python -m unittest tests.test_dashboard_app tests.test_jobs -q`：34 tests / OK；`.venv/bin/python -m unittest discover -q`：117 tests / OK；`git diff --check` 通过。
+- ✅ 三项故障场景的预期 ERROR 日志用 `assertLogs` 收集，不改变生产日志行为。
+- ⚠️ 实例状态在页面 rerun 时发现，提交阶段仍由文件锁保证准入互斥；上述测试证明组件行为、文件／SQLite 协议和真实后台 worker 回归，不证明浏览器计时精度或公网认证部署。AppTest bare-mode ScriptRunContext 警告和既有 CLI 负例 stderr 保留。
