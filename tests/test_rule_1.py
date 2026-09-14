@@ -1,6 +1,8 @@
+from dataclasses import replace
 import unittest
 
-from lottery_simulator.rules.base import DrawState
+from lottery_simulator.rules.base import DrawState, RarityProbabilities
+from lottery_simulator.rules.pool_config import load_pool_config
 from lottery_simulator.rules.rule_1 import Rule1
 
 
@@ -44,7 +46,55 @@ class Rule1Test(unittest.TestCase):
             self.rule.advance(DrawState(79), False)
 
     def test_rule_version_identifies_current_behavior(self):
-        self.assertEqual(self.rule.version, "1.2")
+        self.assertEqual(self.rule.version, "2.0")
+
+    def test_rarity_probabilities_and_five_star_pity_boundaries(self):
+        rule = Rule1()
+        self.assertEqual(rule.version, "2.0")
+        normal = rule.rarity_probabilities(DrawState(64, 0))
+        self.assertEqual(normal, RarityProbabilities(0.912, 0.08, 0.008))
+        soft = rule.rarity_probabilities(DrawState(65, 0))
+        self.assertAlmostEqual(soft.six_star, 0.058)
+        self.assertAlmostEqual(soft.five_star, 0.08)
+        self.assertAlmostEqual(soft.four_star, 0.862)
+        five_pity = rule.rarity_probabilities(DrawState(65, 9))
+        self.assertEqual(five_pity.four_star, 0.0)
+        self.assertAlmostEqual(five_pity.five_star, 0.942)
+        self.assertAlmostEqual(five_pity.six_star, 0.058)
+        self.assertEqual(rule.rarity_probabilities(DrawState(79, 9)).six_star, 1.0)
+
+    def test_each_rarity_advances_both_pity_states(self):
+        rule = Rule1()
+        self.assertEqual(rule.advance_rarity(DrawState(4, 3), 4), DrawState(5, 4))
+        self.assertEqual(rule.advance_rarity(DrawState(4, 3), 5), DrawState(5, 0))
+        self.assertEqual(rule.advance_rarity(DrawState(4, 3), 6), DrawState(0, 0))
+
+    def test_disabled_five_star_pity_requires_zero_state_and_keeps_base_rate(self):
+        config = load_pool_config()
+        disabled = replace(
+            config,
+            five_star=replace(config.five_star, pity_enabled=False),
+        )
+        rule = Rule1(disabled)
+
+        with self.assertRaises(ValueError):
+            rule.rarity_probabilities(DrawState(0, 9))
+        for six_star_misses in range(rule.max_pity - 1):
+            with self.subTest(six_star_misses=six_star_misses):
+                self.assertEqual(
+                    rule.rarity_probabilities(DrawState(six_star_misses, 0)).five_star,
+                    0.08,
+                )
+
+    def test_rule_rejects_base_five_probability_that_overflows_reachable_six_rates(self):
+        config = load_pool_config()
+        overflowing = replace(
+            config,
+            five_star=replace(config.five_star, base_probability=0.30),
+        )
+
+        with self.assertRaises(ValueError):
+            Rule1(overflowing)
 
 
 if __name__ == "__main__":

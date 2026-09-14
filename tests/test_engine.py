@@ -1,13 +1,24 @@
+from dataclasses import astuple
 import unittest
 
 from lottery_simulator.engine import (
+    DrawOutcome,
     DrawRecord,
     SimulationCancelled,
     SimulationResult,
+    draw_once,
     simulate,
 )
 from lottery_simulator.rules.base import BonusEvent, DrawState
 from lottery_simulator.rules.rule_1 import Rule1
+
+
+class SequenceRandom:
+    def __init__(self, values):
+        self.values = iter(values)
+
+    def random(self):
+        return next(self.values)
 
 
 class NoEarlySixRule(Rule1):
@@ -41,6 +52,50 @@ class EngineTest(unittest.TestCase):
         first = simulate(self.rule, draws=100, trials=1, seed=42)
         second = simulate(self.rule, draws=100, trials=1, seed=42)
         self.assertEqual(first, second)
+
+    def test_draw_once_returns_rarity_character_rewards_and_state(self):
+        outcome, state_after, probabilities = draw_once(
+            Rule1(), DrawState(9, 9), SequenceRandom((0.0, 0.0))
+        )
+        self.assertEqual(outcome.rarity, 6)
+        self.assertEqual(outcome.six_star_character, "UP-A")
+        self.assertTrue(outcome.is_up)
+        self.assertTrue(outcome.is_limited)
+        self.assertTrue(outcome.five_star_pity_triggered)
+        self.assertEqual(outcome.rewards, {"奖励A": 25.0, "奖励B": 10.0})
+        self.assertAlmostEqual(sum(astuple(probabilities)), 1.0)
+        self.assertEqual(state_after, DrawState(0, 0))
+
+    def test_draw_once_returns_four_and_five_star_outcomes(self):
+        cases = (
+            (
+                0.5,
+                DrawOutcome(4, None, False, False, {"奖励A": 1.0, "奖励B": 0.0}, False, False),
+                DrawState(1, 1),
+            ),
+            (
+                0.05,
+                DrawOutcome(5, None, False, False, {"奖励A": 5.0, "奖励B": 2.0}, False, False),
+                DrawState(1, 0),
+            ),
+        )
+        for roll, expected_outcome, expected_state in cases:
+            with self.subTest(rarity=expected_outcome.rarity):
+                outcome, state_after, probabilities = draw_once(
+                    Rule1(), DrawState(), SequenceRandom((roll,))
+                )
+                self.assertEqual(outcome, expected_outcome)
+                self.assertEqual(state_after, expected_state)
+                self.assertAlmostEqual(sum(astuple(probabilities)), 1.0)
+
+    def test_draw_once_marks_six_star_hard_pity(self):
+        outcome, state_after, _ = draw_once(
+            Rule1(), DrawState(79, 0), SequenceRandom((0.99, 0.0))
+        )
+
+        self.assertEqual(outcome.rarity, 6)
+        self.assertTrue(outcome.six_star_hard_pity_triggered)
+        self.assertEqual(state_after, DrawState(0, 0))
 
     def test_single_trial_keeps_trace(self):
         result = simulate(self.rule, draws=3, trials=1, seed=42)

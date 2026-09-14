@@ -1,10 +1,20 @@
 from dataclasses import dataclass
 from typing import Protocol
 
+from lottery_simulator.rules.pool_config import PoolConfig, SixStarCharacter
+
 
 @dataclass(frozen=True, slots=True)
 class DrawState:
     misses_since_six_star: int = 0
+    misses_since_five_or_higher: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class RarityProbabilities:
+    four_star: float
+    five_star: float
+    six_star: float
 
 
 @dataclass(frozen=True, slots=True)
@@ -36,10 +46,19 @@ class LotteryRule(Protocol):
     name: str
     max_pity: int
     subrules: tuple[LotterySubRule, ...]
+    config: PoolConfig
 
     def probability(self, state: DrawState) -> float: ...
 
     def advance(self, state: DrawState, is_six_star: bool) -> DrawState: ...
+
+    def rarity_probabilities(self, state: DrawState) -> RarityProbabilities: ...
+
+    def advance_rarity(self, state: DrawState, rarity: int) -> DrawState: ...
+
+    def five_star_pity_active(self, state: DrawState) -> bool: ...
+
+    def pick_six_star(self, roll: float) -> SixStarCharacter: ...
 
 
 def bonus_events_after_main_draw(

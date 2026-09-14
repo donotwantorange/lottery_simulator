@@ -7,8 +7,20 @@ from lottery_simulator.analysis import expected_bonus_six_stars, expected_six_st
 from lottery_simulator.rules.base import (
     DrawState,
     LotteryRule,
+    RarityProbabilities,
     bonus_events_after_main_draw,
 )
+
+
+@dataclass(frozen=True, slots=True)
+class DrawOutcome:
+    rarity: int
+    six_star_character: str | None
+    is_up: bool
+    is_limited: bool
+    rewards: dict[str, float]
+    five_star_pity_triggered: bool
+    six_star_hard_pity_triggered: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -66,6 +78,35 @@ CancelCheck = Callable[[], bool]
 
 class SimulationCancelled(RuntimeError):
     pass
+
+
+def draw_once(
+    rule: LotteryRule,
+    state: DrawState,
+    rng: random.Random,
+) -> tuple[DrawOutcome, DrawState, RarityProbabilities]:
+    probabilities = rule.rarity_probabilities(state)
+    roll = rng.random()
+    rarity = (
+        6
+        if roll < probabilities.six_star
+        else 5
+        if roll < probabilities.six_star + probabilities.five_star
+        else 4
+    )
+    character = rule.pick_six_star(rng.random()) if rarity == 6 else None
+    outcome = DrawOutcome(
+        rarity=rarity,
+        six_star_character=character.name if character else None,
+        is_up=bool(character and character.is_up),
+        is_limited=bool(character and character.is_limited),
+        rewards=rule.config.rewards_for(rarity),
+        five_star_pity_triggered=rule.five_star_pity_active(state),
+        six_star_hard_pity_triggered=(
+            state.misses_since_six_star == rule.max_pity - 1
+        ),
+    )
+    return outcome, rule.advance_rarity(state, rarity), probabilities
 
 
 def _positive_integer(value: int, name: str) -> None:
