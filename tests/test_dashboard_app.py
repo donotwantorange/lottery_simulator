@@ -99,6 +99,18 @@ class DashboardAppTest(unittest.TestCase):
         self.assertIsNone(app.session_state.filtered_state.get("current_job_id"))
         self.assertEqual(list(self.root.glob("jobs/*/state.json")), [])
 
+    def test_deployment_database_override_is_used_by_page_and_worker(self):
+        database = self.root / "lottery.sqlite3"
+        with patch.dict(os.environ, {"LOTTERY_DB_PATH": str(database)}):
+            app = self.load()
+            self.widget(app.button, "开始模拟").click().run()
+        self.assertEqual(len(app.exception), 0)
+        self.assertTrue(database.is_file(), "Deployment database must receive simulations")
+        self.assertFalse((self.root / "history.sqlite3").exists())
+        runs = HistoryRepository(database).list_runs({}, 20, 0)
+        self.assertEqual(len(runs), 1)
+        self.assertEqual(runs[0]["main_draws"], 100)
+
     def repository(self):
         repository = HistoryRepository(self.root / "history.sqlite3")
         repository.initialize()

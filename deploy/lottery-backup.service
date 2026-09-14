@@ -1,0 +1,8 @@
+[Unit]
+Description=Back up lottery simulator SQLite database
+Requires=docker.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/lottery-simulator
+ExecStart=/bin/sh -c '/usr/bin/docker compose exec -T app python3 scripts/backup_db.py /app/data/lottery.sqlite3 /app/backups/lottery-$(date +%%F).sqlite3'

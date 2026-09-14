@@ -1,0 +1,9 @@
+[Unit]
+Description=Daily lottery simulator backup
+
+[Timer]
+OnCalendar=daily
+Persistent=true
+
+[Install]
+WantedBy=timers.target

@@ -2,7 +2,7 @@
 
 ## 状态
 
-设计已确认；模拟页面、后台任务、认证与结果展示已实现，历史页面与部署集成继续按计划推进。
+✅ 本地功能已实现：模拟页面、后台任务、认证边界、结果展示、历史对比和真实 SQLite 备份/恢复均已验证。✅ 服务器部署接口已实现、静态合同已验证。⚠️ 按用户最新范围，真正服务器部署和测试暂缓；镜像/Compose/Caddy/公网 DNS、HTTPS、OIDC 与浏览器人工验收不在本轮完成声明内，服务器现场未验。
 
 ## 目标
 
@@ -26,12 +26,22 @@
 
 ## 验证结果
 
-实现后补充。
+✅ 当前全量 `.venv/bin/python -m unittest discover -q`：129 tests / OK；任务 9 focused：41 tests / OK。✅ 本地 Streamlit `/_stcore/health` 返回 `200 ok`，镜像中定义的同一 Python 探针在本地解释器执行退出码 0，临时服务已停止。⚠️ 这些结果证明本地代码、SQLite 与配置合同，不证明镜像构建、容器运行、浏览器视觉或公网认证。
 
 ## Git 提交
 
 - `5ec945e docs: design secure interactive web dashboard`
 - `f2d61e4 docs: clarify dashboard trace and auth boundaries`
+- `77a83bf15f227f571bbc0802bf3e06311b42c23e feat: add deterministic simulation progress hooks`
+- `f79675c4e9b63b568fad491a638a07e0a0e8d998 feat: add dashboard data contracts`
+- `75bc5d97d51e0d8a934665a1dc2b972285fc5266 fix: complete dashboard result payload`
+- `4e8d5aa3bb12e93afe725bc072548ceb6e4c1925 feat: add transactional simulation history`
+- `6eab1421d8d83a3dc09036dfba050af8438f3685 feat: add cancellable simulation jobs`
+- `7984dcf715b5934f24a466a62aa4a51c88572f54 feat: add fail-closed dashboard authentication`
+- `b12109553e404b388e405f73246618aac508ffdf feat: add dashboard result visualizations`
+- `ce67c0dacccaf7d4585e4c05db3f54550744e53a feat: add interactive simulation dashboard`
+- `a153efc0b3e053b4572e4eb9f515e72d00e5c8c9 fix: share dashboard job admission across sessions and sync mode`
+- `a0f4764896b63caae8796c9a265d5fe4849eb7f5 feat: add simulation history comparison`
 
 ## 任务 5：认证与 fail-closed 配置
 
@@ -122,3 +132,31 @@
 - ✅ 因果验证：仅撤回 `[:2]` 截断，工作流出现“First list contains 1 additional elements”；恢复后 1 test / OK。仅在首次删除点击加入立即删除，出现 `AssertionError: unexpectedly None`；撤回该实验后 1 test / OK。两次实验互相独立且均恢复。
 - ✅ focused：`.venv/bin/python -m unittest tests.test_dashboard_app tests.test_repository -v`，32 tests / OK；全量 `.venv/bin/python -m unittest discover -q`，120 tests / OK；`git diff --check` 通过。
 - ⚠️ 上述结果验证真实 SQLite、AppTest 组件及状态流，不证明真实浏览器的并排布局、辅助技术可访问性、轮询计时或公网认证部署。旧快照无概率曲线数据，因此不提供历史概率曲线叠加；当前页以外的选择不会跨页保留。AppTest bare-mode 警告和既有 CLI 负例 stderr 保留，不是页面异常。
+
+## 任务 9：本地备份验收与服务器部署接口
+
+### 范围与实现
+
+- ✅ 按用户最新裁定，本轮完成本地功能与验证；服务器功能/测试只保留接口和中文运维步骤，不实际部署。Dockerfile、Compose、Caddyfile、systemd service/timer 接口已实现，静态合同已验证。
+- ✅ Dockerfile 固定 `python:3.12.14-slim-trixie`，安装现有 requirements，创建非 root `app`、数据/任务/备份目录，使用 exec-form Streamlit 命令与 Python HTTP health probe。Compose 固定 `APP_ENVIRONMENT=production`、`APP_AUTH_MODE=oidc`；白名单从环境注入，只有 `caddy:2.11.4-alpine` 发布 80/443；数据、备份、证书和 Caddy 配置使用命名卷，secrets 只读挂载。
+- ✅ 新增 `scripts/backup_db.py`：路径 resolve、同文件/符号链接/硬链接拒绝、只读 URI 打开源库、SQLite backup API、目标 integrity_check、错误非零退出。它只保护数据库备份边界，不取代数据库业务逻辑或整机容灾。
+- ✅ 修正端到端路径不一致：页面和 worker 原先固定 `history.sqlite3`，简报备份固定 `lottery.sqlite3`。经控制器裁定增加 `LOTTERY_DB_PATH` 覆盖，开发默认不变；Compose 固定 `/app/data/lottery.sqlite3`，页面/worker/备份三者一致。未做隐式旧库迁移。
+- ✅ `.dockerignore` 排除 secrets、环境文件、数据库、备份和证书；扩展 `.gitignore` 保护根目录 SQLite 快照、私钥、证书与 Caddy 运行目录。未读取真实 secrets、未提交数据或凭据。
+- ✅ README 与 `docs/deployment.md` 中文说明本地启动、DNS A/AAAA、端口、OIDC 回调与 secrets、权限、健康/日志、手动/每日备份、systemd 安装与实际 WorkingDirectory、停机恢复、升级、命名 Git 提交回滚，以及未来服务器验收清单。
+
+### RED / GREEN / 因果验证
+
+- ✅ 先写 `tests/test_deployment_files.py` 和数据库覆盖 AppTest，再运行 `.venv/bin/python -m unittest tests.test_deployment_files tests.test_dashboard_app.DashboardAppTest.test_deployment_database_override_is_used_by_page_and_worker -v`：9 tests，9 个预期 FAIL（8 项部署文件缺失、1 项覆盖路径未创建），退出码 1；最小实现后同命令 9 tests / OK。
+- ✅ Git 私密文件边界增补 RED：真实 `git check-ignore` 只保护 4/9 路径，断言 `4 != 9`；扩展忽略规则后 9/9 路径被忽略。
+- ✅ 真实临时 repository 和模拟 payload 验证：源库保持 WAL 连接时在线备份，备份含两条运行及完整 Trace；删除源记录后备份不变；用脚本恢复到停写的原库，记录/Trace 完整一致且可继续写入；目标 integrity_check 为 `ok`。包含 `#?` 的源路径验证只读 URI 正确转义；不存在源库不会被创建；同路径、符号链接、硬链接均拒绝且原记录保留。
+- ✅ 使用真实 SQLite `ignore_check_constraints` 构造违反 CHECK 的行，脚本非零退出并报告 integrity 错误。因果实验只撤回 integrity 拒绝分支，同一测试恢复失败 `AssertionError: 0 == 0`；恢复分支后 1 test / OK。不是依赖 mock 或仅 grep 代码判断行为。
+- ✅ Compose 采用不依赖 YAML 包的保守映射/JSON-inline-list 解析器进行静态合同断言；解析后的生产环境值交给真实 `AuthConfig` 验证，空白名单拒绝。Dockerfile 的 exec 参数以 JSON 解析，systemd 用 configparser/shlex 解析。⚠️ 这些不是 Docker/Caddy 官方解析器，不能证明容器网络或服务器运行成功。
+
+### 最终验证与盲区
+
+- ✅ focused：`.venv/bin/python -m unittest tests.test_deployment_files tests.test_dashboard_app tests.test_repository -q`，41 tests / OK；全量 `.venv/bin/python -m unittest discover -q`，129 tests / OK；`git diff --check` 通过。
+- ✅ 本地 Streamlit 使用 `.venv/bin/python`、临时数据目录、development/disabled 和显式 loopback 监听；`http://127.0.0.1:8501/_stcore/health` 实测 `200 ok`，Dockerfile 定义的同一 Python 健康检查代码在本地解释器实测退出 0；随后临时服务正常停止（退出码 0）。首轮沙箱禁止 socket，获得仅本地监听的审批后完成。⚠️ health 只证明 HTTP 服务与探针存活，不证明页面渲染或登录；页面/worker/SQLite 由 AppTest 和 repository 回归单独验证。
+- ⚠️ Docker 与 docker-compose、caddy 命令均不可用；范围调整前尝试的 `docker compose config`、`docker build -t lottery-simulator-dashboard:test .` 均为 command not found / 127。未安装工具，没有任何镜像/Compose 运行成功声明。范围调整后不再尝试服务器执行。
+- ⚠️ 服务器现场未验：Docker 官方配置解析/构建/运行、卷初始化和权限、Caddy 自动证书、DNS/防火墙、真实 OIDC 回调/白名单联调、systemd 定时触发、容器停机恢复。当前无真实域名或 OIDC 凭据，这些保留为未来部署接口验证。
+- ⚠️ 浏览器人工验收本轮暂缓，未产生桌面/窄屏布局、逐控件焦点、图表数值表可见性、15 个指标完整性或点击删除二次确认的真实浏览器观察。本执行环境未提供 in-app browser 工具；现有 AppTest 只验证对应组件与删除状态流，不能替代视觉验收。
+- ⚠️ 备份仅含 SQLite 历史，不含任务文件、secrets 或证书；同名目标会覆盖，失败目标不可用于恢复。手册要求保留独立 pre-restore/pre-upgrade 备份与异机副本；没有添加自动保留/清理策略。未执行额外 SHA 或镜像摘要核验，Git 提交只用于追踪与回滚。
