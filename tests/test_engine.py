@@ -110,7 +110,234 @@ class EngineTest(unittest.TestCase):
 
         self.assertEqual(result.records, ())
         self.assertEqual(result.total_draws, 100_011)
+        self.assertEqual(result.source_summaries["total"]["draws"], 100_011)
         self.assertEqual(sum(result.count_distribution.values()), 1)
+
+    def test_structured_aggregates_conserve_draws_characters_and_rewards(self):
+        result = simulate(
+            Rule1(), draws=30, trials=20, seed=42, collect_records=False
+        )
+
+        self.assertEqual(set(result.source_summaries), {"main", "bonus", "total"})
+        for source in ("main", "bonus", "total"):
+            summary = result.source_summaries[source]
+            self.assertEqual(
+                set(summary),
+                {
+                    "draws",
+                    "mean_rarity_counts",
+                    "mean_six_star_categories",
+                    "mean_character_counts",
+                    "mean_rewards",
+                    "mean_pity_triggers",
+                },
+            )
+            rarities = summary["mean_rarity_counts"]
+            self.assertAlmostEqual(sum(rarities.values()), summary["draws"])
+            self.assertAlmostEqual(
+                sum(summary["mean_character_counts"].values()), rarities["6"]
+            )
+            self.assertAlmostEqual(
+                summary["mean_rewards"]["奖励A"],
+                rarities["4"] + 5 * rarities["5"] + 25 * rarities["6"],
+            )
+            self.assertAlmostEqual(
+                summary["mean_rewards"]["奖励B"],
+                2 * rarities["5"] + 10 * rarities["6"],
+            )
+
+        main = result.source_summaries["main"]
+        bonus = result.source_summaries["bonus"]
+        total = result.source_summaries["total"]
+        self.assertEqual(total["draws"], main["draws"] + bonus["draws"])
+        for field in (
+            "mean_rarity_counts",
+            "mean_six_star_categories",
+            "mean_character_counts",
+            "mean_rewards",
+            "mean_pity_triggers",
+        ):
+            for name, value in total[field].items():
+                self.assertAlmostEqual(value, main[field][name] + bonus[field][name])
+        self.assertEqual(result.records, ())
+
+    def test_bonus_ten_draws_have_at_least_one_five_or_six_per_trial(self):
+        result = simulate(
+            Rule1(), draws=30, trials=100, seed=7, collect_records=False
+        )
+
+        bonus = result.source_summaries["bonus"]["mean_rarity_counts"]
+        self.assertGreaterEqual(round((bonus["5"] + bonus["6"]) * result.trials), 100)
+
+    def test_fixed_seed_structured_result_has_complete_exact_shape(self):
+        result = simulate(
+            AlwaysSixRule(), draws=1, trials=1, seed=42, collect_records=False
+        )
+        empty_characters = {
+            "UP-A": 0.0,
+            "限定-B": 0.0,
+            "限定-C": 0.0,
+            "常驻-D": 0.0,
+            "常驻-E": 0.0,
+            "常驻-F": 0.0,
+            "常驻-G": 0.0,
+            "常驻-H": 0.0,
+            "常驻-I": 0.0,
+        }
+        six_star_characters = dict(empty_characters, **{"UP-A": 1.0})
+
+        self.assertEqual(
+            result.source_summaries,
+            {
+                "main": {
+                    "draws": 1,
+                    "mean_rarity_counts": {"4": 0.0, "5": 0.0, "6": 1.0},
+                    "mean_six_star_categories": {
+                        "up": 1.0,
+                        "other_limited": 0.0,
+                        "standard": 0.0,
+                    },
+                    "mean_character_counts": six_star_characters,
+                    "mean_rewards": {"奖励A": 25.0, "奖励B": 10.0},
+                    "mean_pity_triggers": {"five_star": 0.0, "six_star_hard": 0.0},
+                },
+                "bonus": {
+                    "draws": 0,
+                    "mean_rarity_counts": {"4": 0.0, "5": 0.0, "6": 0.0},
+                    "mean_six_star_categories": {
+                        "up": 0.0,
+                        "other_limited": 0.0,
+                        "standard": 0.0,
+                    },
+                    "mean_character_counts": empty_characters,
+                    "mean_rewards": {"奖励A": 0.0, "奖励B": 0.0},
+                    "mean_pity_triggers": {"five_star": 0.0, "six_star_hard": 0.0},
+                },
+                "total": {
+                    "draws": 1,
+                    "mean_rarity_counts": {"4": 0.0, "5": 0.0, "6": 1.0},
+                    "mean_six_star_categories": {
+                        "up": 1.0,
+                        "other_limited": 0.0,
+                        "standard": 0.0,
+                    },
+                    "mean_character_counts": six_star_characters,
+                    "mean_rewards": {"奖励A": 25.0, "奖励B": 10.0},
+                    "mean_pity_triggers": {"five_star": 0.0, "six_star_hard": 0.0},
+                },
+            },
+        )
+        self.assertEqual(
+            result.source_distributions,
+            {
+                "main": {
+                    "rarity_counts": {
+                        "4": {"0": 1},
+                        "5": {"0": 1},
+                        "6": {"1": 1},
+                    },
+                    "reward_totals": {
+                        "奖励A": {"25.0": 1},
+                        "奖励B": {"10.0": 1},
+                    },
+                },
+                "bonus": {
+                    "rarity_counts": {
+                        "4": {"0": 1},
+                        "5": {"0": 1},
+                        "6": {"0": 1},
+                    },
+                    "reward_totals": {
+                        "奖励A": {"0.0": 1},
+                        "奖励B": {"0.0": 1},
+                    },
+                },
+                "total": {
+                    "rarity_counts": {
+                        "4": {"0": 1},
+                        "5": {"0": 1},
+                        "6": {"1": 1},
+                    },
+                    "reward_totals": {
+                        "奖励A": {"25.0": 1},
+                        "奖励B": {"10.0": 1},
+                    },
+                },
+            },
+        )
+        self.assertEqual(
+            result.at_least_one_rates,
+            {
+                "main": {
+                    "five_or_higher": 1.0,
+                    "six_star": 1.0,
+                    "up_six_star": 1.0,
+                    "limited_six_star": 1.0,
+                },
+                "bonus": {
+                    "five_or_higher": 0.0,
+                    "six_star": 0.0,
+                    "up_six_star": 0.0,
+                    "limited_six_star": 0.0,
+                },
+                "total": {
+                    "five_or_higher": 1.0,
+                    "six_star": 1.0,
+                    "up_six_star": 1.0,
+                    "limited_six_star": 1.0,
+                },
+            },
+        )
+        self.assertEqual(result.initial_five_star_pity, 0)
+        self.assertEqual(
+            result.pool_config,
+            {
+                "up_share": 0.5,
+                "five_star": {
+                    "base_probability": 0.08,
+                    "pity_enabled": True,
+                    "hard_pity": 10,
+                },
+                "six_star_characters": [
+                    {"name": "UP-A", "is_up": True, "is_limited": True, "up_weight": 1.0},
+                    {"name": "限定-B", "is_up": False, "is_limited": True, "up_weight": None},
+                    {"name": "限定-C", "is_up": False, "is_limited": True, "up_weight": None},
+                    {"name": "常驻-D", "is_up": False, "is_limited": False, "up_weight": None},
+                    {"name": "常驻-E", "is_up": False, "is_limited": False, "up_weight": None},
+                    {"name": "常驻-F", "is_up": False, "is_limited": False, "up_weight": None},
+                    {"name": "常驻-G", "is_up": False, "is_limited": False, "up_weight": None},
+                    {"name": "常驻-H", "is_up": False, "is_limited": False, "up_weight": None},
+                    {"name": "常驻-I", "is_up": False, "is_limited": False, "up_weight": None},
+                ],
+                "rewards": [
+                    {"name": "奖励A", "four_star": 1.0, "five_star": 5.0, "six_star": 25.0},
+                    {"name": "奖励B", "four_star": 0.0, "five_star": 2.0, "six_star": 10.0},
+                ],
+            },
+        )
+
+    def test_trace_inserts_structured_bonus_records_after_main_draw_thirty(self):
+        result = simulate(Rule1(), draws=30, trials=1, seed=42)
+
+        self.assertEqual(
+            [record.source for record in result.records[29:]],
+            ["main"] + ["bonus"] * 10,
+        )
+        main_state_at_thirty = result.records[29].state_after
+        for record in result.records:
+            self.assertIn(record.rarity, (4, 5, 6))
+            self.assertEqual(record.is_six_star, record.rarity == 6)
+            self.assertEqual(record.six_star_character is not None, record.rarity == 6)
+            self.assertIsInstance(record.is_up, bool)
+            self.assertIsInstance(record.is_limited, bool)
+            self.assertEqual(set(record.rewards), {"奖励A", "奖励B"})
+            self.assertAlmostEqual(sum(astuple(record.rarity_probabilities)), 1.0)
+            self.assertIsInstance(record.five_star_pity_triggered, bool)
+            self.assertIsInstance(record.six_star_hard_pity_triggered, bool)
+        for record in result.records[30:]:
+            self.assertEqual(record.state_after, main_state_at_thirty)
+            self.assertIsNotNone(record.source_state_before)
+            self.assertIsNotNone(record.source_state_after)
 
     def test_multiple_trials_only_keep_aggregates(self):
         result = simulate(self.rule, draws=100, trials=50, seed=42)
@@ -121,7 +348,9 @@ class EngineTest(unittest.TestCase):
     def test_initial_pity_is_applied(self):
         result = simulate(self.rule, draws=1, trials=1, seed=1, initial_pity=79)
         self.assertTrue(result.records[0].is_six_star)
+        self.assertEqual(result.records[0].rarity, 6)
         self.assertEqual(result.records[0].probability, 1.0)
+        self.assertTrue(result.records[0].six_star_hard_pity_triggered)
         self.assertEqual(result.records[0].state_after.misses_since_six_star, 0)
 
     def test_bonus_records_are_inserted_without_changing_main_pity(self):
@@ -189,6 +418,7 @@ class EngineTest(unittest.TestCase):
         bonus = [record for record in result.records if record.source == "bonus"]
 
         self.assertEqual(len(bonus), 10)
+        self.assertEqual(result.initial_five_star_pity, 8)
         self.assertEqual(len({record.state_after for record in bonus}), 1)
         self.assertEqual(bonus[0].source_state_before, DrawState())
         self.assertTrue(any(

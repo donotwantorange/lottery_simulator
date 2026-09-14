@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from collections.abc import Callable
 import random
 import secrets
@@ -36,6 +36,14 @@ class DrawRecord:
     main_draws_completed: int | None = None
     source_state_before: DrawState | None = None
     source_state_after: DrawState | None = None
+    rarity: int | None = None
+    six_star_character: str | None = None
+    is_up: bool = False
+    is_limited: bool = False
+    rewards: dict[str, float] = field(default_factory=dict)
+    rarity_probabilities: RarityProbabilities | None = None
+    five_star_pity_triggered: bool = False
+    six_star_hard_pity_triggered: bool = False
 
     def __post_init__(self) -> None:
         if self.main_draws_completed is None:
@@ -63,6 +71,11 @@ class SimulationResult:
     records: tuple[DrawRecord, ...]
     initial_main_draws: int | None = None
     final_main_draws: int | None = None
+    source_summaries: dict[str, dict] = field(default_factory=dict)
+    source_distributions: dict[str, dict] = field(default_factory=dict)
+    at_least_one_rates: dict[str, dict[str, float]] = field(default_factory=dict)
+    pool_config: dict = field(default_factory=dict)
+    initial_five_star_pity: int = 0
 
     def __post_init__(self) -> None:
         defaults = {
@@ -80,6 +93,44 @@ CancelCheck = Callable[[], bool]
 
 class SimulationCancelled(RuntimeError):
     pass
+
+
+def _empty_counts(config):
+    return {
+        "rarities": {"4": 0, "5": 0, "6": 0},
+        "categories": {"up": 0, "other_limited": 0, "standard": 0},
+        "characters": {c.name: 0 for c in config.six_star_characters},
+        "rewards": {reward.name: 0.0 for reward in config.rewards},
+        "pity_triggers": {"five_star": 0, "six_star_hard": 0},
+    }
+
+
+def _add_outcome(counts: dict, outcome: DrawOutcome) -> None:
+    counts["rarities"][str(outcome.rarity)] += 1
+    if outcome.six_star_character is not None:
+        category = (
+            "up"
+            if outcome.is_up
+            else "other_limited"
+            if outcome.is_limited
+            else "standard"
+        )
+        counts["categories"][category] += 1
+        counts["characters"][outcome.six_star_character] += 1
+    for name, amount in outcome.rewards.items():
+        counts["rewards"][name] += amount
+    counts["pity_triggers"]["five_star"] += int(
+        outcome.five_star_pity_triggered
+    )
+    counts["pity_triggers"]["six_star_hard"] += int(
+        outcome.six_star_hard_pity_triggered
+    )
+
+
+def _add_counts(target: dict, source: dict) -> None:
+    for group, values in source.items():
+        for name, value in values.items():
+            target[group][name] += value
 
 
 def draw_once(
@@ -147,34 +198,49 @@ def simulate(
     if isinstance(actual_seed, bool) or not isinstance(actual_seed, int):
         raise ValueError("seed must be an integer")
     rng = random.Random(actual_seed)
-    count_distribution: dict[int, int] = {}
+    sources = ("main", "bonus", "total")
+    total_counts = {source: _empty_counts(rule.config) for source in sources}
+    source_distributions = {
+        source: {
+            "rarity_counts": {rarity: {} for rarity in ("4", "5", "6")},
+            "reward_totals": {reward.name: {} for reward in rule.config.rewards},
+        }
+        for source in sources
+    }
+    rate_names = (
+        "five_or_higher",
+        "six_star",
+        "up_six_star",
+        "limited_six_star",
+    )
+    at_least_one_counts = {
+        source: {name: 0 for name in rate_names} for source in sources
+    }
     records: list[DrawRecord] = []
-    total_six_stars = 0
-    total_main_six_stars = 0
-    total_bonus_six_stars = 0
     interval_sum = 0
     completed_intervals = 0
     bonus_draws_per_trial = 0
 
     for trial in range(trials):
         state = initial_state
+        trial_counts = {source: _empty_counts(rule.config) for source in sources}
         main_draws_completed = initial_pity
-        main_six_stars = 0
-        bonus_six_stars = 0
         trial_bonus_draws = 0
         actual_draw_index = 0
         for main_draw_index in range(1, draws + 1):
             if cancel_check is not None and cancel_check():
                 raise SimulationCancelled("simulation cancelled")
             actual_draw_index += 1
-            probability = rule.probability(state)
+            source_state_before = state
+            outcome, state_after, probabilities = draw_once(rule, state, rng)
+            probability = probabilities.six_star
             if not 0.0 <= probability <= 1.0:
                 raise ValueError("rule returned a probability outside [0, 1]")
             pity_position = state.misses_since_six_star + 1
-            is_six_star = rng.random() < probability
-            state_after = rule.advance(state, is_six_star)
+            is_six_star = outcome.rarity == 6
+            _add_outcome(trial_counts["main"], outcome)
+            _add_outcome(trial_counts["total"], outcome)
             if is_six_star:
-                main_six_stars += 1
                 interval_sum += pity_position
                 completed_intervals += 1
             if collect_records:
@@ -189,8 +255,18 @@ def simulate(
                         source_index=main_draw_index,
                         bonus_event=None,
                         main_draws_completed=main_draws_completed + 1,
-                        source_state_before=state,
+                        source_state_before=source_state_before,
                         source_state_after=state_after,
+                        rarity=outcome.rarity,
+                        six_star_character=outcome.six_star_character,
+                        is_up=outcome.is_up,
+                        is_limited=outcome.is_limited,
+                        rewards=outcome.rewards,
+                        rarity_probabilities=probabilities,
+                        five_star_pity_triggered=outcome.five_star_pity_triggered,
+                        six_star_hard_pity_triggered=(
+                            outcome.six_star_hard_pity_triggered
+                        ),
                     )
                 )
             state = state_after
@@ -212,7 +288,8 @@ def simulate(
                         temporary_rule, temporary_state, rng
                     )
                     bonus_is_six_star = outcome.rarity == 6
-                    bonus_six_stars += int(bonus_is_six_star)
+                    _add_outcome(trial_counts["bonus"], outcome)
+                    _add_outcome(trial_counts["total"], outcome)
                     if collect_records:
                         records.append(
                             DrawRecord(
@@ -227,18 +304,91 @@ def simulate(
                                 main_draws_completed=main_draws_completed,
                                 source_state_before=source_state_before,
                                 source_state_after=temporary_state,
+                                rarity=outcome.rarity,
+                                six_star_character=outcome.six_star_character,
+                                is_up=outcome.is_up,
+                                is_limited=outcome.is_limited,
+                                rewards=outcome.rewards,
+                                rarity_probabilities=probabilities,
+                                five_star_pity_triggered=(
+                                    outcome.five_star_pity_triggered
+                                ),
+                                six_star_hard_pity_triggered=(
+                                    outcome.six_star_hard_pity_triggered
+                                ),
                             )
                         )
         if trial == 0:
             bonus_draws_per_trial = trial_bonus_draws
-        six_stars = main_six_stars + bonus_six_stars
-        total_main_six_stars += main_six_stars
-        total_bonus_six_stars += bonus_six_stars
-        total_six_stars += six_stars
-        count_distribution[six_stars] = count_distribution.get(six_stars, 0) + 1
+        for source in sources:
+            counts = trial_counts[source]
+            _add_counts(total_counts[source], counts)
+            distributions = source_distributions[source]
+            for rarity, count in counts["rarities"].items():
+                frequency = distributions["rarity_counts"][rarity]
+                count_string = str(count)
+                frequency[count_string] = frequency.get(count_string, 0) + 1
+            for reward_name, reward_total in counts["rewards"].items():
+                frequency = distributions["reward_totals"][reward_name]
+                total_string = str(reward_total)
+                frequency[total_string] = frequency.get(total_string, 0) + 1
+            indicators = {
+                "five_or_higher": counts["rarities"]["5"] + counts["rarities"]["6"],
+                "six_star": counts["rarities"]["6"],
+                "up_six_star": counts["categories"]["up"],
+                "limited_six_star": (
+                    counts["categories"]["up"]
+                    + counts["categories"]["other_limited"]
+                ),
+            }
+            for name, count in indicators.items():
+                at_least_one_counts[source][name] += int(count > 0)
 
     theoretical_main = expected_six_stars(rule, draws, initial_pity)
     theoretical_bonus = expected_bonus_six_stars(rule, draws, initial_pity)
+    source_draws = {
+        "main": draws,
+        "bonus": bonus_draws_per_trial,
+        "total": draws + bonus_draws_per_trial,
+    }
+    source_summaries = {
+        source: {
+            "draws": source_draws[source],
+            "mean_rarity_counts": {
+                name: value / trials
+                for name, value in total_counts[source]["rarities"].items()
+            },
+            "mean_six_star_categories": {
+                name: value / trials
+                for name, value in total_counts[source]["categories"].items()
+            },
+            "mean_character_counts": {
+                name: value / trials
+                for name, value in total_counts[source]["characters"].items()
+            },
+            "mean_rewards": {
+                name: value / trials
+                for name, value in total_counts[source]["rewards"].items()
+            },
+            "mean_pity_triggers": {
+                name: value / trials
+                for name, value in total_counts[source]["pity_triggers"].items()
+            },
+        }
+        for source in sources
+    }
+    at_least_one_rates = {
+        source: {
+            name: at_least_one_counts[source][name] / trials for name in rate_names
+        }
+        for source in sources
+    }
+    count_distribution = {
+        int(count): frequency
+        for count, frequency in source_distributions["total"]["rarity_counts"][
+            "6"
+        ].items()
+    }
 
     return SimulationResult(
         rule_name=rule.name,
@@ -251,10 +401,10 @@ def simulate(
         bonus_draws=bonus_draws_per_trial,
         total_draws=draws + bonus_draws_per_trial,
         count_distribution=count_distribution,
-        mean_main_six_stars=total_main_six_stars / trials,
-        mean_bonus_six_stars=total_bonus_six_stars / trials,
-        mean_six_stars=total_six_stars / trials,
-        at_least_one_rate=(trials - count_distribution.get(0, 0)) / trials,
+        mean_main_six_stars=source_summaries["main"]["mean_rarity_counts"]["6"],
+        mean_bonus_six_stars=source_summaries["bonus"]["mean_rarity_counts"]["6"],
+        mean_six_stars=source_summaries["total"]["mean_rarity_counts"]["6"],
+        at_least_one_rate=at_least_one_rates["total"]["six_star"],
         observed_mean_interval=(
             interval_sum / completed_intervals if completed_intervals else None
         ),
@@ -262,4 +412,9 @@ def simulate(
         theoretical_expected_bonus_count=theoretical_bonus,
         theoretical_expected_count=theoretical_main + theoretical_bonus,
         records=tuple(records),
+        source_summaries=source_summaries,
+        source_distributions=source_distributions,
+        at_least_one_rates=at_least_one_rates,
+        pool_config=rule.config.to_dict(),
+        initial_five_star_pity=initial_five_star_pity,
     )
