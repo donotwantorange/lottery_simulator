@@ -96,6 +96,39 @@ class Rule1Test(unittest.TestCase):
         with self.assertRaises(ValueError):
             Rule1(overflowing)
 
+    def test_six_star_hard_pity_zeroes_five_star_probability(self):
+        config = load_pool_config()
+        disabled = replace(
+            config,
+            five_star=replace(config.five_star, pity_enabled=False),
+        )
+
+        for candidate in (config, disabled):
+            with self.subTest(pity_enabled=candidate.five_star.pity_enabled):
+                self.assertEqual(
+                    Rule1(candidate).rarity_probabilities(DrawState(79, 0)),
+                    RarityProbabilities(0.0, 0.0, 1.0),
+                )
+
+    def test_rule_allows_overlapping_base_rate_when_every_draw_has_five_star_pity(self):
+        config = load_pool_config()
+        always_pity = replace(
+            config,
+            five_star=replace(
+                config.five_star,
+                base_probability=0.30,
+                hard_pity=1,
+            ),
+        )
+
+        try:
+            probabilities = Rule1(always_pity).rarity_probabilities(DrawState(78, 0))
+        except ValueError as error:
+            self.fail(f"unused base five-star probability was rejected: {error}")
+        self.assertEqual(probabilities.four_star, 0.0)
+        self.assertAlmostEqual(probabilities.five_star, 0.292)
+        self.assertAlmostEqual(probabilities.six_star, 0.708)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -16,13 +16,18 @@ class Rule1:
 
     def __init__(self, config: PoolConfig | None = None) -> None:
         self.config = load_pool_config() if config is None else config
-        for misses in range(self.max_pity - 1):
-            if (
-                Rule1.probability(self, DrawState(misses))
-                + self.config.five_star.base_probability
-                > 1.0
-            ):
-                raise ValueError("five-star and six-star probabilities exceed 1")
+        base_five_is_reachable = (
+            not self.config.five_star.pity_enabled
+            or self.config.five_star.hard_pity > 1
+        )
+        if base_five_is_reachable:
+            for misses in range(self.max_pity - 1):
+                if (
+                    Rule1.probability(self, DrawState(misses))
+                    + self.config.five_star.base_probability
+                    > 1.0
+                ):
+                    raise ValueError("five-star and six-star probabilities exceed 1")
 
     def _validate(self, state: DrawState) -> None:
         misses = state.misses_since_six_star
@@ -59,7 +64,9 @@ class Rule1:
     def rarity_probabilities(self, state: DrawState) -> RarityProbabilities:
         six = self.probability(state)
         five = (
-            1.0 - six
+            0.0
+            if six == 1.0
+            else 1.0 - six
             if self.five_star_pity_active(state)
             else self.config.five_star.base_probability
         )
