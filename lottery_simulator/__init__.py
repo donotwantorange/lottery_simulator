@@ -6,6 +6,13 @@ from lottery_simulator.rules.base import (
 )
 from lottery_simulator.rules.first_thirty_bonus import FirstThirtyBonusRule
 from lottery_simulator.rules.rule_1 import Rule1
+from lottery_simulator.rules.pool_config import (
+    FiveStarPolicy,
+    PoolConfig,
+    RewardRule,
+    SixStarCharacter,
+    load_pool_config,
+)
 from lottery_simulator.analysis import (
     DistributionStats,
     distribution_stats,
@@ -24,6 +31,11 @@ __all__ = [
     "LotterySubRule",
     "FirstThirtyBonusRule",
     "Rule1",
+    "FiveStarPolicy",
+    "PoolConfig",
+    "RewardRule",
+    "SixStarCharacter",
+    "load_pool_config",
     "SimulationResult",
     "distribution_stats",
     "expected_bonus_six_stars",
