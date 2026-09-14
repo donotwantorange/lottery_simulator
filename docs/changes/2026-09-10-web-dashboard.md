@@ -42,6 +42,7 @@
 - `ce67c0dacccaf7d4585e4c05db3f54550744e53a feat: add interactive simulation dashboard`
 - `a153efc0b3e053b4572e4eb9f515e72d00e5c8c9 fix: share dashboard job admission across sessions and sync mode`
 - `a0f4764896b63caae8796c9a265d5fe4849eb7f5 feat: add simulation history comparison`
+- `ad37a9c93c54cf0cfe9df458db25c2fc498cda34 feat: add secure Linux dashboard deployment`
 
 ## 任务 5：认证与 fail-closed 配置
 
