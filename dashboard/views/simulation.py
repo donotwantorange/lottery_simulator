@@ -10,7 +10,7 @@ from dashboard.charts import (
 from lottery_simulator.cli import RULES
 
 
-def render_result(st, payload: dict, trace_enabled: bool) -> None:
+def render_result(st, payload: dict, trace_enabled: bool, *, saved_snapshot=False) -> None:
     relative_error = payload["mean_count_relative_error"]
     metrics = (
         ("主池抽数", payload["main_draws"]),
@@ -33,20 +33,23 @@ def render_result(st, payload: dict, trace_enabled: bool) -> None:
         for column, (label, value) in zip(st.columns(3), metrics[start : start + 3]):
             column.metric(label, value)
 
-    rule = RULES[payload["rule_name"]]()
-    probability_data = probability_rows(rule)
     count_data = count_distribution_rows(payload)
     source_data = source_comparison_rows(payload)
 
-    st.subheader("主池六星概率")
-    st.line_chart(
-        probability_data,
-        x="抽次",
-        y=("条件六星概率", "首次六星累计概率"),
-        width="stretch",
-    )
-    with st.expander("查看主池六星概率数值"):
-        st.dataframe(probability_data, hide_index=True, width="stretch")
+    if saved_snapshot:
+        st.info("历史快照未保存概率曲线；仅展示保存时的指标与分布")
+    else:
+        rule = RULES[payload["rule_name"]]()
+        probability_data = probability_rows(rule)
+        st.subheader("主池六星概率")
+        st.line_chart(
+            probability_data,
+            x="抽次",
+            y=("条件六星概率", "首次六星累计概率"),
+            width="stretch",
+        )
+        with st.expander("查看主池六星概率数值"):
+            st.dataframe(probability_data, hide_index=True, width="stretch")
 
     st.subheader("六星数量分布")
     st.bar_chart(count_data, x="六星数量", y="实验次数", width="stretch")
@@ -90,4 +93,5 @@ def render_result(st, payload: dict, trace_enabled: bool) -> None:
         data=json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True).encode("utf-8"),
         file_name="simulation-result.json",
         mime="application/json",
+        key=f'history-download-{payload["id"]}' if saved_snapshot else None,
     )

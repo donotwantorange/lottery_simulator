@@ -16,6 +16,8 @@ if str(project_root) not in sys.path:
 from dashboard.auth import AuthConfig, require_access
 from dashboard.jobs import ACTIVE_STATUSES, JobAlreadyRunning, JobManager
 from dashboard.models import RunParameters
+from dashboard.repository import HistoryRepository
+from dashboard.views.history import apply_pending_reuse, render_history
 from dashboard.views.simulation import render_result
 from lottery_simulator.cli import RULES
 
@@ -37,6 +39,9 @@ require_dashboard_access()
 
 data_dir = Path(os.environ.get("LOTTERY_DATA_DIR", project_root / "data"))
 manager = JobManager(data_dir / "jobs", data_dir / "history.sqlite3")
+repository = HistoryRepository(data_dir / "history.sqlite3")
+repository.initialize()
+apply_pending_reuse(st, repository)
 current_id = st.session_state.get("current_job_id")
 current = manager.get_active()
 if current is not None:
@@ -47,14 +52,15 @@ else:
 live = current is not None and current.status in ACTIVE_STATUSES
 
 st.title("抽奖概率实验室")
+st.session_state.setdefault("draws", 100)
 with st.sidebar:
-    rule_name = st.selectbox("规则", tuple(RULES))
-    draws = st.number_input("主池抽数", min_value=1, value=100, step=1)
-    trials = st.number_input("实验轮数", min_value=1, value=1, step=1)
+    rule_name = st.selectbox("规则", tuple(RULES), key="rule_name")
+    draws = st.number_input("主池抽数", min_value=1, step=1, key="draws")
+    trials = st.number_input("实验轮数", min_value=1, step=1, key="trials")
     initial_pity = st.number_input("假设主池已累计多少抽仍未出6星", min_value=0,
-                                   value=0, step=1)
-    seed_text = st.text_input("随机种子（留空自动生成）")
-    trace = st.toggle("Trace", disabled=trials != 1, help="逐抽记录仅支持单轮模拟")
+                                   step=1, key="initial_pity")
+    seed_text = st.text_input("随机种子（留空自动生成）", key="seed_text")
+    trace = st.toggle("Trace", disabled=trials != 1, help="逐抽记录仅支持单轮模拟", key="trace")
     if st.button("开始模拟", disabled=live):
         try:
             seed = int(seed_text) if seed_text.strip() else None
@@ -112,3 +118,5 @@ elif current.status == "completed":
         render_result(st, payload, trace_enabled=current.parameters["trace"])
     else:
         st.error("模拟结果暂不可用")
+
+render_history(st, repository)

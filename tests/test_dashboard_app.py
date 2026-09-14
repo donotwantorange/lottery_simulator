@@ -1,5 +1,6 @@
 from contextlib import closing
 from dataclasses import replace
+from datetime import date
 import os
 from pathlib import Path
 import sqlite3
@@ -103,6 +104,120 @@ class DashboardAppTest(unittest.TestCase):
         repository.initialize()
         return repository
 
+    def seed_history(self):
+        repository = self.repository()
+        ids = []
+        for index in range(3):
+            rule = Rule1()
+            payload = result_payload(simulate(rule, index + 2, trials=2 if index == 1 else 1,
+                                              seed=42 + index,
+                                              initial_pity=29), rule, 0.25)
+            if index == 0:
+                payload["rule_name"] = "retired-rule"
+            if index == 1:
+                payload["rule_version"] = "0.9"
+            ids.append(repository.save_run(payload, trace_enabled=index != 1))
+        with closing(sqlite3.connect(repository.path)) as connection, connection:
+            for index, run_id in enumerate(ids):
+                connection.execute("UPDATE simulation_runs SET created_at=? WHERE id=?",
+                                   (f"2026-09-{10 + index}T12:00:00+00:00", run_id))
+        return repository, ids
+
+    def test_history_workflow(self):
+        repository, ids = self.seed_history()
+        app = self.load()
+        self.assertIn("历史规则", [item.label for item in app.selectbox])
+        self.assertEqual(app.dataframe[0].value["运行 ID"].tolist(), ids[::-1])
+        self.widget(app.selectbox, "历史 Trace").set_value("不含 Trace").run()
+        self.assertEqual(app.dataframe[0].value["运行 ID"].tolist(), [ids[1]])
+        self.widget(app.selectbox, "历史 Trace").set_value("全部").run()
+        self.widget(app.selectbox, "历史规则").set_value("retired-rule").run()
+        self.assertEqual(app.dataframe[0].value["运行 ID"].tolist(), [ids[0]])
+        self.widget(app.selectbox, "历史规则").set_value("全部").run()
+        self.widget(app.multiselect, "选择历史运行").set_value(ids[1:]).run()
+        self.assertEqual(len(app.exception), 0)
+        self.assertEqual(len(app.metric), 30)
+        self.assertTrue(any("统计口径不同" in item.value for item in app.warning))
+        self.widget(app.multiselect, "选择历史运行").set_value(ids).run()
+        self.assertEqual(len(app.exception), 0)
+        self.assertTrue(any("最多选择两次运行" in item.value for item in app.error))
+        self.assertEqual(app.session_state["selected_history_ids"], ids[:2])
+        self.assertEqual(len(app.metric), 30)
+        self.assertEqual(len(app.get("download_button")), 2)
+        self.assertTrue(any("未保存概率曲线" in item.value for item in app.info))
+        with (patch("streamlit.elements.lib.policies._shown_default_value_warning", False),
+              self.assertNoLogs("streamlit.elements.lib.policies", level="WARNING")):
+            self.widget(app.button, "复用参数 " + ids[1]).click().run()
+        self.assertEqual(len(app.exception), 0)
+        for key, value in {"draws": 3, "trials": 2, "initial_pity": 29,
+                           "seed_text": "43", "rule_name": "rule1", "trace": False}.items():
+            self.assertEqual(app.session_state[key], value)
+        self.assertEqual(self.widget(app.number_input, "主池抽数").value, 3)
+        self.assertEqual(self.widget(app.number_input, "实验轮数").value, 2)
+        self.assertEqual(self.widget(app.number_input, PITY_LABEL).value, 29)
+        self.assertEqual(self.widget(app.text_input, "随机种子（留空自动生成）").value, "43")
+        self.assertTrue(self.widget(app.toggle, "Trace").disabled)
+        self.assertEqual(list(self.root.glob("jobs/*/state.json")), [])
+        self.assertIsNone(app.session_state.filtered_state.get("current_job_id"))
+        self.assertEqual(len(repository.list_runs({}, 20, 0)), 3)
+        self.widget(app.button, "删除历史 " + ids[0]).click().run()
+        self.assertIsNotNone(repository.get_run(ids[0]))
+        self.assertTrue(repository.get_run(ids[0], True)["records"])
+        self.widget(app.button, "取消删除").click().run()
+        self.assertIsNotNone(repository.get_run(ids[0]))
+        self.assertNotIn("确认删除", [button.label for button in app.button])
+        self.widget(app.button, "删除历史 " + ids[0]).click().run()
+        self.widget(app.button, "确认删除").click().run()
+        self.assertEqual(len(app.exception), 0)
+        self.assertIsNone(repository.get_run(ids[0]))
+        self.assertEqual(app.session_state["selected_history_ids"], [ids[1]])
+        with closing(sqlite3.connect(repository.path)) as connection:
+            self.assertEqual(connection.execute(
+                "SELECT COUNT(*) FROM draw_records WHERE run_id=?", (ids[0],)
+            ).fetchone()[0], 0)
+        self.assertTrue(all(not isinstance(value, (dict, HistoryRepository))
+                            for value in app.session_state.filtered_state.values()))
+
+    def test_history_date_range_pagination_and_schema_warning(self):
+        repository, ids = self.seed_history()
+        app = self.load()
+        self.widget(app.date_input, "历史开始日期（UTC）").set_value(date(2026, 9, 11))
+        self.widget(app.date_input, "历史结束日期（UTC）").set_value(date(2026, 9, 11)).run()
+        self.assertEqual(app.dataframe[0].value["运行 ID"].tolist(), [ids[1]])
+        self.widget(app.date_input, "历史结束日期（UTC）").set_value(date(2026, 9, 10)).run()
+        self.assertTrue(any("开始日期不能晚于结束日期" in item.value for item in app.error))
+        payload = repository.get_run(ids[2])
+        newest = [repository.save_run(payload, False) for _ in range(19)][::-1]
+        app = self.load()
+        self.assertEqual(app.dataframe[0].value["运行 ID"].tolist(), newest + [ids[2]])
+        self.widget(app.number_input, "历史页码").set_value(2).run()
+        self.assertEqual(app.dataframe[0].value["运行 ID"].tolist(), [ids[1], ids[0]])
+        self.widget(app.number_input, "历史页码").set_value(3).run()
+        self.assertTrue(any("没有历史记录" in item.value for item in app.info))
+        with closing(sqlite3.connect(repository.path)) as connection, connection:
+            connection.execute("UPDATE simulation_runs SET schema_version=2 WHERE id=?",
+                               (newest[0],))
+        self.widget(app.number_input, "历史页码").set_value(1).run()
+        self.widget(app.multiselect, "选择历史运行").set_value(newest[:2]).run()
+        self.assertEqual(len(app.exception), 0)
+        self.assertEqual(len(app.metric), 30)
+        self.assertTrue(any("统计口径不同" in item.value for item in app.warning))
+
+    def test_history_retired_rule_reuse_is_safe_and_missing_selection_clears(self):
+        repository, ids = self.seed_history()
+        app = self.load()
+        self.widget(app.multiselect, "选择历史运行").set_value([ids[0]]).run()
+        self.assertEqual(len(app.metric), 15)
+        self.widget(app.button, "复用参数 " + ids[0]).click().run()
+        self.assertTrue(any("不支持此历史规则" in item.value for item in app.warning))
+        self.assertEqual(self.widget(app.number_input, "主池抽数").value, 100)
+        self.assertEqual(list(self.root.glob("jobs/*/state.json")), [])
+        repository.delete_run(ids[0])
+        app.run()
+        self.assertEqual(len(app.exception), 0)
+        self.assertEqual(app.session_state["selected_history_ids"], [])
+        self.assertEqual(len(app.metric), 0)
+
     def start_small(self, app, *, pity=29, trace=True):
         self.widget(app.number_input, "主池抽数").set_value(2)
         self.widget(app.number_input, PITY_LABEL).set_value(pity)
@@ -140,7 +255,10 @@ class DashboardAppTest(unittest.TestCase):
         self.assertLess(rows[0]["mean_count_relative_error"], 0)
         app.run()
         self.assertEqual(len(self.repository().list_runs({}, 10, 0)), 1)
-        self.assertEqual(set(app.session_state.filtered_state), {"current_job_id"})
+        self.assertEqual(set(app.session_state.filtered_state), {
+            "current_job_id", "selected_history_ids", "rule_name", "draws", "trials",
+            "initial_pity", "seed_text", "trace",
+        })
         self.assertFalse(self.widget(app.button, "开始模拟").disabled)
 
     def test_trace_cannot_leak_from_previous_single_trial_toggle(self):

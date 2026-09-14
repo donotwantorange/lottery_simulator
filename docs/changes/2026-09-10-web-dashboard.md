@@ -104,3 +104,21 @@
 - ✅ `.venv/bin/python -m unittest tests.test_dashboard_app tests.test_jobs -q`：34 tests / OK；`.venv/bin/python -m unittest discover -q`：117 tests / OK；`git diff --check` 通过。
 - ✅ 三项故障场景的预期 ERROR 日志用 `assertLogs` 收集，不改变生产日志行为。
 - ⚠️ 实例状态在页面 rerun 时发现，提交阶段仍由文件锁保证准入互斥；上述测试证明组件行为、文件／SQLite 协议和真实后台 worker 回归，不证明浏览器计时精度或公网认证部署。AppTest bare-mode ScriptRunContext 警告和既有 CLI 负例 stderr 保留。
+
+## 任务 8：历史筛选、双运行对比、参数复用与确认删除
+
+- ✅ 新增历史区：倒序列表展示时间、规则、种子、主池抽数、实验轮数、总六星均值和误差；支持规则、Trace、UTC 起止日期筛选，以及每页 20 条的页码分页。规则下拉提供当前及最近 20 条中的规则，也允许输入更早的已停用规则名。
+- ✅ 最多选择两条历史并排展示；超限在控件回调中先明确提示“最多选择两次运行”，再截断并写回选中 ID 列表。规则名称、规则版本或快照 schema_version 不同时提示“统计口径不同”。筛选或翻页会清除不在当前页的选择。
+- ✅ 历史卡复用已有结果渲染器，指标、数量分布、来源图、Trace 和 JSON 下载仅消费 SQLite 保存快照；没有保存的概率曲线不重算，明确提示“历史快照未保存概率曲线”。未知旧规则仍可展示历史；历史下载按钮按运行 ID 区分，防止双卡产生重复控件 ID。
+- ✅ 复用按钮仅暂存运行 ID 并 rerun；下一轮在侧栏控件实例化前查询参数并写入明确 widget keys，不创建任务、不自动模拟。旧版本复用提示当前版本，已停用规则拒绝复用并保留现有输入。主池抽数默认值从 widget Session State 初始化，避免复用后双重默认值警告。
+- ✅ 首次删除点击仅暂存确认 ID；独立“确认删除”才执行 repository 删除，“取消删除”仅退出确认态。确认删除沿用 SQLite 外键级联删除 Trace，随后清理已失效的选择。
+- ✅ 认证仍在全部任务/历史访问之前；保留任务 7 的实例活跃任务发现、准入互斥、Trace 提交限制、轮询和终态展示。业务 Session State 仅存当前任务 ID、历史选择 ID、复用/确认 ID 与标量 widget 值；不存结果 payload 或 repository 对象。
+
+### 验证
+
+- ✅ RED：先用真实临时 SQLite seed 三条历史并写 `test_history_workflow`；`.venv/bin/python -m unittest tests.test_dashboard_app.DashboardAppTest.test_history_workflow -v` 得到 `AssertionError: '历史规则' not found in ['规则']`，退出码 1。没有 mock repository。
+- ✅ GREEN：完整工作流覆盖倒序、规则/Trace 筛选、两卡、三选显式报错并截断、版本提示、旧规则快照、无自动任务的参数回填、取消删除、确认删除和 Trace 级联。另增日期范围/无效范围、22 条分页/空页、schema 口径不一致、已停用规则复用拒绝与外部删除后选择清理的 AppTest。
+- ✅ 复用警告 RED：`assertNoLogs` 捕获 `draws` 的默认值与 Session State 重复赋值 WARNING；改用 Session State 初始化默认值后同一测试通过，未关闭框架告警。
+- ✅ 因果验证：仅撤回 `[:2]` 截断，工作流出现“First list contains 1 additional elements”；恢复后 1 test / OK。仅在首次删除点击加入立即删除，出现 `AssertionError: unexpectedly None`；撤回该实验后 1 test / OK。两次实验互相独立且均恢复。
+- ✅ focused：`.venv/bin/python -m unittest tests.test_dashboard_app tests.test_repository -v`，32 tests / OK；全量 `.venv/bin/python -m unittest discover -q`，120 tests / OK；`git diff --check` 通过。
+- ⚠️ 上述结果验证真实 SQLite、AppTest 组件及状态流，不证明真实浏览器的并排布局、辅助技术可访问性、轮询计时或公网认证部署。旧快照无概率曲线数据，因此不提供历史概率曲线叠加；当前页以外的选择不会跨页保留。AppTest bare-mode 警告和既有 CLI 负例 stderr 保留，不是页面异常。
