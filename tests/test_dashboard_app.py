@@ -226,7 +226,8 @@ class DashboardAppTest(unittest.TestCase):
         self.widget(app.number_input, "历史页码").set_value(3).run()
         self.assertTrue(any("没有历史记录" in item.value for item in app.info))
         with closing(sqlite3.connect(repository.path)) as connection, connection:
-            connection.execute("UPDATE simulation_runs SET schema_version=2 WHERE id=?",
+            connection.execute("PRAGMA ignore_check_constraints=ON")
+            connection.execute("UPDATE simulation_runs SET schema_version=1 WHERE id=?",
                                (newest[0],))
         self.widget(app.number_input, "历史页码").set_value(1).run()
         self.widget(app.multiselect, "选择历史运行").set_value(newest[:2]).run()

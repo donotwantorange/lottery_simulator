@@ -33,18 +33,63 @@ class HistoryRepositoryTest(unittest.TestCase):
 
     def test_initialize_empty_version_zero_and_repeat_preserves_run(self):
         with closing(sqlite3.connect(self.path)) as connection:
-            self.assertEqual(connection.execute("PRAGMA user_version").fetchone()[0], 1)
+            self.assertEqual(connection.execute("PRAGMA user_version").fetchone()[0], 2)
+            self.assertEqual(
+                [row[1] for row in connection.execute("PRAGMA table_info(simulation_runs)")],
+                [
+                    "id", "created_at", "rule_name", "rule_version", "main_draws", "trials",
+                    "initial_pity", "initial_five_star_pity", "seed", "trace_enabled",
+                    "pool_config_json", "result_json", "schema_version",
+                ],
+            )
+            self.assertEqual(
+                [row[1] for row in connection.execute("PRAGMA table_info(draw_records)")],
+                ["run_id", "draw_index", "record_json"],
+            )
         run_id = self.repository.save_run(self.payload, trace_enabled=True)
         self.repository.initialize()
         self.assertEqual(self.repository.get_run(run_id)["seed"], 42)
 
+    def assert_initialize_rejected_without_changes(self, path, version):
+        before = path.read_bytes()
+        with closing(sqlite3.connect(path)) as connection:
+            semantic_before = list(connection.iterdump())
+        with self.assertRaisesRegex(ValueError, "版本不兼容"):
+            HistoryRepository(path).initialize()
+        self.assertEqual(path.read_bytes(), before)
+        with closing(sqlite3.connect(path)) as connection:
+            self.assertEqual(connection.execute("PRAGMA user_version").fetchone()[0], version)
+            self.assertEqual(list(connection.iterdump()), semantic_before)
+
+    def test_initialize_rejects_old_schema_without_modifying_it(self):
+        path = self.path.with_name("old.sqlite3")
+        with closing(sqlite3.connect(path)) as connection, connection:
+            connection.execute("CREATE TABLE legacy_marker(value TEXT)")
+            connection.execute("INSERT INTO legacy_marker VALUES ('keep')")
+            connection.execute("PRAGMA user_version = 1")
+        self.assert_initialize_rejected_without_changes(path, 1)
+
+    def test_initialize_rejects_nonempty_version_zero_without_modifying_it(self):
+        path = self.path.with_name("unversioned.sqlite3")
+        with closing(sqlite3.connect(path)) as connection, connection:
+            connection.execute("CREATE TABLE legacy_marker(value TEXT)")
+            connection.execute("INSERT INTO legacy_marker VALUES ('keep')")
+        self.assert_initialize_rejected_without_changes(path, 0)
+
     def test_initialize_rejects_future_version_without_changes(self):
-        with closing(sqlite3.connect(self.path)) as connection:
-            connection.execute("PRAGMA user_version = 2")
-        with self.assertRaisesRegex(ValueError, "version"):
-            self.repository.initialize()
-        with closing(sqlite3.connect(self.path)) as connection:
-            self.assertEqual(connection.execute("PRAGMA user_version").fetchone()[0], 2)
+        path = self.path.with_name("future.sqlite3")
+        with closing(sqlite3.connect(path)) as connection, connection:
+            connection.execute("PRAGMA user_version = 3")
+        self.assert_initialize_rejected_without_changes(path, 3)
+
+    def test_v2_round_trip_preserves_config_summary_and_trace(self):
+        original = deepcopy(self.payload)
+        run_id = self.repository.save_run(self.payload, trace_enabled=True)
+        run = self.repository.get_run(run_id, include_records=True)
+        self.assertEqual(run["pool_config"], original["pool_config"])
+        self.assertEqual(run["records"], original["records"])
+        self.assertEqual(run["initial_five_star_pity"], original["initial_five_star_pity"])
+        self.assertEqual(run["schema_version"], 2)
 
     def test_save_and_read_trace_preserve_payload_and_metadata(self):
         original = deepcopy(self.payload)
@@ -53,7 +98,7 @@ class HistoryRepositoryTest(unittest.TestCase):
         run = self.repository.get_run(run_id, include_records=True)
         self.assertEqual(str(UUID(run_id)), run_id)
         self.assertGreaterEqual(datetime.fromisoformat(run["created_at"]), before)
-        self.assertEqual(run["schema_version"], 1)
+        self.assertEqual(run["schema_version"], 2)
         self.assertIs(run["trace_enabled"], True)
         for key, value in original.items():
             self.assertEqual(run[key], value, key)
@@ -78,12 +123,12 @@ class HistoryRepositoryTest(unittest.TestCase):
         self.assertEqual(run["records"], [])
         self.assertIs(run["trace_enabled"], False)
         with closing(sqlite3.connect(self.path)) as connection:
-            snapshot, distribution = connection.execute(
-                "SELECT result_json, count_distribution_json FROM simulation_runs"
+            snapshot, pool_config = connection.execute(
+                "SELECT result_json, pool_config_json FROM simulation_runs"
             ).fetchone()
         self.assertNotIn("records", json.loads(snapshot))
         self.assertEqual(snapshot, json.dumps(json.loads(snapshot), sort_keys=True))
-        self.assertEqual(distribution, json.dumps(self.payload["count_distribution"], sort_keys=True))
+        self.assertEqual(pool_config, json.dumps(self.payload["pool_config"], sort_keys=True))
 
     def test_seed_round_trips_unsigned_64_bit_as_decimal_text(self):
         self.payload["seed"] = 18_446_744_073_709_551_615
