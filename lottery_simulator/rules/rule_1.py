@@ -1,4 +1,5 @@
 from dataclasses import replace
+from functools import cached_property
 
 from lottery_simulator.rules.base import BonusEvent, DrawState, RarityProbabilities
 from lottery_simulator.rules.first_thirty_bonus import FirstThirtyBonusRule
@@ -14,7 +15,10 @@ class Rule1:
     version = "2.0"
     max_pity = 80
     subrules = (FirstThirtyBonusRule(),)
-    config = load_pool_config()
+
+    @cached_property
+    def config(self) -> PoolConfig:
+        return load_pool_config()
 
     def __init__(
         self,
@@ -22,7 +26,8 @@ class Rule1:
         fixed_six_star_probability: float | None = None,
         subrules: tuple | None = None,
     ) -> None:
-        self.config = load_pool_config() if config is None else config
+        if config is not None:
+            self.config = config
         self._fixed_six_star_probability = fixed_six_star_probability
         self.subrules = type(self).subrules if subrules is None else subrules
         base_five_is_reachable = (

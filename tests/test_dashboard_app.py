@@ -165,6 +165,20 @@ class DashboardAppTest(unittest.TestCase):
                          ["奖励名称", "四星", "五星", "六星"])
         self.widget(app.download_button, "导出配置 JSON")
 
+    def test_empty_reward_configuration_keeps_four_columns_available_for_new_rows(self):
+        raw = load_pool_config().to_dict()
+        raw["rewards"] = []
+        app = self.load()
+
+        self.widget(app.file_uploader, "导入配置 JSON").set_value((
+            "no-rewards.json", json.dumps(raw).encode("utf-8"), "application/json",
+        )).run()
+
+        reward_editor = next(item for item in app.dataframe if item.key == "pool_reward_editor")
+        self.assertEqual(list(reward_editor.value.columns),
+                         ["奖励名称", "四星", "五星", "六星"])
+        self.assertEqual(len(reward_editor.value), 0)
+
     def test_disabling_five_star_pity_disables_and_zeroes_initial_progress(self):
         app = self.load()
         self.widget(app.number_input, FIVE_STAR_PITY_LABEL).set_value(7)

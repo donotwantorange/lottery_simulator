@@ -5,6 +5,9 @@ import json
 from lottery_simulator.rules.pool_config import PoolConfig, load_pool_config
 
 
+_REWARD_COLUMNS = ("奖励名称", "四星", "五星", "六星")
+
+
 def config_to_editor_rows(config: PoolConfig):
     characters = [
         {
@@ -129,9 +132,16 @@ def render_pool_config_editor(st) -> PoolConfig:
             key="pool_character_editor",
         )
         reward_rows = st.data_editor(
-            st.session_state["pool_reward_rows"], num_rows="dynamic",
+            st.session_state["pool_reward_rows"] or {
+                column: [] for column in _REWARD_COLUMNS
+            }, num_rows="dynamic",
             key="pool_reward_editor",
         )
+        if isinstance(reward_rows, dict):
+            reward_rows = [
+                dict(zip(_REWARD_COLUMNS, values))
+                for values in zip(*(reward_rows[column] for column in _REWARD_COLUMNS))
+            ]
         st.session_state["pool_character_rows"] = character_rows
         st.session_state["pool_reward_rows"] = reward_rows
         try:

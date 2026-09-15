@@ -2,6 +2,7 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing
 from dataclasses import replace
 import fcntl
+import json
 import os
 from pathlib import Path
 import select
@@ -246,6 +247,37 @@ class JobManagerTest(unittest.TestCase):
             state = self.manager.start(parameters, synchronous=True)
 
         self.assertEqual(state.status, "completed")
+
+    def test_worker_cold_import_and_snapshot_rule_never_open_default_configuration(self):
+        serialized = json.dumps(load_pool_config().to_dict())
+        script = f'''
+import json
+from pathlib import Path
+
+real_open = Path.open
+def reject_default(path, *args, **kwargs):
+    if path.name == "rule1_default.json":
+        raise AssertionError("cold worker read default configuration")
+    return real_open(path, *args, **kwargs)
+Path.open = reject_default
+
+import dashboard.worker
+from lottery_simulator.engine import simulate
+from lottery_simulator.rules.pool_config import PoolConfig
+from lottery_simulator.rules.rule_1 import Rule1
+
+config = PoolConfig.from_dict(json.loads({serialized!r}))
+rule = Rule1(config=config)
+result = simulate(rule, 1, seed=42)
+assert result.pool_config == config.to_dict()
+'''
+
+        completed = subprocess.run(
+            [sys.executable, "-c", script], cwd=PROJECT_ROOT,
+            text=True, capture_output=True,
+        )
+
+        self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
 
     def test_start_waits_for_flock_before_checking_and_creating(self):
         self.root.mkdir(parents=True, exist_ok=True)
