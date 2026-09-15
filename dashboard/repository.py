@@ -42,6 +42,8 @@ _FILTERS = {
     "created_to": "created_at <= ?",
 }
 
+_COMPONENT_SUFFIXES = ("", "-journal", "-wal", "-shm")
+
 
 class HistoryRepository:
     """Persist immutable result snapshots; load trace records only on request."""
@@ -62,14 +64,14 @@ class HistoryRepository:
         ).fetchone() is not None
 
     def _inspect_schema(self, path):
-        uri = path.resolve().as_uri() + "?mode=ro"
-        with closing(sqlite3.connect(uri, uri=True)) as connection:
+        # Callers pass a private TemporaryDirectory snapshot; recovery may write there.
+        with closing(sqlite3.connect(path)) as connection:
             version = connection.execute("PRAGMA user_version").fetchone()[0]
             return version, version == 0 and self._has_user_schema(connection)
 
     def _read_components(self):
         components = []
-        for suffix in ("", "-wal", "-shm"):
+        for suffix in _COMPONENT_SUFFIXES:
             try:
                 components.append(Path(str(self.path) + suffix).read_bytes())
             except FileNotFoundError:
@@ -80,7 +82,7 @@ class HistoryRepository:
         for attempt in range(3):
             snapshot = Path(directory) / f"{attempt}-{self.path.name}"
             copied = []
-            for suffix in ("", "-wal", "-shm"):
+            for suffix in _COMPONENT_SUFFIXES:
                 source = Path(str(self.path) + suffix)
                 destination = Path(str(snapshot) + suffix)
                 try:

@@ -2,9 +2,11 @@ from contextlib import closing
 from copy import deepcopy
 from datetime import datetime, timezone
 import json
+import os
 from pathlib import Path
 import shutil
 import sqlite3
+import struct
 import subprocess
 import sys
 from tempfile import TemporaryDirectory
@@ -303,6 +305,100 @@ os._exit(17)
                 "source_unchanged_after_writer_commit": True,
                 "version": 1,
                 "values": ["before", "after"],
+            },
+        )
+
+    def test_initialize_rejects_hot_rollback_journal_by_recovered_schema(self):
+        path = self.path.with_name("hot-journal.sqlite3")
+        with closing(sqlite3.connect(path)) as connection, connection:
+            connection.execute("PRAGMA journal_mode=DELETE")
+            connection.execute("CREATE TABLE legacy_marker(value TEXT)")
+            connection.execute("INSERT INTO legacy_marker VALUES ('keep')")
+            connection.execute("CREATE TABLE filler(payload TEXT)")
+            connection.execute("PRAGMA user_version=1")
+        child = subprocess.run(
+            [sys.executable, "-c", """
+import os
+import sqlite3
+import sys
+
+connection = sqlite3.connect(sys.argv[1])
+connection.execute("PRAGMA journal_mode=DELETE")
+connection.execute("PRAGMA synchronous=FULL")
+connection.execute("PRAGMA cache_size=1")
+connection.execute("BEGIN IMMEDIATE")
+connection.execute("PRAGMA user_version=2")
+connection.execute("UPDATE legacy_marker SET value='changed'")
+for _ in range(100):
+    connection.execute("INSERT INTO filler(payload) VALUES (?)", ("x" * 8000,))
+os._exit(19)
+""", str(path)],
+            text=True,
+            capture_output=True,
+        )
+        self.assertEqual(child.returncode, 19, child.stdout + child.stderr)
+        journal = Path(str(path) + "-journal")
+        self.assertGreater(journal.stat().st_size, 512)
+        # Model an interrupted page-one write while retaining SQLite's real hot journal.
+        with path.open("r+b") as database:
+            database.seek(60)
+            database.write(struct.pack(">I", 2))
+            database.flush()
+            os.fsync(database.fileno())
+        self.assertEqual(struct.unpack(">I", path.read_bytes()[60:64])[0], 2)
+
+        files = {
+            "database": path,
+            "journal": journal,
+            "wal": Path(str(path) + "-wal"),
+            "shm": Path(str(path) + "-shm"),
+        }
+        before = {
+            name: (file.is_file(), file.read_bytes() if file.is_file() else None)
+            for name, file in files.items()
+        }
+        self.assertEqual(
+            {name: exists for name, (exists, _) in before.items()},
+            {"database": True, "journal": True, "wal": False, "shm": False},
+        )
+
+        def recovered_semantics():
+            with TemporaryDirectory() as directory:
+                snapshot = Path(directory) / path.name
+                shutil.copyfile(path, snapshot)
+                shutil.copyfile(journal, Path(str(snapshot) + "-journal"))
+                with closing(sqlite3.connect(snapshot)) as connection:
+                    return (
+                        connection.execute("PRAGMA user_version").fetchone()[0],
+                        connection.execute("SELECT value FROM legacy_marker").fetchone()[0],
+                        connection.execute("PRAGMA integrity_check").fetchone()[0],
+                    )
+
+        self.assertEqual(recovered_semantics(), (1, "keep", "ok"))
+        error = None
+        try:
+            HistoryRepository(path).initialize()
+        except Exception as caught:
+            error = caught
+        after = {
+            name: (file.is_file(), file.read_bytes() if file.is_file() else None)
+            for name, file in files.items()
+        }
+
+        self.assertEqual(
+            {
+                "error_type": type(error).__name__ if error is not None else None,
+                "chinese_error": error is not None and "版本不兼容" in str(error),
+                "rejects_recovered_version": error is not None and "当前版本 1" in str(error),
+                "files_unchanged": after == before,
+                "recovered_semantics": recovered_semantics(),
+            },
+            {
+                "error_type": "ValueError",
+                "chinese_error": True,
+                "rejects_recovered_version": True,
+                "files_unchanged": True,
+                "recovered_semantics": (1, "keep", "ok"),
             },
         )
 
