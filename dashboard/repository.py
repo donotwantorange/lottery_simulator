@@ -4,7 +4,9 @@ from contextlib import closing
 from datetime import datetime, timezone
 import json
 from pathlib import Path
+import shutil
 import sqlite3
+from tempfile import TemporaryDirectory
 from uuid import uuid4
 
 
@@ -54,27 +56,55 @@ class HistoryRepository:
         return connection
 
     @staticmethod
-    def _has_user_tables(connection):
+    def _has_user_schema(connection):
         return connection.execute(
-            "SELECT 1 FROM sqlite_master "
-            "WHERE type = 'table' AND name NOT GLOB 'sqlite_*' LIMIT 1"
+            "SELECT 1 FROM sqlite_master WHERE name NOT GLOB 'sqlite_*' LIMIT 1"
         ).fetchone() is not None
 
+    def _inspect_schema(self, path):
+        uri = path.resolve().as_uri() + "?mode=ro"
+        with closing(sqlite3.connect(uri, uri=True)) as connection:
+            version = connection.execute("PRAGMA user_version").fetchone()[0]
+            return version, version == 0 and self._has_user_schema(connection)
+
     def initialize(self):
-        with closing(self._connect()) as connection:
+        try:
+            self.path.stat()
+        except FileNotFoundError:
+            pass
+        else:
+            wal_path = Path(str(self.path) + "-wal")
+            try:
+                wal_path.stat()
+            except FileNotFoundError:
+                version, has_user_schema = self._inspect_schema(self.path)
+            else:
+                with TemporaryDirectory() as directory:
+                    snapshot = Path(directory) / self.path.name
+                    shutil.copyfile(self.path, snapshot)
+                    shutil.copyfile(wal_path, Path(str(snapshot) + "-wal"))
+                    shm_path = Path(str(self.path) + "-shm")
+                    try:
+                        shm_path.stat()
+                    except FileNotFoundError:
+                        pass
+                    else:
+                        shutil.copyfile(shm_path, Path(str(snapshot) + "-shm"))
+                    version, has_user_schema = self._inspect_schema(snapshot)
+            if version == 2:
+                return
+            if version != 0 or has_user_schema:
+                raise ValueError(f"历史数据库版本不兼容：当前版本 {version}，需要版本 2")
+        with closing(self._connect()) as connection, connection:
+            connection.execute("BEGIN IMMEDIATE")
             version = connection.execute("PRAGMA user_version").fetchone()[0]
             if version == 2:
                 return
-            if version != 0 or self._has_user_tables(connection):
+            if version != 0 or self._has_user_schema(connection):
                 raise ValueError(f"历史数据库版本不兼容：当前版本 {version}，需要版本 2")
-            with connection:
-                connection.execute("BEGIN IMMEDIATE")
-                version = connection.execute("PRAGMA user_version").fetchone()[0]
-                if version != 0 or self._has_user_tables(connection):
-                    raise ValueError(f"历史数据库版本不兼容：当前版本 {version}，需要版本 2")
-                for statement in _SCHEMA.split(";"):
-                    if statement.strip():
-                        connection.execute(statement)
+            for statement in _SCHEMA.split(";"):
+                if statement.strip():
+                    connection.execute(statement)
 
     def save_run(self, payload: dict, trace_enabled: bool) -> str:
         if not isinstance(trace_enabled, bool):

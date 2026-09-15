@@ -3,7 +3,10 @@ from copy import deepcopy
 from datetime import datetime, timezone
 import json
 from pathlib import Path
+import shutil
 import sqlite3
+import subprocess
+import sys
 from tempfile import TemporaryDirectory
 import unittest
 from uuid import UUID
@@ -75,6 +78,115 @@ class HistoryRepositoryTest(unittest.TestCase):
             connection.execute("CREATE TABLE legacy_marker(value TEXT)")
             connection.execute("INSERT INTO legacy_marker VALUES ('keep')")
         self.assert_initialize_rejected_without_changes(path, 0)
+
+    def test_initialize_rejects_version_zero_view_without_modifying_it(self):
+        path = self.path.with_name("view-only.sqlite3")
+        with closing(sqlite3.connect(path)) as connection, connection:
+            connection.execute("CREATE VIEW legacy_marker AS SELECT 'keep' AS value")
+        before = path.read_bytes()
+
+        error = None
+        try:
+            HistoryRepository(path).initialize()
+        except Exception as caught:
+            error = caught
+        after = path.read_bytes()
+        with closing(sqlite3.connect(path)) as connection:
+            version = connection.execute("PRAGMA user_version").fetchone()[0]
+            objects = [tuple(row) for row in connection.execute(
+                "SELECT type, name FROM sqlite_master "
+                "WHERE name NOT GLOB 'sqlite_*' ORDER BY type, name"
+            )]
+            value = connection.execute("SELECT value FROM legacy_marker").fetchone()[0]
+
+        self.assertEqual(
+            {
+                "error_type": type(error).__name__ if error is not None else None,
+                "chinese_error": error is not None and "版本不兼容" in str(error),
+                "version": version,
+                "objects": objects,
+                "view_value": value,
+                "bytes_unchanged": after == before,
+            },
+            {
+                "error_type": "ValueError",
+                "chinese_error": True,
+                "version": 0,
+                "objects": [("view", "legacy_marker")],
+                "view_value": "keep",
+                "bytes_unchanged": True,
+            },
+        )
+
+    def test_initialize_rejects_old_wal_schema_without_checkpointing(self):
+        path = self.path.with_name("old-wal.sqlite3")
+        child = subprocess.run(
+            [sys.executable, "-c", """
+import os
+import sqlite3
+import sys
+
+connection = sqlite3.connect(sys.argv[1])
+connection.execute("PRAGMA journal_mode=WAL")
+connection.execute("PRAGMA wal_autocheckpoint=0")
+connection.execute("CREATE TABLE legacy_marker(value TEXT)")
+connection.execute("INSERT INTO legacy_marker VALUES ('keep')")
+connection.execute("PRAGMA user_version=1")
+connection.commit()
+os._exit(17)
+""", str(path)],
+            text=True,
+            capture_output=True,
+        )
+        self.assertEqual(child.returncode, 17, child.stdout + child.stderr)
+        files = {
+            "database": path,
+            "wal": Path(str(path) + "-wal"),
+            "shm": Path(str(path) + "-shm"),
+        }
+        self.assertTrue(all(file.is_file() for file in files.values()))
+        before = {name: file.read_bytes() for name, file in files.items()}
+
+        error = None
+        try:
+            HistoryRepository(path).initialize()
+        except Exception as caught:
+            error = caught
+        file_state = {
+            name: (file.is_file(), file.is_file() and file.read_bytes() == before[name])
+            for name, file in files.items()
+        }
+        with TemporaryDirectory() as directory:
+            snapshot = Path(directory) / path.name
+            for name, file in files.items():
+                if file.is_file():
+                    suffix = "" if name == "database" else f"-{name}"
+                    shutil.copyfile(file, Path(str(snapshot) + suffix))
+            uri = snapshot.resolve().as_uri() + "?mode=ro"
+            with closing(sqlite3.connect(uri, uri=True)) as connection:
+                version = connection.execute("PRAGMA user_version").fetchone()[0]
+                value = connection.execute("SELECT value FROM legacy_marker").fetchone()[0]
+
+        self.assertEqual(
+            {
+                "error_type": type(error).__name__ if error is not None else None,
+                "chinese_error": error is not None and "版本不兼容" in str(error),
+                "files": file_state,
+                "version": version,
+                "value": value,
+            },
+            {
+                "error_type": "ValueError",
+                "chinese_error": True,
+                "files": {
+                    "database": (True, True),
+                    "wal": (True, True),
+                    "shm": (True, True),
+                },
+                "version": 1,
+                "value": "keep",
+            },
+        )
 
     def test_initialize_rejects_future_version_without_changes(self):
         path = self.path.with_name("future.sqlite3")
