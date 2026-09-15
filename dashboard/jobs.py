@@ -13,6 +13,7 @@ from uuid import UUID, uuid4
 
 from dashboard.models import JobState, RunParameters, read_json, write_json
 from lottery_simulator.cli import RULES
+from lottery_simulator.rules.pool_config import PoolConfig, load_pool_config
 
 
 ACTIVE_STATUSES = {"queued", "running"}
@@ -30,14 +31,29 @@ def validate_parameters_for_active_rule(parameters: RunParameters) -> RunParamet
     """Validate dashboard parameters against the selected rule without copying its limits."""
     parameters.validate()
     try:
-        max_pity = RULES[parameters.rule_name]().max_pity
+        rule_factory = RULES[parameters.rule_name]
     except KeyError:
         raise ValueError("未知规则") from None
+    config = (
+        load_pool_config()
+        if parameters.pool_config is None
+        else PoolConfig.from_dict(parameters.pool_config)
+    )
+    rule = rule_factory(config=config)
+    max_pity = rule.max_pity
     if isinstance(max_pity, bool) or not isinstance(max_pity, int) or max_pity <= 0:
         raise ValueError("当前规则的保底配置无效")
     if parameters.initial_pity >= max_pity:
         raise ValueError(f"初始保底必须在 0 到 {max_pity - 1} 之间")
-    return parameters
+    five_star = config.five_star
+    if five_star.pity_enabled:
+        if parameters.initial_five_star_pity >= five_star.hard_pity:
+            raise ValueError(
+                f"初始五星保底必须在 0 到 {five_star.hard_pity - 1} 之间"
+            )
+    elif parameters.initial_five_star_pity != 0:
+        raise ValueError("关闭五星保底时初始五星保底必须为 0")
+    return replace(parameters, pool_config=config.to_dict())
 
 
 class JobManager:
@@ -69,7 +85,7 @@ class JobManager:
         return next(self._active_states(), None)
 
     def start(self, parameters: RunParameters, *, synchronous=False) -> JobState:
-        validate_parameters_for_active_rule(parameters)
+        parameters = validate_parameters_for_active_rule(parameters)
         with self._locked():
             if any(self._active_states()):
                 raise JobAlreadyRunning("已有模拟任务正在运行")

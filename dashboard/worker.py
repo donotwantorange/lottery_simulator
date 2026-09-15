@@ -10,6 +10,7 @@ from dashboard.models import RunParameters, read_json, result_payload, write_jso
 from dashboard.repository import HistoryRepository
 from lottery_simulator.cli import RULES
 from lottery_simulator.engine import SimulationCancelled, simulate
+from lottery_simulator.rules.pool_config import PoolConfig
 
 
 def run(job_dir: Path, database_path: Path):
@@ -38,14 +39,18 @@ def run(job_dir: Path, database_path: Path):
 
     status, error = "completed", None
     try:
-        parameters = validate_parameters_for_active_rule(
-            RunParameters(**read_json(job_dir / "parameters.json"))
+        parameters = RunParameters(**read_json(job_dir / "parameters.json"))
+        if parameters.pool_config is None:
+            raise ValueError("worker requires a serialized pool configuration")
+        parameters = validate_parameters_for_active_rule(parameters)
+        rule = RULES[parameters.rule_name](
+            config=PoolConfig.from_dict(parameters.pool_config)
         )
-        rule = RULES[parameters.rule_name]()
         result = simulate(
             rule, parameters.draws, parameters.trials, parameters.seed, parameters.initial_pity,
             progress_callback=progress, cancel_check=cancel_path.exists,
             collect_records=parameters.trace,
+            initial_five_star_pity=parameters.initial_five_star_pity,
         )
         payload = result_payload(result, rule, time.monotonic() - started)
         if not parameters.trace:

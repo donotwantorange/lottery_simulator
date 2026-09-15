@@ -1,6 +1,7 @@
 from contextlib import closing
 from dataclasses import replace
 from datetime import date
+import json
 import os
 from pathlib import Path
 import sqlite3
@@ -21,11 +22,13 @@ from dashboard.models import JobState, RunParameters, result_payload, write_json
 from dashboard.repository import HistoryRepository
 from dashboard.worker import run
 from lottery_simulator.engine import simulate
+from lottery_simulator.rules.pool_config import PoolConfig, load_pool_config
 from lottery_simulator.rules.rule_1 import Rule1
 
 
 APP = Path(__file__).resolve().parents[1] / "dashboard/app.py"
 PITY_LABEL = "假设主池已累计多少抽仍未出6星"
+FIVE_STAR_PITY_LABEL = "假设主池已连续多少抽未出5星及以上"
 
 
 def render_fixture():
@@ -108,7 +111,7 @@ class DashboardAppTest(unittest.TestCase):
             self.widget(app.button, "开始模拟").click().run()
         self.assertEqual(len(app.exception), 0)
         self.assertTrue(database.is_file(), "Deployment database must receive simulations")
-        self.assertFalse((self.root / "history.sqlite3").exists())
+        self.assertFalse((self.root / "history_v2.sqlite3").exists())
         runs = HistoryRepository(database).list_runs({}, 20, 0)
         self.assertEqual(len(runs), 1)
         self.assertEqual(runs[0]["main_draws"], 100)
@@ -131,9 +134,92 @@ class DashboardAppTest(unittest.TestCase):
         self.assertNotIn("synthetic migration detail", " ".join(item.value for item in app.error))
 
     def repository(self):
-        repository = HistoryRepository(self.root / "history.sqlite3")
+        repository = HistoryRepository(self.root / "history_v2.sqlite3")
         repository.initialize()
         return repository
+
+    def test_default_database_is_v2_and_legacy_database_is_never_read_or_changed(self):
+        legacy = self.root / "history.sqlite3"
+        legacy.write_bytes(b"legacy database must stay untouched")
+        before = legacy.read_bytes()
+
+        app = self.load()
+
+        self.assertEqual(len(app.exception), 0)
+        self.assertTrue((self.root / "history_v2.sqlite3").is_file())
+        self.assertEqual(legacy.read_bytes(), before)
+
+    def test_configuration_sections_render_default_editors_and_utf8_download(self):
+        app = self.load()
+
+        self.assertIn("高级设置", [item.label for item in app.expander])
+        self.assertIn("奖池与奖励设置", [item.label for item in app.expander])
+        character_editor = next(item for item in app.dataframe
+                                if item.key == "pool_character_editor")
+        reward_editor = next(item for item in app.dataframe if item.key == "pool_reward_editor")
+        self.assertEqual(len(character_editor.value), 9)
+        self.assertEqual(len(reward_editor.value), 2)
+        self.assertEqual(list(character_editor.value.columns),
+                         ["角色名称", "是否UP", "是否限定", "UP权重"])
+        self.assertEqual(list(reward_editor.value.columns),
+                         ["奖励名称", "四星", "五星", "六星"])
+        self.widget(app.download_button, "导出配置 JSON")
+
+    def test_disabling_five_star_pity_disables_and_zeroes_initial_progress(self):
+        app = self.load()
+        self.widget(app.number_input, FIVE_STAR_PITY_LABEL).set_value(7)
+
+        self.widget(app.toggle, "启用五星保底").set_value(False).run()
+
+        initial = self.widget(app.number_input, FIVE_STAR_PITY_LABEL)
+        self.assertTrue(initial.disabled)
+        self.assertEqual(initial.value, 0)
+
+    def test_invalid_uploaded_configuration_is_safe_and_never_creates_job_or_history(self):
+        app = self.load()
+        self.widget(app.file_uploader, "导入配置 JSON").set_value(
+            ("private.json", b'{"up_share": "private-invalid"}', "application/json")
+        ).run()
+
+        self.widget(app.button, "开始模拟").click().run()
+
+        self.assertEqual(len(app.exception), 0)
+        self.assertTrue(any("配置 JSON 无效" in item.value for item in app.error))
+        self.assertNotIn("private-invalid", " ".join(item.value for item in app.error))
+        self.assertEqual(list(self.root.glob("jobs/*/state.json")), [])
+        self.assertEqual(self.repository().list_runs({}, 10, 0), [])
+
+    def test_uploaded_configuration_and_initial_five_pity_are_saved_as_job_snapshot(self):
+        raw = load_pool_config().to_dict()
+        raw["up_share"] = 0.6
+        raw["six_star_characters"][0]["name"] = "自定义UP"
+        app = self.load()
+        self.widget(app.file_uploader, "导入配置 JSON").set_value((
+            "custom.json", json.dumps(raw, ensure_ascii=False).encode("utf-8"),
+            "application/json",
+        )).run()
+        self.widget(app.number_input, FIVE_STAR_PITY_LABEL).set_value(7)
+
+        self.start_small(app)
+
+        rows = self.repository().list_runs({}, 10, 0)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["pool_config"]["up_share"], 0.6)
+        self.assertEqual(rows[0]["pool_config"]["six_star_characters"][0]["name"], "自定义UP")
+        self.assertEqual(rows[0]["initial_five_star_pity"], 7)
+
+    def test_restore_default_replaces_imported_configuration(self):
+        raw = load_pool_config().to_dict()
+        raw["up_share"] = 0.6
+        app = self.load()
+        self.widget(app.file_uploader, "导入配置 JSON").set_value((
+            "custom.json", json.dumps(raw).encode("utf-8"), "application/json",
+        )).run()
+        self.assertEqual(self.widget(app.number_input, "UP占比").value, 0.6)
+
+        self.widget(app.button, "恢复默认配置").click().run()
+
+        self.assertEqual(self.widget(app.number_input, "UP占比").value, 0.5)
 
     def seed_history(self):
         repository = self.repository()
@@ -174,7 +260,7 @@ class DashboardAppTest(unittest.TestCase):
         self.assertTrue(any("最多选择两次运行" in item.value for item in app.error))
         self.assertEqual(app.session_state["selected_history_ids"], ids[:2])
         self.assertEqual(len(app.metric), 30)
-        self.assertEqual(len(app.get("download_button")), 2)
+        self.assertEqual(len(app.get("download_button")), 3)
         self.assertTrue(any("未保存概率曲线" in item.value for item in app.info))
         with (patch("streamlit.elements.lib.policies._shown_default_value_warning", False),
               self.assertNoLogs("streamlit.elements.lib.policies", level="WARNING")):
@@ -206,8 +292,29 @@ class DashboardAppTest(unittest.TestCase):
             self.assertEqual(connection.execute(
                 "SELECT COUNT(*) FROM draw_records WHERE run_id=?", (ids[0],)
             ).fetchone()[0], 0)
-        self.assertTrue(all(not isinstance(value, (dict, HistoryRepository))
+        self.assertTrue(all(not isinstance(value, HistoryRepository)
                             for value in app.session_state.filtered_state.values()))
+
+    def test_history_reuse_restores_full_configuration_and_initial_five_star_pity(self):
+        raw = load_pool_config().to_dict()
+        raw["up_share"] = 0.6
+        raw["six_star_characters"][0]["name"] = "历史UP"
+        rule = Rule1(config=PoolConfig.from_dict(raw))
+        payload = result_payload(
+            simulate(rule, 2, seed=42, initial_five_star_pity=7), rule, 0.25
+        )
+        repository = self.repository()
+        run_id = repository.save_run(payload, trace_enabled=True)
+        app = self.load()
+        self.widget(app.multiselect, "选择历史运行").set_value([run_id]).run()
+
+        self.widget(app.button, "复用参数 " + run_id).click().run()
+
+        self.assertEqual(self.widget(app.number_input, FIVE_STAR_PITY_LABEL).value, 7)
+        self.assertEqual(self.widget(app.number_input, "UP占比").value, 0.6)
+        characters = next(item.value for item in app.dataframe
+                          if item.key == "pool_character_editor")
+        self.assertEqual(characters.iloc[0]["角色名称"], "历史UP")
 
     def test_history_date_range_pagination_and_schema_warning(self):
         repository, ids = self.seed_history()
@@ -280,7 +387,9 @@ class DashboardAppTest(unittest.TestCase):
         self.repository()
         # Startup reconciliation has already happened before this test creates a live job.
         self.load()
-        parameters = RunParameters("rule1", 2, 1, 29, 42, True)
+        parameters = RunParameters(
+            "rule1", 2, 1, 29, 42, True, pool_config=load_pool_config().to_dict()
+        )
         state = JobState(str(uuid4()), status, parameters.to_dict(), 1, 2,
                          duration_seconds=2.0)
         job_dir = self.root / "jobs" / state.job_id
@@ -303,7 +412,7 @@ class DashboardAppTest(unittest.TestCase):
 
     def test_process_startup_reconciles_only_its_job_root_once(self):
         parameters = RunParameters("rule1", 10_000, 10_000, 29, 42, False)
-        database = self.root / "history.sqlite3"
+        database = self.root / "history_v2.sqlite3"
         manager = JobManager(self.root / "jobs", database)
         unrelated = JobManager(self.root / "unrelated-jobs", self.root / "unrelated.sqlite3")
         self.addCleanup(manager.reconcile_after_restart)
@@ -325,7 +434,7 @@ class DashboardAppTest(unittest.TestCase):
     def test_completed_shows_metrics_download_and_saves_once_without_session_payload(self):
         app = self.start_small(self.load())
         self.assertEqual(len(app.metric), 15)
-        self.assertEqual(len(app.get("download_button")), 1)
+        self.assertEqual(len(app.get("download_button")), 2)
         self.assertTrue(any("模拟已完成" in item.value for item in app.success))
         rows = self.repository().list_runs({}, 10, 0)
         self.assertEqual(len(rows), 1)
@@ -337,7 +446,11 @@ class DashboardAppTest(unittest.TestCase):
         self.assertEqual(len(self.repository().list_runs({}, 10, 0)), 1)
         self.assertEqual(set(app.session_state.filtered_state), {
             "current_job_id", "selected_history_ids", "rule_name", "draws", "trials",
-            "initial_pity", "seed_text", "trace",
+            "initial_pity", "seed_text", "trace", "initial_five_star_pity",
+            "pool_up_share", "pool_five_star_probability",
+            "pool_five_star_pity_enabled", "pool_five_star_hard_pity",
+            "pool_character_rows", "pool_reward_rows", "pool_character_editor",
+            "pool_reward_editor", "pool_config_upload",
         })
         self.assertFalse(self.widget(app.button, "开始模拟").disabled)
 
@@ -370,7 +483,7 @@ class DashboardAppTest(unittest.TestCase):
                 self.widget(app.button, "停止模拟").click().run()
                 self.assertEqual(len(app.exception), 0)
                 self.assertTrue((job_dir / "cancel.request").exists())
-                manager = JobManager(job_dir.parent, self.root / "history.sqlite3")
+                manager = JobManager(job_dir.parent, self.root / "history_v2.sqlite3")
                 self.assertEqual(manager.get(job_dir.name).status, status)
                 manager.reconcile_after_restart()
 
@@ -405,15 +518,15 @@ class DashboardAppTest(unittest.TestCase):
         self.widget(app.button, "停止模拟").click().run()
         self.assertEqual(len(app.exception), 0)
         self.assertTrue((job_dir / "cancel.request").exists())
-        manager = JobManager(job_dir.parent, self.root / "history.sqlite3")
+        manager = JobManager(job_dir.parent, self.root / "history_v2.sqlite3")
         self.assertEqual(manager.get(job_dir.name).status, "queued")
         self.assertEqual(self.repository().list_runs({}, 10, 0), [])
-        run(job_dir, self.root / "history.sqlite3")
+        run(job_dir, self.root / "history_v2.sqlite3")
         app.run()
         self.assertEqual(len(app.exception), 0)
         self.assertTrue(any("模拟已取消" in item.value for item in app.info))
         self.assertEqual(len(app.metric), 0)
-        self.assertEqual(len(app.get("download_button")), 0)
+        self.assertEqual(len(app.get("download_button")), 1)
         self.assertEqual(self.repository().list_runs({}, 10, 0), [])
         self.assertIsNone(manager.get_result(job_dir.name))
         self.assertFalse(self.widget(app.button, "开始模拟").disabled)
@@ -437,12 +550,12 @@ class DashboardAppTest(unittest.TestCase):
         app, _ = self.prepare("failed")
         self.assertEqual([item.value for item in app.error], ["模拟任务失败"])
         self.assertEqual(len(app.metric), 0)
-        self.assertEqual(len(app.get("download_button")), 0)
+        self.assertEqual(len(app.get("download_button")), 1)
         self.assertEqual(self.repository().list_runs({}, 10, 0), [])
 
     def test_repository_failure_keeps_result_download_and_safe_warning(self):
         self.repository()
-        with closing(sqlite3.connect(self.root / "history.sqlite3")) as connection:
+        with closing(sqlite3.connect(self.root / "history_v2.sqlite3")) as connection:
             connection.executescript("""
                 CREATE TRIGGER fail_save BEFORE INSERT ON simulation_runs
                 BEGIN SELECT RAISE(ABORT, 'private database failure'); END;
@@ -450,7 +563,7 @@ class DashboardAppTest(unittest.TestCase):
         with self.assertLogs("dashboard.worker", level="ERROR"):
             app = self.start_small(self.load())
         self.assertEqual(len(app.metric), 15)
-        self.assertEqual(len(app.get("download_button")), 1)
+        self.assertEqual(len(app.get("download_button")), 2)
         self.assertEqual([item.value for item in app.warning], ["历史保存失败"])
         self.assertEqual(self.repository().list_runs({}, 10, 0), [])
 
@@ -505,7 +618,7 @@ assert app.title[0].value == '抽奖概率实验室'
             if job_id == job_dir.name:
                 reads += 1
                 if reads == 2:
-                    run(job_dir, self.root / "history.sqlite3")
+                    run(job_dir, self.root / "history_v2.sqlite3")
             return original_get(manager, job_id)
 
         with patch.object(JobManager, "get", new=complete_on_poll):

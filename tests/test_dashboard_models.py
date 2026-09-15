@@ -6,6 +6,7 @@ import unittest
 
 from dashboard.models import JobState, RunParameters, read_json, result_payload, write_json
 from lottery_simulator.engine import simulate
+from lottery_simulator.rules.pool_config import load_pool_config
 from lottery_simulator.rules.rule_1 import Rule1
 
 
@@ -16,11 +17,20 @@ class DashboardModelsTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "上限"):
             RunParameters("rule1", 10_000_001, 1, 0, 42, False).validate()
 
+    def test_parameters_append_five_star_pity_and_pool_snapshot_after_existing_positions(self):
+        config = load_pool_config().to_dict()
+
+        parameters = RunParameters("rule1", 10, 1, 0, 42, False, 7, config)
+
+        self.assertEqual(parameters.initial_five_star_pity, 7)
+        self.assertEqual(parameters.pool_config, config)
+        self.assertEqual(parameters.to_dict()["pool_config"], config)
+
     def test_result_payload_is_json_round_trippable(self):
         rule = Rule1()
         result = simulate(rule, 2, seed=42, initial_pity=29)
         payload = result_payload(result, rule, 0.25)
-        self.assertEqual(payload["rule_version"], "1.2")
+        self.assertEqual(payload["rule_version"], "2.0")
         self.assertEqual(payload["duration_seconds"], 0.25)
         self.assertEqual(json.loads(json.dumps(payload)), payload)
         self.assertEqual(set(payload["count_distribution"]), {"0"})

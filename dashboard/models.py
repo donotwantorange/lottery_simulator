@@ -18,6 +18,8 @@ class RunParameters:
     initial_pity: int
     seed: int | None
     trace: bool
+    initial_five_star_pity: int = 0
+    pool_config: dict[str, Any] | None = None
 
     def validate(self) -> "RunParameters":
         if not isinstance(self.rule_name, str) or not self.rule_name:
@@ -34,6 +36,12 @@ class RunParameters:
             raise ValueError("draws * trials 超过上限")
         if isinstance(self.initial_pity, bool) or not isinstance(self.initial_pity, int) or self.initial_pity < 0:
             raise ValueError("initial_pity must be a non-negative integer")
+        if (isinstance(self.initial_five_star_pity, bool)
+                or not isinstance(self.initial_five_star_pity, int)
+                or self.initial_five_star_pity < 0):
+            raise ValueError("initial_five_star_pity must be a non-negative integer")
+        if self.pool_config is not None and not isinstance(self.pool_config, dict):
+            raise ValueError("pool_config must be a dictionary or None")
         if self.seed is not None and (isinstance(self.seed, bool) or not isinstance(self.seed, int)):
             raise ValueError("seed must be an integer or None")
         if not isinstance(self.trace, bool):

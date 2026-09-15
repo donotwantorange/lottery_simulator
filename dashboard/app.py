@@ -22,6 +22,7 @@ from dashboard.jobs import (
 )
 from dashboard.models import RunParameters
 from dashboard.repository import HistoryRepository
+from dashboard.views.configuration import render_pool_config_editor
 from dashboard.views.history import apply_pending_reuse, render_history
 from dashboard.views.simulation import render_result
 from lottery_simulator.cli import RULES
@@ -51,7 +52,7 @@ st.set_page_config(page_title="抽奖概率实验室", layout="wide")
 require_dashboard_access()
 
 data_dir = Path(os.environ.get("LOTTERY_DATA_DIR", project_root / "data"))
-database_path = Path(os.environ.get("LOTTERY_DB_PATH", data_dir / "history.sqlite3"))
+database_path = Path(os.environ.get("LOTTERY_DB_PATH", data_dir / "history_v2.sqlite3"))
 manager = startup_job_manager(str(data_dir / "jobs"), str(database_path))
 repository = HistoryRepository(database_path)
 try:
@@ -81,6 +82,19 @@ with st.sidebar:
                                    help="该值同时初始化主池保底位置与累计主池抽数；累计抽数决定首次30抽赠送是已领取还是会在本次模拟中触发。")
     seed_text = st.text_input("随机种子（留空自动生成）", key="seed_text")
     trace = st.toggle("Trace", disabled=trials != 1, help="逐抽记录仅支持单轮模拟", key="trace")
+    with st.expander("高级设置"):
+        five_star_pity_enabled = st.session_state.get("pool_five_star_pity_enabled", True)
+        if not five_star_pity_enabled:
+            st.session_state["initial_five_star_pity"] = 0
+        initial_five_star_pity = st.number_input(
+            "假设主池已连续多少抽未出5星及以上", min_value=0, step=1,
+            disabled=not five_star_pity_enabled, key="initial_five_star_pity",
+        )
+    try:
+        pool_config = render_pool_config_editor(st)
+    except ValueError as error:
+        st.error(str(error))
+        pool_config = None
     if st.button("开始模拟", disabled=live):
         try:
             seed = int(seed_text) if seed_text.strip() else None
@@ -88,9 +102,12 @@ with st.sidebar:
             st.error("随机种子必须为整数")
         else:
             try:
+                if pool_config is None:
+                    raise ValueError("奖池配置无效，请修正后重试")
                 parameters = validate_parameters_for_active_rule(
                     RunParameters(rule_name, draws, trials, initial_pity,
-                                  seed, trace and trials == 1)
+                                  seed, trace and trials == 1,
+                                  initial_five_star_pity, pool_config.to_dict())
                 )
             except ValueError as error:
                 st.error(str(error))

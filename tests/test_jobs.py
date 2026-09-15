@@ -19,6 +19,7 @@ from dashboard.jobs import JobAlreadyRunning, JobManager
 from dashboard.models import JobState, RunParameters, read_json, result_payload, write_json
 from dashboard.repository import HistoryRepository
 from lottery_simulator.engine import simulate
+from lottery_simulator.rules.pool_config import load_pool_config
 from lottery_simulator.rules.rule_1 import Rule1
 
 
@@ -97,6 +98,8 @@ class JobManagerTest(unittest.TestCase):
 
     def prepare_job(self, status="queued", pid=None, parameters=None):
         parameters = parameters or self.parameters
+        if parameters.pool_config is None:
+            parameters = replace(parameters, pool_config=load_pool_config().to_dict())
         state = JobState(str(uuid4()), status, parameters, 0,
                          parameters.draws * parameters.trials, pid=pid)
         job_dir = self.root / state.job_id
@@ -130,7 +133,7 @@ class JobManagerTest(unittest.TestCase):
         self.assertEqual(len(payload["records"]), 12)
         self.assertEqual(self.counts(), (1, 12))
         job_dir = self.root / state.job_id
-        self.assertEqual(read_json(job_dir / "parameters.json"), self.parameters.to_dict())
+        self.assertEqual(read_json(job_dir / "parameters.json"), state.parameters)
         self.assertNotIn("records", read_json(job_dir / "state.json"))
         self.assertLess((job_dir / "state.json").stat().st_size, 2000)
         self.assertEqual(list(job_dir.glob("*.tmp")), [])
@@ -191,6 +194,58 @@ class JobManagerTest(unittest.TestCase):
                 self.manager.start(invalid)
         self.assertEqual(list(self.root.glob("*/state.json")), [])
         self.assertEqual(self.counts(), (0, 0))
+
+    def test_start_rejects_initial_five_star_pity_outside_snapshot_before_creating_job(self):
+        config = load_pool_config().to_dict()
+        config["five_star"]["hard_pity"] = 8
+        invalid = RunParameters("rule1", 2, 1, 0, 42, True, 8, config)
+
+        with self.assertRaisesRegex(ValueError, "初始五星保底必须在 0 到 7"):
+            self.manager.start(invalid, synchronous=True)
+
+        self.assertEqual(list(self.root.glob("*/state.json")), [])
+        self.assertEqual(self.counts(), (0, 0))
+
+    def test_start_rejects_nonzero_five_star_pity_when_snapshot_disables_it(self):
+        config = load_pool_config().to_dict()
+        config["five_star"]["pity_enabled"] = False
+        invalid = RunParameters("rule1", 2, 1, 0, 42, True, 1, config)
+
+        with self.assertRaisesRegex(ValueError, "关闭五星保底时.*必须为 0"):
+            self.manager.start(invalid, synchronous=True)
+
+        self.assertEqual(list(self.root.glob("*/state.json")), [])
+        self.assertEqual(self.counts(), (0, 0))
+
+    def test_default_configuration_is_frozen_into_job_parameters_before_worker(self):
+        state = self.manager.start(self.parameters, synchronous=True)
+
+        self.assertEqual(state.parameters["pool_config"], load_pool_config().to_dict())
+        self.assertEqual(
+            read_json(self.root / state.job_id / "parameters.json")["pool_config"],
+            load_pool_config().to_dict(),
+        )
+
+    def test_worker_uses_serialized_pool_config_and_initial_five_pity(self):
+        config = load_pool_config().to_dict()
+        config["up_share"] = 0.6
+        parameters = RunParameters("rule1", 10, 1, 0, 42, True, 7, config)
+
+        state = self.manager.start(parameters, synchronous=True)
+        payload = self.manager.get_result(state.job_id)
+
+        self.assertEqual(payload["pool_config"]["up_share"], 0.6)
+        self.assertEqual(payload["initial_five_star_pity"], 7)
+
+    def test_worker_does_not_reload_default_configuration(self):
+        config = load_pool_config().to_dict()
+        parameters = RunParameters("rule1", 2, 1, 0, 42, True, 0, config)
+
+        with patch("lottery_simulator.rules.rule_1.load_pool_config",
+                   side_effect=AssertionError("worker reloaded default config")):
+            state = self.manager.start(parameters, synchronous=True)
+
+        self.assertEqual(state.status, "completed")
 
     def test_start_waits_for_flock_before_checking_and_creating(self):
         self.root.mkdir(parents=True, exist_ok=True)

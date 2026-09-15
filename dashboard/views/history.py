@@ -2,8 +2,10 @@
 
 from datetime import datetime, time, timezone
 
+from dashboard.views.configuration import set_pool_config_editor_state
 from dashboard.views.simulation import render_result
 from lottery_simulator.cli import RULES
+from lottery_simulator.rules.pool_config import PoolConfig
 
 
 def apply_pending_reuse(st, repository):
@@ -19,11 +21,18 @@ def apply_pending_reuse(st, repository):
         return
     if run["rule_version"] != RULES[run["rule_name"]]().version:
         st.warning("规则版本不同；下次模拟将使用当前规则版本")
+    try:
+        pool_config = PoolConfig.from_dict(run["pool_config"])
+    except (KeyError, TypeError, ValueError):
+        st.warning("历史配置无效，无法复用参数")
+        return
     st.session_state.update(
         rule_name=run["rule_name"], draws=run["main_draws"], trials=run["trials"],
         initial_pity=run["initial_pity"], seed_text=str(run["seed"]),
         trace=run["trace_enabled"] and run["trials"] == 1,
+        initial_five_star_pity=run["initial_five_star_pity"],
     )
+    set_pool_config_editor_state(st, pool_config)
 
 
 def render_history(st, repository):
