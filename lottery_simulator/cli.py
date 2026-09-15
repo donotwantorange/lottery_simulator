@@ -7,6 +7,7 @@ from typing import TextIO
 from lottery_simulator.analysis import distribution_stats
 from lottery_simulator.engine import SimulationResult, simulate
 from lottery_simulator.rules.base import DrawState
+from lottery_simulator.rules.pool_config import load_pool_config
 from lottery_simulator.rules.rule_1 import Rule1
 
 
@@ -18,6 +19,7 @@ def build_parser() -> argparse.ArgumentParser:
     commands = parser.add_subparsers(dest="command", required=True)
     analyze = commands.add_parser("analyze")
     analyze.add_argument("--rule", choices=RULES, default="rule1")
+    analyze.add_argument("--pool-config")
     analyze.add_argument("--format", choices=("text", "json"), default="text")
     simulation = commands.add_parser("simulate")
     simulation.add_argument("--rule", choices=RULES, default="rule1")
@@ -25,9 +27,39 @@ def build_parser() -> argparse.ArgumentParser:
     simulation.add_argument("--trials", type=int, default=1)
     simulation.add_argument("--seed", type=int)
     simulation.add_argument("--initial-pity", type=int, default=0)
+    simulation.add_argument("--initial-five-star-pity", type=int, default=0)
+    simulation.add_argument("--pool-config")
     simulation.add_argument("--trace", action="store_true")
     simulation.add_argument("--format", choices=("text", "json"), default="text")
     return parser
+
+
+def _write_config_summary(pool_config: dict, output: TextIO) -> None:
+    five_star = pool_config["five_star"]
+    print("配置摘要：", file=output)
+    print(f"  UP占比：{pool_config['up_share']:.4%}", file=output)
+    pity_status = "开启" if five_star["pity_enabled"] else "关闭"
+    print(
+        f"  五星保底：{pity_status}（硬保底 {five_star['hard_pity']} 抽，"
+        f"基础概率 {five_star['base_probability']:.4%}）",
+        file=output,
+    )
+    print("  六星角色：", file=output)
+    for character in pool_config["six_star_characters"]:
+        tags = []
+        if character["is_up"]:
+            tags.append("UP")
+        if character["is_limited"]:
+            tags.append("限定")
+        suffix = f"（{'、'.join(tags)}）" if tags else ""
+        print(f"    {character['name']}{suffix}", file=output)
+    print("  奖励：", file=output)
+    for reward in pool_config["rewards"]:
+        print(
+            f"    {reward['name']}：四星 {reward['four_star']:g}，"
+            f"五星 {reward['five_star']:g}，六星 {reward['six_star']:g}",
+            file=output,
+        )
 
 
 def _analysis_payload(rule):
@@ -46,6 +78,8 @@ def _analysis_payload(rule):
         )
     return {
         "rule": rule.name,
+        "rule_version": getattr(rule, "version", None),
+        "pool_config": rule.config.to_dict(),
         "hard_pity": rule.max_pity,
         "probability_table": table,
         "mean": stats.mean,
@@ -61,8 +95,14 @@ def _analysis_payload(rule):
 def _simulation_payload(result: SimulationResult, rule, include_records: bool):
     theoretical_mean_interval = distribution_stats(rule).mean
     mean_count_error = result.mean_six_stars - result.theoretical_expected_count
+    theoretical_source_summaries = {}
+    for source, summary in result.theoretical_source_summaries.items():
+        summary = dict(summary)
+        summary["rarity_counts"] = summary["mean_rarity_counts"]
+        theoretical_source_summaries[source] = summary
     payload = {
         "rule": result.rule_name,
+        "rule_version": getattr(rule, "version", None),
         "draws": result.draws,
         "main_draws": result.draws,
         "bonus_draws": result.bonus_draws,
@@ -70,6 +110,7 @@ def _simulation_payload(result: SimulationResult, rule, include_records: bool):
         "trials": result.trials,
         "seed": result.seed,
         "initial_pity": result.initial_pity,
+        "initial_five_star_pity": result.initial_five_star_pity,
         "initial_main_draws": result.initial_main_draws,
         "final_main_draws": result.final_main_draws,
         "count_distribution": result.count_distribution,
@@ -87,6 +128,11 @@ def _simulation_payload(result: SimulationResult, rule, include_records: bool):
             mean_count_error / result.theoretical_expected_count
             if result.theoretical_expected_count != 0.0 else None
         ),
+        "pool_config": result.pool_config,
+        "source_summaries": result.source_summaries,
+        "theoretical_source_summaries": theoretical_source_summaries,
+        "source_distributions": result.source_distributions,
+        "at_least_one_rates": result.at_least_one_rates,
     }
     if include_records:
         payload["records"] = [asdict(record) for record in result.records]
@@ -94,6 +140,8 @@ def _simulation_payload(result: SimulationResult, rule, include_records: bool):
 
 
 def _write_text_analysis(payload, output: TextIO) -> None:
+    print(f"规则版本：{payload['rule_version']}", file=output)
+    _write_config_summary(payload["pool_config"], output)
     print(f"规则：{payload['rule']}", file=output)
     print(f"六星平均间隔：{payload['mean']:.5f} 抽", file=output)
     print(f"长期综合六星率：{payload['long_run_rate']:.5%}", file=output)
@@ -114,6 +162,8 @@ def _write_text_analysis(payload, output: TextIO) -> None:
 
 
 def _write_text_simulation(payload, output: TextIO, trace: bool) -> None:
+    print(f"规则版本：{payload['rule_version']}", file=output)
+    _write_config_summary(payload["pool_config"], output)
     print(f"规则：{payload['rule']}", file=output)
     print(f"主池抽数：{payload['main_draws']}", file=output)
     print(f"赠送抽数：{payload['bonus_draws']}", file=output)
@@ -121,6 +171,7 @@ def _write_text_simulation(payload, output: TextIO, trace: bool) -> None:
     print(f"实验轮数：{payload['trials']}", file=output)
     print(f"随机种子：{payload['seed']}", file=output)
     print(f"初始保底：{payload['initial_pity']}", file=output)
+    print(f"初始五星保底：{payload['initial_five_star_pity']}", file=output)
     print(f"初始主池累计抽数：{payload['initial_main_draws']}", file=output)
     print(f"结束主池累计抽数：{payload['final_main_draws']}", file=output)
     print(f"主池平均六星数：{payload['mean_main_six_stars']:.6f}", file=output)
@@ -150,6 +201,35 @@ def _write_text_simulation(payload, output: TextIO, trace: bool) -> None:
         f"完整周期理论平均间隔：{payload['theoretical_mean_interval']:.5f} 抽",
         file=output,
     )
+    source_names = {"main": "主池", "bonus": "赠送", "total": "总计"}
+    for source, source_name in source_names.items():
+        summary = payload["source_summaries"][source]
+        print(f"{source_name}星级：", file=output)
+        for rarity, count in sorted(summary["mean_rarity_counts"].items()):
+            print(f"  {rarity}星：{count:.6f}", file=output)
+        print(f"{source_name}六星类别：", file=output)
+        category_names = {
+            "up": "UP六星",
+            "other_limited": "其他限定六星",
+            "standard": "常驻六星",
+        }
+        for category, count in summary["mean_six_star_categories"].items():
+            print(f"  {category_names.get(category, category)}：{count:.6f}", file=output)
+        print(f"{source_name}角色：", file=output)
+        for character in payload["pool_config"]["six_star_characters"]:
+            name = character["name"]
+            print(f"  {name}：{summary['mean_character_counts'][name]:.6f}", file=output)
+        print(f"{source_name}奖励：", file=output)
+        for reward in payload["pool_config"]["rewards"]:
+            name = reward["name"]
+            print(f"  {name}：{summary['mean_rewards'][name]:.6f}", file=output)
+        print(f"{source_name}双保底：", file=output)
+        pity_names = {
+            "five_star": "五星保底",
+            "six_star_hard": "六星硬保底",
+        }
+        for pity_name, count in summary["mean_pity_triggers"].items():
+            print(f"  {pity_names.get(pity_name, pity_name)}：{count:.6f}", file=output)
     if trace:
         print(
             "抽次  来源  来源序号  主池累计抽数  保底位置  六星概率  结果  抽后主池保底",
@@ -172,7 +252,11 @@ def main(argv=None, stdout=None) -> int:
     output = sys.stdout if stdout is None else stdout
     parser = build_parser()
     args = parser.parse_args(argv)
-    rule = RULES[args.rule]()
+    try:
+        config = load_pool_config(args.pool_config)
+        rule = RULES[args.rule](config=config)
+    except (OSError, TypeError, ValueError) as error:
+        parser.error(str(error))
     if args.command == "analyze":
         payload = _analysis_payload(rule)
         if args.format == "json":
@@ -184,7 +268,15 @@ def main(argv=None, stdout=None) -> int:
     if args.trace and args.trials != 1:
         parser.error("--trace requires --trials 1")
     try:
-        result = simulate(rule, args.draws, args.trials, args.seed, args.initial_pity)
+        result = simulate(
+            rule,
+            args.draws,
+            args.trials,
+            args.seed,
+            args.initial_pity,
+            initial_five_star_pity=args.initial_five_star_pity,
+            collect_records=args.trace,
+        )
     except (TypeError, ValueError) as error:
         parser.error(str(error))
     payload = _simulation_payload(result, rule, include_records=args.trace)
