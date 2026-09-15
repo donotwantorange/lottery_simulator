@@ -1,13 +1,19 @@
+from dataclasses import replace
 from fractions import Fraction
 from itertools import product
 import unittest
 
 from lottery_simulator.analysis import (
+    PoolExpectations,
     distribution_stats,
     expected_bonus_six_stars,
     expected_six_stars,
+    expected_pool_results,
+    expected_simulation_results,
     waiting_time_distribution,
 )
+from lottery_simulator.rules.base import DrawState, RarityProbabilities
+from lottery_simulator.rules.pool_config import FiveStarPolicy, RewardRule, SixStarCharacter
 from lottery_simulator.rules.rule_1 import Rule1
 
 
@@ -39,6 +45,42 @@ def enumerate_rule_1_expectation(draws, initial_pity):
             misses = 0 if success else misses + 1
         expected += weight * sum(outcomes)
     return float(expected)
+
+
+def enumerate_pool_expectations(draws, initial, config):
+    """Exact path weights from the specification, independent of rule methods."""
+    expected = {"4": Fraction(0), "5": Fraction(0), "6": Fraction(0)}
+    base_five = Fraction(str(config.five_star.base_probability))
+    for outcomes in product((4, 5, 6), repeat=draws):
+        state = initial
+        weight = Fraction(1)
+        for rarity in outcomes:
+            pull = state.misses_since_six_star + 1
+            if pull == 80:
+                six = Fraction(1)
+            elif pull >= 66:
+                six = Fraction(8, 1000) + (pull - 65) * Fraction(5, 100)
+            else:
+                six = Fraction(8, 1000)
+            five_pity = (
+                config.five_star.pity_enabled
+                and state.misses_since_five_or_higher
+                == config.five_star.hard_pity - 1
+            )
+            five = 0 if six == 1 else 1 - six if five_pity else base_five
+            probabilities = {4: 1 - six - five, 5: five, 6: six}
+            weight *= probabilities[rarity]
+            if weight == 0:
+                break
+            state = (
+                DrawState(0, 0) if rarity == 6 else
+                DrawState(state.misses_since_six_star + 1,
+                          0 if rarity == 5 or not config.five_star.pity_enabled else
+                          state.misses_since_five_or_higher + 1)
+            )
+        for rarity in outcomes:
+            expected[str(rarity)] += weight
+    return {rarity: float(value) for rarity, value in expected.items()}
 
 
 class AnalysisTest(unittest.TestCase):
@@ -96,6 +138,171 @@ class AnalysisTest(unittest.TestCase):
                         enumerate_rule_1_expectation(draws, initial_pity),
                         places=12,
                     )
+
+    def test_double_state_dp_matches_independent_exhaustive_outcomes(self):
+        for initial in (
+            DrawState(0, 0), DrawState(64, 8), DrawState(65, 9),
+            DrawState(78, 8), DrawState(79, 9),
+        ):
+            for draws in range(1, 6):
+                with self.subTest(initial=initial, draws=draws):
+                    actual = expected_pool_results(self.rule, draws, initial)
+                    expected = enumerate_pool_expectations(draws, initial, self.rule.config)
+                    self.assertIsInstance(actual, PoolExpectations)
+                    self.assertEqual(actual.rarity_counts.keys(), expected.keys())
+                    for rarity in ("4", "5", "6"):
+                        self.assertAlmostEqual(actual.rarity_counts[rarity],
+                                               expected[rarity], places=12)
+
+    def test_double_state_dp_handles_disabled_and_custom_five_star_pity(self):
+        for policy, initial in (
+            (FiveStarPolicy(0.03, False, 10), DrawState(65, 0)),
+            (FiveStarPolicy(0.02, True, 2), DrawState(64, 1)),
+            (FiveStarPolicy(0.08, True, 1), DrawState(79, 0)),
+        ):
+            rule = Rule1(config=replace(self.rule.config, five_star=policy))
+            with self.subTest(policy=policy):
+                actual = expected_pool_results(rule, 5, initial)
+                expected = enumerate_pool_expectations(5, initial, rule.config)
+                for rarity in ("4", "5", "6"):
+                    self.assertAlmostEqual(actual.rarity_counts[rarity],
+                                           expected[rarity], places=12)
+
+    def test_pool_expectations_derive_default_characters_categories_and_rewards(self):
+        actual = expected_pool_results(self.rule, 80)
+        rarities = actual.rarity_counts
+        self.assertAlmostEqual(sum(rarities.values()), 80, places=10)
+        self.assertAlmostEqual(sum(actual.character_counts.values()), rarities["6"])
+        self.assertAlmostEqual(sum(actual.six_star_categories.values()), rarities["6"])
+        self.assertAlmostEqual(actual.six_star_categories["up"], rarities["6"] / 2)
+        self.assertAlmostEqual(actual.six_star_categories["other_limited"], rarities["6"] / 8)
+        self.assertAlmostEqual(actual.six_star_categories["standard"], rarities["6"] * 3 / 8)
+        for name, count in actual.character_counts.items():
+            self.assertAlmostEqual(count, rarities["6"] / (2 if name == "UP-A" else 16))
+        self.assertAlmostEqual(actual.rewards["奖励A"],
+                               rarities["4"] + 5 * rarities["5"] + 25 * rarities["6"])
+        self.assertAlmostEqual(actual.rewards["奖励B"],
+                               2 * rarities["5"] + 10 * rarities["6"])
+
+    def test_pool_expectations_use_configured_character_weights_and_rewards(self):
+        config = replace(
+            self.rule.config,
+            up_share=0.6,
+            six_star_characters=(
+                SixStarCharacter("up1", True, True, 1),
+                SixStarCharacter("up2", True, True, 2),
+                SixStarCharacter("limited", False, True),
+                SixStarCharacter("standard", False, False),
+            ),
+            rewards=(RewardRule("custom", 0.5, 3, 7),),
+        )
+        actual = expected_pool_results(Rule1(config=config), 1)
+        for name, expected in {"up1": 0.0016, "up2": 0.0032,
+                               "limited": 0.0016, "standard": 0.0016}.items():
+            self.assertAlmostEqual(actual.character_counts[name], expected)
+        self.assertAlmostEqual(actual.six_star_categories["up"], 0.0048)
+        self.assertAlmostEqual(actual.six_star_categories["other_limited"], 0.0016)
+        self.assertAlmostEqual(actual.six_star_categories["standard"], 0.0016)
+        self.assertAlmostEqual(actual.rewards["custom"], 0.752)
+
+    def test_pity_trigger_expectations_count_pre_draw_state_including_six_stars(self):
+        # From (78, 8), a first 4-star reaches both guarantees; a 5-star
+        # reaches only the 6-star guarantee. Six-star probability is 0.708.
+        cases = (
+            (DrawState(65, 9), 1, 1.0, 0.0),
+            (DrawState(79, 9), 1, 1.0, 1.0),
+            (DrawState(78, 8), 2, float(Fraction(212, 1000)), float(Fraction(292, 1000))),
+            (DrawState(), 10, float(Fraction(912, 1000) ** 9), 0.0),
+        )
+        for initial, draws, five, six in cases:
+            with self.subTest(initial=initial, draws=draws):
+                actual = expected_pool_results(self.rule, draws, initial)
+                self.assertEqual(set(actual.pity_triggers), {"five_star", "six_star_hard"})
+                self.assertAlmostEqual(actual.pity_triggers["five_star"], five, places=12)
+                self.assertAlmostEqual(actual.pity_triggers["six_star_hard"], six, places=12)
+
+    def test_five_star_pity_does_not_change_six_star_waiting_analysis(self):
+        disabled = Rule1(config=replace(
+            self.rule.config, five_star=replace(self.rule.config.five_star, pity_enabled=False)
+        ))
+        self.assertEqual(waiting_time_distribution(self.rule), waiting_time_distribution(disabled))
+        for initial in (DrawState(), DrawState(65, 9)):
+            with self.subTest(initial=initial):
+                actual = expected_pool_results(self.rule, 80, initial)
+                self.assertAlmostEqual(actual.rarity_counts["6"],
+                                       expected_six_stars(self.rule, 80, initial.misses_since_six_star),
+                                       places=12)
+        self.assertEqual(expected_pool_results(disabled, 80).pity_triggers["five_star"], 0.0)
+
+    def test_simulation_expectations_include_one_independent_bonus_only_when_crossing_thirty(self):
+        bonus_five = Fraction(8, 10) + Fraction(912, 1000) ** 10
+        expected_bonus = {"4": float(Fraction(10) - bonus_five - Fraction(8, 100)),
+                          "5": float(bonus_five), "6": 0.08}
+        for draws, initial, five_initial, receives_bonus in (
+            (29, 0, 0, False), (30, 0, 0, True),
+            (1, 29, 9, True), (1, 30, 9, False), (61, 29, 8, True),
+        ):
+            with self.subTest(draws=draws, initial=initial, five_initial=five_initial):
+                actual = expected_simulation_results(self.rule, draws, initial, five_initial)
+                self.assertEqual(set(actual), {"main", "bonus", "total"})
+                main_expected = expected_pool_results(self.rule, draws, DrawState(initial, five_initial))
+                self.assertEqual(actual["main"], main_expected)
+                for rarity in ("4", "5", "6"):
+                    self.assertAlmostEqual(actual["bonus"].rarity_counts[rarity],
+                                           expected_bonus[rarity] if receives_bonus else 0.0,
+                                           places=12)
+                self.assertAlmostEqual(actual["bonus"].pity_triggers["five_star"],
+                                       float(Fraction(912, 1000) ** 9) if receives_bonus else 0.0,
+                                       places=12)
+                self.assertEqual(actual["bonus"].pity_triggers["six_star_hard"], 0.0)
+                for field in ("rarity_counts", "six_star_categories", "character_counts", "rewards", "pity_triggers"):
+                    for name, total in getattr(actual["total"], field).items():
+                        self.assertAlmostEqual(total, getattr(actual["main"], field)[name]
+                                               + getattr(actual["bonus"], field)[name])
+
+    def test_simulation_expectations_honor_absent_bonus_and_disabled_main_pity(self):
+        rule = Rule1(subrules=())
+        self.assertEqual(expected_simulation_results(rule, 30)["bonus"].rarity_counts,
+                         {"4": 0.0, "5": 0.0, "6": 0.0})
+        disabled = Rule1(config=replace(
+            self.rule.config, five_star=replace(self.rule.config.five_star, pity_enabled=False)
+        ))
+        actual = expected_simulation_results(disabled, 30)
+        self.assertEqual(actual["main"].pity_triggers["five_star"], 0.0)
+        self.assertAlmostEqual(actual["bonus"].pity_triggers["five_star"],
+                               float(Fraction(912, 1000) ** 9), places=12)
+
+    def test_new_analysis_rejects_invalid_draws_and_initial_states(self):
+        for draws in (0, -1, True, 1.5):
+            with self.subTest(draws=draws):
+                with self.assertRaises(ValueError):
+                    expected_pool_results(self.rule, draws)
+                with self.assertRaises(ValueError):
+                    expected_simulation_results(self.rule, draws)
+        for initial in (DrawState(-1, 0), DrawState(80, 0), DrawState(0, -1), DrawState(0, 10)):
+            with self.subTest(initial=initial):
+                with self.assertRaises(ValueError):
+                    expected_pool_results(self.rule, 1, initial)
+                with self.assertRaises(ValueError):
+                    expected_simulation_results(self.rule, 1, initial.misses_since_six_star,
+                                                initial.misses_since_five_or_higher)
+
+    def test_pool_analysis_rejects_invalid_probabilities_in_reached_states(self):
+        for probabilities in (
+            RarityProbabilities(-0.1, 0.1, 1.0),
+            RarityProbabilities(0.5, 0.8, 0.2),
+            RarityProbabilities(0.9, float("nan"), 0.1),
+            RarityProbabilities(0.9, 0.1, float("inf")),
+        ):
+            class InvalidRarityRule(Rule1):
+                def rarity_probabilities(self, state):
+                    if state.misses_since_six_star == 1:
+                        return probabilities
+                    return super().rarity_probabilities(state)
+
+            with self.subTest(probabilities=probabilities):
+                with self.assertRaisesRegex(ValueError, "probabilit"):
+                    expected_pool_results(InvalidRarityRule(), 2)
 
     def test_invalid_analysis_inputs_are_rejected(self):
         with self.assertRaises(ValueError):

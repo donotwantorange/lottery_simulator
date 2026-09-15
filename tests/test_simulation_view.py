@@ -128,14 +128,17 @@ class SimulationResultViewTest(unittest.TestCase):
         self.assertEqual(
             count_table, [{"六星数量": 0, "实验次数": 1, "占比": 1.0}]
         )
-        self.assertEqual(
-            source_table,
-            [
-                {"来源": "主池", "模拟均值": 0.0, "理论期望": 0.016},
-                {"来源": "赠送", "模拟均值": 0.0, "理论期望": 0.08},
-                {"来源": "总计", "模拟均值": 0.0, "理论期望": 0.096},
-            ],
-        )
+        expected_sources = [
+            {"来源": "主池", "模拟均值": 0.0, "理论期望": 0.016},
+            {"来源": "赠送", "模拟均值": 0.0, "理论期望": 0.08},
+            {"来源": "总计", "模拟均值": 0.0, "理论期望": 0.096},
+        ]
+        self.assertEqual(len(source_table), len(expected_sources))
+        for actual, expected in zip(source_table, expected_sources):
+            self.assertEqual(actual.keys(), expected.keys())
+            self.assertEqual(actual["来源"], expected["来源"])
+            self.assertEqual(actual["模拟均值"], expected["模拟均值"])
+            self.assertAlmostEqual(actual["理论期望"], expected["理论期望"], places=12)
         self.assertEqual(trace_table, self.payload["records"])
         event_start = 0
         for chart, expander in (

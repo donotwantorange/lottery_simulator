@@ -1,5 +1,6 @@
 from dataclasses import astuple, replace
 import unittest
+from unittest.mock import patch
 
 from lottery_simulator.engine import (
     DrawOutcome,
@@ -162,6 +163,37 @@ class EngineTest(unittest.TestCase):
                 self.assertAlmostEqual(value, main[field][name] + bonus[field][name])
         self.assertEqual(result.records, ())
 
+    def test_theoretical_source_summaries_align_with_simulation_and_legacy_fields(self):
+        result = simulate(
+            Rule1(), draws=1, trials=2, seed=42,
+            initial_pity=29, initial_five_star_pity=9,
+        )
+        theory = result.theoretical_source_summaries
+        self.assertEqual(set(theory), {"main", "bonus", "total"})
+        for source in theory:
+            self.assertEqual(set(theory[source]), set(result.source_summaries[source]))
+            self.assertEqual(theory[source]["draws"], result.source_summaries[source]["draws"])
+            for field in theory[source]:
+                if field != "draws":
+                    self.assertEqual(set(theory[source][field]),
+                                     set(result.source_summaries[source][field]))
+        self.assertEqual(theory["main"]["mean_rarity_counts"],
+                         {"4": 0.0, "5": 0.992, "6": 0.008})
+        self.assertEqual(theory["main"]["mean_pity_triggers"],
+                         {"five_star": 1.0, "six_star_hard": 0.0})
+        self.assertAlmostEqual(theory["main"]["mean_character_counts"]["UP-A"], 0.004)
+        self.assertAlmostEqual(theory["main"]["mean_six_star_categories"]["other_limited"], 0.001)
+        self.assertAlmostEqual(theory["main"]["mean_rewards"]["奖励A"], 5.16)
+        self.assertAlmostEqual(theory["bonus"]["mean_rarity_counts"]["5"], 0.8 + 0.912 ** 10)
+        self.assertAlmostEqual(theory["bonus"]["mean_pity_triggers"]["five_star"], 0.912 ** 9)
+        for field in theory["total"]:
+            if field != "draws":
+                for name, total in theory["total"][field].items():
+                    self.assertAlmostEqual(total, theory["main"][field][name] + theory["bonus"][field][name])
+        self.assertEqual(result.theoretical_expected_main_count, theory["main"]["mean_rarity_counts"]["6"])
+        self.assertEqual(result.theoretical_expected_bonus_count, theory["bonus"]["mean_rarity_counts"]["6"])
+        self.assertEqual(result.theoretical_expected_count, theory["total"]["mean_rarity_counts"]["6"])
+
     def test_bonus_ten_draws_have_at_least_one_five_or_six_per_trial(self):
         result = simulate(
             Rule1(), draws=30, trials=100, seed=7, collect_records=False
@@ -323,22 +355,15 @@ class EngineTest(unittest.TestCase):
             rewards=(RewardRule("fractional", 0.1, 0.2, 0.3),),
         )
 
-        class OrderedRarityRule(Rule1):
-            def __init__(self):
-                super().__init__(config=config, subrules=())
-                self.rarities = iter((4, 5, 6, 6, 5, 4))
-
-            def rarity_probabilities(self, state):
-                return {
-                    4: RarityProbabilities(1.0, 0.0, 0.0),
-                    5: RarityProbabilities(0.0, 1.0, 0.0),
-                    6: RarityProbabilities(0.0, 0.0, 1.0),
-                }[next(self.rarities)]
-
-        result = simulate(
-            OrderedRarityRule(), draws=3, trials=2, seed=42,
-            collect_records=False,
-        )
+        rule = Rule1(config=config, subrules=())
+        rolls = (0.5, 0.05, 0.0, 0.0, 0.0, 0.0, 0.05, 0.5)
+        # Character selection consumes the roll immediately after each six-star.
+        with patch("lottery_simulator.engine.random.Random", return_value=SequenceRandom(rolls)):
+            result = simulate(rule, draws=3, trials=2, seed=42, collect_records=False)
+        for trial_rolls, expected in ((rolls[:4], [4, 5, 6]), (rolls[4:], [6, 5, 4])):
+            with patch("lottery_simulator.engine.random.Random", return_value=SequenceRandom(trial_rolls)):
+                trace = simulate(rule, draws=3, trials=1, seed=42)
+            self.assertEqual([record.rarity for record in trace.records], expected)
 
         for source in ("main", "total"):
             distribution = result.source_distributions[source]
@@ -505,6 +530,7 @@ class EngineTest(unittest.TestCase):
         self.assertEqual(result.final_main_draws, 5)
         self.assertEqual(result.mean_main_six_stars, 0.0)
         self.assertEqual(result.theoretical_expected_main_count, 0.024)
+        self.assertEqual(result.theoretical_source_summaries, {})
 
     def test_progress_hooks_do_not_change_seeded_result(self):
         updates = []

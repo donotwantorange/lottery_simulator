@@ -3,7 +3,7 @@ from collections.abc import Callable
 import random
 import secrets
 
-from lottery_simulator.analysis import expected_bonus_six_stars, expected_six_stars
+from lottery_simulator.analysis import expected_simulation_results
 from lottery_simulator.rules.base import (
     DrawState,
     LotteryRule,
@@ -76,6 +76,7 @@ class SimulationResult:
     at_least_one_rates: dict[str, dict[str, float]] = field(default_factory=dict)
     pool_config: dict = field(default_factory=dict)
     initial_five_star_pity: int = 0
+    theoretical_source_summaries: dict[str, dict] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         defaults = {
@@ -350,12 +351,24 @@ def simulate(
             for name, count in indicators.items():
                 at_least_one_counts[source][name] += int(count > 0)
 
-    theoretical_main = expected_six_stars(rule, draws, initial_pity)
-    theoretical_bonus = expected_bonus_six_stars(rule, draws, initial_pity)
+    expectations = expected_simulation_results(
+        rule, draws, initial_pity, initial_five_star_pity
+    )
     source_draws = {
         "main": draws,
         "bonus": bonus_draws_per_trial,
         "total": draws + bonus_draws_per_trial,
+    }
+    theoretical_source_summaries = {
+        source: {
+            "draws": source_draws[source],
+            "mean_rarity_counts": expected.rarity_counts,
+            "mean_six_star_categories": expected.six_star_categories,
+            "mean_character_counts": expected.character_counts,
+            "mean_rewards": expected.rewards,
+            "mean_pity_triggers": expected.pity_triggers,
+        }
+        for source, expected in expectations.items()
     }
     source_summaries = {
         source: {
@@ -414,13 +427,14 @@ def simulate(
         observed_mean_interval=(
             interval_sum / completed_intervals if completed_intervals else None
         ),
-        theoretical_expected_main_count=theoretical_main,
-        theoretical_expected_bonus_count=theoretical_bonus,
-        theoretical_expected_count=theoretical_main + theoretical_bonus,
+        theoretical_expected_main_count=expectations["main"].rarity_counts["6"],
+        theoretical_expected_bonus_count=expectations["bonus"].rarity_counts["6"],
+        theoretical_expected_count=expectations["total"].rarity_counts["6"],
         records=tuple(records),
         source_summaries=source_summaries,
         source_distributions=source_distributions,
         at_least_one_rates=at_least_one_rates,
         pool_config=rule.config.to_dict(),
         initial_five_star_pity=initial_five_star_pity,
+        theoretical_source_summaries=theoretical_source_summaries,
     )

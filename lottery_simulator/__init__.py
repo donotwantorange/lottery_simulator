@@ -15,8 +15,11 @@ from lottery_simulator.rules.pool_config import (
 )
 from lottery_simulator.analysis import (
     DistributionStats,
+    PoolExpectations,
     distribution_stats,
     expected_bonus_six_stars,
+    expected_pool_results,
+    expected_simulation_results,
     expected_six_stars,
     waiting_time_distribution,
 )
@@ -24,6 +27,7 @@ from lottery_simulator.engine import DrawRecord, SimulationResult, simulate
 
 __all__ = [
     "DistributionStats",
+    "PoolExpectations",
     "BonusEvent",
     "DrawRecord",
     "DrawState",
@@ -39,6 +43,8 @@ __all__ = [
     "SimulationResult",
     "distribution_stats",
     "expected_bonus_six_stars",
+    "expected_pool_results",
+    "expected_simulation_results",
     "expected_six_stars",
     "simulate",
     "waiting_time_distribution",
