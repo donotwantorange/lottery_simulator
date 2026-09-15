@@ -255,8 +255,14 @@ def main(argv=None, stdout=None) -> int:
     try:
         config = load_pool_config(args.pool_config)
         rule = RULES[args.rule](config=config)
-    except (OSError, TypeError, ValueError) as error:
-        parser.error(str(error))
+    except FileNotFoundError:
+        parser.error("配置文件不存在或不可读取")
+    except json.JSONDecodeError:
+        parser.error("配置文件 JSON 格式错误")
+    except OSError:
+        parser.error("配置文件不存在或不可读取")
+    except (TypeError, ValueError) as error:
+        parser.error(f"配置文件内容无效：{error}")
     if args.command == "analyze":
         payload = _analysis_payload(rule)
         if args.format == "json":
@@ -278,7 +284,9 @@ def main(argv=None, stdout=None) -> int:
             collect_records=args.trace,
         )
     except (TypeError, ValueError) as error:
-        parser.error(str(error))
+        if args.initial_five_star_pity != 0:
+            parser.error(f"初始五星保底无效：{error}")
+        parser.error(f"模拟参数无效：{error}")
     payload = _simulation_payload(result, rule, include_records=args.trace)
     if args.format == "json":
         json.dump(payload, output, ensure_ascii=False, indent=2)

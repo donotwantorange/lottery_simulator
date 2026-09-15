@@ -274,6 +274,54 @@ class CliTest(unittest.TestCase):
         ):
             self.assertIn(field, record)
 
+    def run_module_cli(self, *arguments):
+        return subprocess.run(
+            [sys.executable, "-m", "lottery_simulator", *arguments],
+            cwd=Path(__file__).parents[1],
+            capture_output=True,
+            text=True,
+        )
+
+    def test_real_cli_missing_pool_config_reports_chinese_stderr(self):
+        completed = self.run_module_cli(
+            "analyze", "--pool-config", "/no/such/pool.json"
+        )
+        self.assertEqual(completed.returncode, 2)
+        self.assertIn("配置文件不存在或不可读取", completed.stderr)
+        self.assertNotIn("Traceback", completed.stderr)
+
+    def test_real_cli_malformed_pool_config_reports_chinese_stderr_without_json(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "malformed.json"
+            path.write_text('{"secret": "do-not-leak"', encoding="utf-8")
+            completed = self.run_module_cli("analyze", "--pool-config", str(path))
+        self.assertEqual(completed.returncode, 2)
+        self.assertIn("配置文件 JSON 格式错误", completed.stderr)
+        self.assertNotIn("do-not-leak", completed.stderr)
+        self.assertNotIn("Traceback", completed.stderr)
+
+    def test_real_cli_semantic_pool_config_error_reports_chinese_stderr(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "invalid.json"
+            raw = load_pool_config().to_dict()
+            raw["up_share"] = 1.5
+            path.write_text(json.dumps(raw), encoding="utf-8")
+            completed = self.run_module_cli(
+                "simulate", "--draws", "1", "--pool-config", str(path)
+            )
+        self.assertEqual(completed.returncode, 2)
+        self.assertIn("配置文件内容无效", completed.stderr)
+        self.assertNotIn("Traceback", completed.stderr)
+
+    def test_real_cli_invalid_initial_five_star_pity_reports_chinese_stderr(self):
+        completed = self.run_module_cli(
+            "simulate", "--draws", "1", "--initial-five-star-pity", "10"
+        )
+        self.assertEqual(completed.returncode, 2)
+        self.assertIn("初始五星保底", completed.stderr)
+        self.assertIn("无效", completed.stderr)
+        self.assertNotIn("Traceback", completed.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()
