@@ -402,6 +402,90 @@ os._exit(19)
             },
         )
 
+    def test_initialize_does_not_recover_stale_journal_from_rejected_snapshot(self):
+        path = self.path.with_name("reused-snapshot.sqlite3")
+        journal = Path(str(path) + "-journal")
+        repository = HistoryRepository(path)
+        original_copyfile = shutil.copyfile
+        original_inspect_schema = repository._inspect_schema
+        writer_committed = False
+        private_inspections = []
+        with closing(sqlite3.connect(path)) as writer:
+            writer.execute("PRAGMA journal_mode=DELETE")
+            writer.execute("PRAGMA synchronous=FULL")
+            writer.execute("PRAGMA cache_size=1")
+            writer.execute("PRAGMA secure_delete=ON")
+            writer.execute("CREATE TABLE retired(payload TEXT)")
+            writer.executemany(
+                "INSERT INTO retired VALUES (?)", (("x" * 8000,) for _ in range(100))
+            )
+            writer.execute("PRAGMA user_version=2")
+            writer.commit()
+            writer.execute("BEGIN IMMEDIATE")
+            writer.execute("DROP TABLE retired")
+            writer.execute("PRAGMA user_version=0")
+            # Cache spills make SQLite's rollback journal recoverable in a private copy.
+            self.assertEqual(journal.read_bytes()[:8], bytes.fromhex("d9d505f920a163d7"))
+
+            def copy_then_commit(source, destination, *args, **kwargs):
+                nonlocal writer_committed
+                result = original_copyfile(source, destination, *args, **kwargs)
+                if Path(source) == journal and not writer_committed:
+                    # This candidate keeps the journal after commit removes the source copy.
+                    writer.commit()
+                    writer_committed = True
+                    self.assertFalse(journal.exists())
+                    self.assertEqual(writer.execute("PRAGMA user_version").fetchone()[0], 0)
+                    self.assertEqual(writer.execute("SELECT name FROM sqlite_master").fetchall(), [])
+                return result
+
+            def inspect_snapshot(snapshot):
+                self.assertNotEqual(Path(snapshot), path)
+                raw_version = struct.unpack(">I", Path(snapshot).read_bytes()[60:64])[0]
+                files_present = tuple(
+                    Path(str(snapshot) + suffix).is_file()
+                    for suffix in ("", "-journal", "-wal", "-shm")
+                )
+                result = original_inspect_schema(snapshot)
+                private_inspections.append((raw_version, files_present, result))
+                return result
+
+            error = None
+            with patch("dashboard.repository.shutil.copyfile", side_effect=copy_then_commit), \
+                    patch.object(repository, "_inspect_schema", side_effect=inspect_snapshot):
+                try:
+                    repository.initialize()
+                except Exception as caught:
+                    error = caught
+
+        with closing(sqlite3.connect(path)) as connection:
+            version = connection.execute("PRAGMA user_version").fetchone()[0]
+            tables = [row[0] for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"
+            )]
+            integrity = connection.execute("PRAGMA integrity_check").fetchone()[0]
+
+        self.assertTrue(writer_committed)
+        self.assertEqual(
+            {
+                "error_type": type(error).__name__ if error is not None else None,
+                "private_inspections": private_inspections,
+                "source_version": version,
+                "source_tables": tables,
+                "source_integrity": integrity,
+            },
+            {
+                "error_type": None,
+                "private_inspections": [
+                    (0, (True, False, False, False), (0, False)),
+                    (0, (True, False, False, False), (0, False)),
+                ],
+                "source_version": 2,
+                "source_tables": ["draw_records", "simulation_runs"],
+                "source_integrity": "ok",
+            },
+        )
+
     def test_initialize_rejects_future_version_without_changes(self):
         path = self.path.with_name("future.sqlite3")
         with closing(sqlite3.connect(path)) as connection, connection:

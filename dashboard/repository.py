@@ -6,7 +6,7 @@ import json
 from pathlib import Path
 import shutil
 import sqlite3
-from tempfile import TemporaryDirectory
+from tempfile import TemporaryDirectory, mkdtemp
 from uuid import uuid4
 
 
@@ -79,8 +79,8 @@ class HistoryRepository:
         return tuple(components)
 
     def _stable_snapshot(self, directory):
-        for attempt in range(3):
-            snapshot = Path(directory) / f"{attempt}-{self.path.name}"
+        for _ in range(3):
+            snapshot = Path(mkdtemp(dir=directory)) / self.path.name
             copied = []
             for suffix in _COMPONENT_SUFFIXES:
                 source = Path(str(self.path) + suffix)
