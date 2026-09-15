@@ -261,8 +261,8 @@ def main(argv=None, stdout=None) -> int:
         parser.error("配置文件 JSON 格式错误")
     except OSError:
         parser.error("配置文件不存在或不可读取")
-    except (TypeError, ValueError) as error:
-        parser.error(f"配置文件内容无效：{error}")
+    except (TypeError, ValueError):
+        parser.error("配置文件内容无效：请检查概率、角色、权重、奖励和保底配置")
     if args.command == "analyze":
         payload = _analysis_payload(rule)
         if args.format == "json":
@@ -283,10 +283,8 @@ def main(argv=None, stdout=None) -> int:
             initial_five_star_pity=args.initial_five_star_pity,
             collect_records=args.trace,
         )
-    except (TypeError, ValueError) as error:
-        if args.initial_five_star_pity != 0:
-            parser.error(f"初始五星保底无效：{error}")
-        parser.error(f"模拟参数无效：{error}")
+    except (TypeError, ValueError):
+        parser.error("初始保底参数无效：请检查六星与五星保底进度范围")
     payload = _simulation_payload(result, rule, include_records=args.trace)
     if args.format == "json":
         json.dump(payload, output, ensure_ascii=False, indent=2)

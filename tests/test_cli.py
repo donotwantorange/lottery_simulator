@@ -311,6 +311,8 @@ class CliTest(unittest.TestCase):
             )
         self.assertEqual(completed.returncode, 2)
         self.assertIn("配置文件内容无效", completed.stderr)
+        self.assertNotIn("up_share", completed.stderr)
+        self.assertNotIn("between", completed.stderr)
         self.assertNotIn("Traceback", completed.stderr)
 
     def test_real_cli_invalid_initial_five_star_pity_reports_chinese_stderr(self):
@@ -318,8 +320,21 @@ class CliTest(unittest.TestCase):
             "simulate", "--draws", "1", "--initial-five-star-pity", "10"
         )
         self.assertEqual(completed.returncode, 2)
-        self.assertIn("初始五星保底", completed.stderr)
+        self.assertIn("初始保底参数无效", completed.stderr)
+        self.assertNotIn("初始五星保底无效", completed.stderr)
+        self.assertNotIn("misses_since", completed.stderr)
         self.assertIn("无效", completed.stderr)
+        self.assertNotIn("Traceback", completed.stderr)
+
+    def test_real_cli_both_initial_pity_values_invalid_reports_generic_chinese_stderr(self):
+        completed = self.run_module_cli(
+            "simulate", "--draws", "1", "--initial-pity", "80",
+            "--initial-five-star-pity", "1",
+        )
+        self.assertEqual(completed.returncode, 2)
+        self.assertIn("初始保底参数无效", completed.stderr)
+        self.assertNotIn("初始五星保底无效", completed.stderr)
+        self.assertNotIn("misses_since", completed.stderr)
         self.assertNotIn("Traceback", completed.stderr)
 
 
