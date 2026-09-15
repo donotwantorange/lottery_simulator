@@ -9,6 +9,7 @@ import subprocess
 import sys
 from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import patch
 from uuid import UUID
 
 from dashboard.models import result_payload
@@ -185,6 +186,123 @@ os._exit(17)
                 },
                 "version": 1,
                 "value": "keep",
+            },
+        )
+
+    def test_initialize_rejects_closed_wal_schema_without_creating_sidecars(self):
+        path = self.path.with_name("closed-wal.sqlite3")
+        with closing(sqlite3.connect(path)) as connection, connection:
+            connection.execute("PRAGMA journal_mode=WAL")
+            connection.execute("CREATE TABLE legacy_marker(value TEXT)")
+            connection.execute("INSERT INTO legacy_marker VALUES ('keep')")
+            connection.execute("PRAGMA user_version=1")
+        files = {
+            "database": path,
+            "wal": Path(str(path) + "-wal"),
+            "shm": Path(str(path) + "-shm"),
+        }
+        before = {
+            name: (file.is_file(), file.read_bytes() if file.is_file() else None)
+            for name, file in files.items()
+        }
+        self.assertEqual(
+            {name: exists for name, (exists, _) in before.items()},
+            {"database": True, "wal": False, "shm": False},
+        )
+
+        error = None
+        try:
+            HistoryRepository(path).initialize()
+        except Exception as caught:
+            error = caught
+        after = {
+            name: (file.is_file(), file.read_bytes() if file.is_file() else None)
+            for name, file in files.items()
+        }
+        with TemporaryDirectory() as directory:
+            snapshot = Path(directory) / path.name
+            shutil.copyfile(path, snapshot)
+            with closing(sqlite3.connect(snapshot)) as connection:
+                version = connection.execute("PRAGMA user_version").fetchone()[0]
+                value = connection.execute("SELECT value FROM legacy_marker").fetchone()[0]
+
+        self.assertEqual(
+            {
+                "error_type": type(error).__name__ if error is not None else None,
+                "chinese_error": error is not None and "版本不兼容" in str(error),
+                "files_unchanged": after == before,
+                "after_exists": {name: exists for name, (exists, _) in after.items()},
+                "version": version,
+                "value": value,
+            },
+            {
+                "error_type": "ValueError",
+                "chinese_error": True,
+                "files_unchanged": True,
+                "after_exists": {"database": True, "wal": False, "shm": False},
+                "version": 1,
+                "value": "keep",
+            },
+        )
+
+    def test_initialize_rejects_wal_checkpoint_race_without_modifying_source(self):
+        path = self.path.with_name("racing-wal.sqlite3")
+        files = {
+            "database": path,
+            "wal": Path(str(path) + "-wal"),
+            "shm": Path(str(path) + "-shm"),
+        }
+        original_copyfile = shutil.copyfile
+        writer_settled = None
+        with closing(sqlite3.connect(path)) as writer:
+            writer.execute("PRAGMA journal_mode=WAL")
+            writer.execute("PRAGMA wal_autocheckpoint=0")
+            writer.execute("CREATE TABLE legacy_marker(value TEXT)")
+            writer.execute("INSERT INTO legacy_marker VALUES ('before')")
+            writer.execute("PRAGMA user_version=1")
+            writer.commit()
+
+            def copy_with_checkpoint(source, destination, *args, **kwargs):
+                nonlocal writer_settled
+                result = original_copyfile(source, destination, *args, **kwargs)
+                if Path(source) == path and writer_settled is None:
+                    checkpoint = writer.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+                    self.assertEqual(checkpoint[0], 0)
+                    writer.execute("INSERT INTO legacy_marker VALUES ('after')")
+                    writer.commit()
+                    writer_settled = {
+                        name: file.read_bytes() for name, file in files.items()
+                    }
+                return result
+
+            error = None
+            with patch("dashboard.repository.shutil.copyfile", side_effect=copy_with_checkpoint):
+                try:
+                    HistoryRepository(path).initialize()
+                except Exception as caught:
+                    error = caught
+
+            after = {name: file.read_bytes() for name, file in files.items()}
+            version = writer.execute("PRAGMA user_version").fetchone()[0]
+            values = [row[0] for row in writer.execute(
+                "SELECT value FROM legacy_marker ORDER BY rowid"
+            )]
+
+        self.assertIsNotNone(writer_settled)
+        self.assertEqual(
+            {
+                "error_type": type(error).__name__ if error is not None else None,
+                "chinese_error": error is not None and "版本不兼容" in str(error),
+                "source_unchanged_after_writer_commit": after == writer_settled,
+                "version": version,
+                "values": values,
+            },
+            {
+                "error_type": "ValueError",
+                "chinese_error": True,
+                "source_unchanged_after_writer_commit": True,
+                "version": 1,
+                "values": ["before", "after"],
             },
         )
 

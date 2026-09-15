@@ -67,34 +67,59 @@ class HistoryRepository:
             version = connection.execute("PRAGMA user_version").fetchone()[0]
             return version, version == 0 and self._has_user_schema(connection)
 
+    def _read_components(self):
+        components = []
+        for suffix in ("", "-wal", "-shm"):
+            try:
+                components.append(Path(str(self.path) + suffix).read_bytes())
+            except FileNotFoundError:
+                components.append(None)
+        return tuple(components)
+
+    def _stable_snapshot(self, directory):
+        for attempt in range(3):
+            snapshot = Path(directory) / f"{attempt}-{self.path.name}"
+            copied = []
+            for suffix in ("", "-wal", "-shm"):
+                source = Path(str(self.path) + suffix)
+                destination = Path(str(snapshot) + suffix)
+                try:
+                    shutil.copyfile(source, destination)
+                except FileNotFoundError:
+                    copied.append(None)
+                else:
+                    copied.append(destination.read_bytes())
+            first = self._read_components()
+            second = self._read_components()
+            if tuple(copied) == first == second:
+                return snapshot, first
+        raise ValueError("历史数据库状态不稳定，无法安全初始化")
+
     def initialize(self):
         try:
             self.path.stat()
         except FileNotFoundError:
             pass
         else:
-            wal_path = Path(str(self.path) + "-wal")
-            try:
-                wal_path.stat()
-            except FileNotFoundError:
-                version, has_user_schema = self._inspect_schema(self.path)
-            else:
-                with TemporaryDirectory() as directory:
-                    snapshot = Path(directory) / self.path.name
-                    shutil.copyfile(self.path, snapshot)
-                    shutil.copyfile(wal_path, Path(str(snapshot) + "-wal"))
-                    shm_path = Path(str(self.path) + "-shm")
-                    try:
-                        shm_path.stat()
-                    except FileNotFoundError:
-                        pass
-                    else:
-                        shutil.copyfile(shm_path, Path(str(snapshot) + "-shm"))
-                    version, has_user_schema = self._inspect_schema(snapshot)
-            if version == 2:
-                return
-            if version != 0 or has_user_schema:
-                raise ValueError(f"历史数据库版本不兼容：当前版本 {version}，需要版本 2")
+            with TemporaryDirectory() as directory:
+                snapshot, components = self._stable_snapshot(directory)
+                version, has_user_schema = self._inspect_schema(snapshot)
+                if version == 2:
+                    return
+                if version != 0 or has_user_schema:
+                    raise ValueError(
+                        f"历史数据库版本不兼容：当前版本 {version}，需要版本 2"
+                    )
+                confirmation, confirmed_components = self._stable_snapshot(directory)
+                confirmed_version, confirmed_user_schema = self._inspect_schema(confirmation)
+                if confirmed_version == 2:
+                    return
+                if confirmed_version != 0 or confirmed_user_schema:
+                    raise ValueError(
+                        f"历史数据库版本不兼容：当前版本 {confirmed_version}，需要版本 2"
+                    )
+                if confirmed_components != components:
+                    raise ValueError("历史数据库状态不稳定，无法安全初始化")
         with closing(self._connect()) as connection, connection:
             connection.execute("BEGIN IMMEDIATE")
             version = connection.execute("PRAGMA user_version").fetchone()[0]
