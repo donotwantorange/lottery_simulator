@@ -274,6 +274,12 @@ def main(argv=None, stdout=None) -> int:
     if args.trace and args.trials != 1:
         parser.error("--trace requires --trials 1")
     try:
+        rule.rarity_probabilities(
+            DrawState(args.initial_pity, args.initial_five_star_pity)
+        )
+    except (TypeError, ValueError):
+        parser.error("初始保底参数无效：请检查六星与五星保底进度范围")
+    try:
         result = simulate(
             rule,
             args.draws,
@@ -284,7 +290,7 @@ def main(argv=None, stdout=None) -> int:
             collect_records=args.trace,
         )
     except (TypeError, ValueError):
-        parser.error("初始保底参数无效：请检查六星与五星保底进度范围")
+        parser.error("模拟参数无效：请检查抽数、轮数、随机种子等参数")
     payload = _simulation_payload(result, rule, include_records=args.trace)
     if args.format == "json":
         json.dump(payload, output, ensure_ascii=False, indent=2)

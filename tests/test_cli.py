@@ -337,6 +337,22 @@ class CliTest(unittest.TestCase):
         self.assertNotIn("misses_since", completed.stderr)
         self.assertNotIn("Traceback", completed.stderr)
 
+    def test_real_cli_invalid_draw_count_reports_simulation_parameter_error(self):
+        completed = self.run_module_cli("simulate", "--draws", "0")
+        self.assertEqual(completed.returncode, 2)
+        self.assertIn("模拟参数无效", completed.stderr)
+        self.assertNotIn("保底参数无效", completed.stderr)
+        self.assertNotIn("Traceback", completed.stderr)
+
+    def test_real_cli_invalid_trial_count_reports_simulation_parameter_error(self):
+        completed = self.run_module_cli(
+            "simulate", "--draws", "1", "--trials", "0"
+        )
+        self.assertEqual(completed.returncode, 2)
+        self.assertIn("模拟参数无效", completed.stderr)
+        self.assertNotIn("保底参数无效", completed.stderr)
+        self.assertNotIn("Traceback", completed.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()
