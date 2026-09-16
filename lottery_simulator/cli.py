@@ -271,7 +271,6 @@ def main(argv=None, stdout=None) -> int:
     args = parser.parse_args(argv)
     try:
         config = load_pool_config(args.pool_config)
-        rule = RULES[args.rule](config=config)
     except FileNotFoundError:
         parser.error("配置文件不存在或不可读取")
     except json.JSONDecodeError:
@@ -280,6 +279,10 @@ def main(argv=None, stdout=None) -> int:
         parser.error("配置文件不存在或不可读取")
     except (TypeError, ValueError):
         parser.error("配置文件内容无效：请检查概率、角色、权重、奖励和保底配置")
+    try:
+        rule = RULES[args.rule](config=config)
+    except ValueError as error:
+        parser.error(str(error))
     if args.command == "analyze":
         payload = _analysis_payload(rule)
         if args.format == "json":

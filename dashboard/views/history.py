@@ -1,10 +1,11 @@
 """History browsing and comparison of immutable saved snapshots."""
 
 from datetime import datetime, time, timezone
+from io import StringIO
 
 from dashboard.views.configuration import set_pool_config_editor_state
 from dashboard.views.simulation import render_result
-from lottery_simulator.cli import RULES
+from lottery_simulator.cli import RULES, _write_config_summary
 from lottery_simulator.rules.pool_config import PoolConfig
 
 
@@ -104,6 +105,11 @@ def render_history(st, repository):
         with column:
             st.subheader("历史运行 " + run["id"])
             st.caption(f'{run["created_at"]} · {run["rule_name"]} · {run["rule_version"]}')
+            with st.expander("配置摘要"):
+                summary = StringIO()
+                _write_config_summary(run["pool_config"], summary)
+                print(f'初始五星进度：{run["initial_five_star_pity"]}', file=summary)
+                st.text(summary.getvalue())
             if st.button("复用参数 " + run["id"]):
                 st.session_state["pending_reuse_id"] = run["id"]
                 st.rerun()

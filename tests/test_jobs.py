@@ -16,7 +16,7 @@ import unittest
 from unittest.mock import patch
 from uuid import uuid4
 
-from dashboard.jobs import JobAlreadyRunning, JobManager
+from dashboard.jobs import JobAlreadyRunning, JobManager, validate_parameters_for_active_rule
 from dashboard.models import JobState, RunParameters, read_json, result_payload, write_json
 from dashboard.repository import HistoryRepository
 from lottery_simulator.engine import simulate
@@ -217,6 +217,19 @@ class JobManagerTest(unittest.TestCase):
 
         self.assertEqual(list(self.root.glob("*/state.json")), [])
         self.assertEqual(self.counts(), (0, 0))
+
+    def test_invalid_bonus_configuration_is_rejected_before_admission_and_job_creation(self):
+        config = load_pool_config().to_dict()
+        config["five_star"].update(base_probability=1.0, hard_pity=1)
+        for draws in (29, 30, 31):
+            with self.subTest(draws=draws):
+                parameters = RunParameters("rule1", draws, 1, 0, 42, False, 0, config)
+                with self.assertRaisesRegex(ValueError, "赠送池.*五星.*六星"):
+                    validate_parameters_for_active_rule(parameters)
+                with self.assertRaisesRegex(ValueError, "赠送池.*五星.*六星"):
+                    self.manager.start(parameters, synchronous=True)
+                self.assertEqual(list(self.root.glob("*/state.json")), [])
+                self.assertEqual(self.counts(), (0, 0))
 
     def test_default_configuration_is_frozen_into_job_parameters_before_worker(self):
         state = self.manager.start(self.parameters, synchronous=True)

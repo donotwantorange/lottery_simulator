@@ -1,7 +1,9 @@
 from dataclasses import replace
 from functools import cached_property
 
-from lottery_simulator.rules.base import BonusEvent, DrawState, RarityProbabilities
+from lottery_simulator.rules.base import (
+    BonusEvent, DrawState, RarityProbabilities, bonus_events_after_main_draw,
+)
 from lottery_simulator.rules.first_thirty_bonus import FirstThirtyBonusRule
 from lottery_simulator.rules.pool_config import (
     PoolConfig,
@@ -42,7 +44,14 @@ class Rule1:
                     and six_star_probability + self.config.five_star.base_probability
                     > 1.0
                 ):
-                    raise ValueError("five-star and six-star probabilities exceed 1")
+                    pool = "赠送池" if fixed_six_star_probability is not None else "主池"
+                    raise ValueError(
+                        f"{pool}配置无效：普通抽取的五星基础概率与六星概率之和不能超过 1"
+                    )
+        # Rule 1's configured bonus triggers at 30 main draws. Validate its
+        # temporary pool now; for_bonus clears subrules, so this cannot recurse.
+        for event in bonus_events_after_main_draw(self, 30):
+            self.for_bonus(event)
 
     def _validate(self, state: DrawState) -> None:
         misses = state.misses_since_six_star

@@ -342,6 +342,39 @@ class CliTest(unittest.TestCase):
         self.assertNotIn("between", completed.stderr)
         self.assertNotIn("Traceback", completed.stderr)
 
+    def test_real_cli_huge_json_integer_reports_safe_chinese_configuration_error(self):
+        with TemporaryDirectory() as directory:
+            raw = load_pool_config().to_dict()
+            raw["six_star_characters"][0].update(
+                name="private-character", up_weight=10 ** 400,
+            )
+            path = Path(directory) / "huge.json"
+            path.write_text(json.dumps(raw), encoding="utf-8")
+            completed = self.run_module_cli("analyze", "--pool-config", str(path))
+        self.assertEqual(completed.returncode, 2)
+        self.assertEqual(completed.stdout, "")
+        self.assertIn("配置文件内容无效", completed.stderr)
+        self.assertNotIn("Traceback", completed.stderr)
+        self.assertNotIn("OverflowError", completed.stderr)
+        self.assertNotIn("private-character", completed.stderr)
+
+    def test_real_cli_joint_probability_errors_identify_configuration_and_pool(self):
+        for probability, threshold, pool in ((0.3, 10, "主池"), (1.0, 1, "赠送池")):
+            with self.subTest(pool=pool), TemporaryDirectory() as directory:
+                raw = load_pool_config().to_dict()
+                raw["five_star"].update(base_probability=probability, hard_pity=threshold)
+                path = Path(directory) / "invalid.json"
+                path.write_text(json.dumps(raw), encoding="utf-8")
+                completed = self.run_module_cli(
+                    "simulate", "--draws", "30", "--pool-config", str(path),
+                )
+                self.assertEqual(completed.returncode, 2)
+                self.assertEqual(completed.stdout, "")
+                self.assertIn(pool, completed.stderr)
+                self.assertRegex(completed.stderr, "五星.*六星.*不能超过 1")
+                self.assertNotIn("模拟参数无效", completed.stderr)
+                self.assertNotIn("Traceback", completed.stderr)
+
     def test_real_cli_invalid_initial_five_star_pity_reports_chinese_stderr(self):
         completed = self.run_module_cli(
             "simulate", "--draws", "1", "--initial-five-star-pity", "10"

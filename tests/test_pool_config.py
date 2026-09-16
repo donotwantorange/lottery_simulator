@@ -1,7 +1,10 @@
 import copy
+import json
 import math
 import unittest
 
+from lottery_simulator.analysis import expected_pool_results
+from lottery_simulator.rules.rule_1 import Rule1
 from lottery_simulator.rules.pool_config import (
     PoolConfig,
     load_pool_config,
@@ -35,6 +38,36 @@ class PoolConfigTest(unittest.TestCase):
         self.assertAlmostEqual(probabilities["UP-A"], 0.125)
         self.assertAlmostEqual(probabilities["限定-B"], 0.375)
         self.assertAlmostEqual(sum(probabilities.values()), 1.0)
+
+    def test_large_finite_up_weights_preserve_probabilities_and_character_expectations(self):
+        raw = load_pool_config().to_dict()
+        raw["six_star_characters"][0]["up_weight"] = 1e308
+        raw["six_star_characters"][1].update(is_up=True, up_weight=1e308)
+        config = PoolConfig.from_dict(raw)
+        probabilities = config.six_star_character_probabilities()
+
+        self.assertAlmostEqual(probabilities["UP-A"], 0.25)
+        self.assertAlmostEqual(probabilities["限定-B"], 0.25)
+        self.assertAlmostEqual(probabilities["UP-A"] + probabilities["限定-B"], 0.5)
+        self.assertAlmostEqual(sum(probabilities.values()), 1.0)
+        expected = expected_pool_results(Rule1(config), 1)
+        self.assertAlmostEqual(expected.rarity_counts["6"], 0.008)
+        self.assertAlmostEqual(expected.character_counts["UP-A"], 0.002)
+        self.assertAlmostEqual(sum(expected.character_counts.values()), 0.008)
+        self.assertAlmostEqual(expected.six_star_categories["up"], 0.004)
+
+    def test_json_integer_too_large_for_float_reports_field_value_error(self):
+        raw = load_pool_config().to_dict()
+        raw["six_star_characters"][0]["up_weight"] = 10 ** 400
+        raw = json.loads(json.dumps(raw))
+        try:
+            PoolConfig.from_dict(raw)
+        except ValueError as error:
+            self.assertIn("up_weight must be a finite number", str(error))
+        except OverflowError:
+            self.fail("JSON integer overflow bypassed field validation")
+        else:
+            self.fail("invalid UP weight was accepted")
 
     def test_invalid_character_combinations_are_rejected(self):
         base = load_pool_config().to_dict()

@@ -96,6 +96,17 @@ class Rule1Test(unittest.TestCase):
         with self.assertRaises(ValueError):
             Rule1(overflowing)
 
+    def test_bonus_admission_preserves_unreachable_main_base_probability(self):
+        config = load_pool_config()
+        always_pity = replace(config, five_star=replace(
+            config.five_star, base_probability=1.0, hard_pity=1,
+        ))
+        main_only = Rule1(always_pity, subrules=())
+        self.assertEqual(main_only.rarity_probabilities(DrawState()),
+                         RarityProbabilities(0.0, 0.992, 0.008))
+        with self.assertRaisesRegex(ValueError, "赠送池.*五星.*六星.*不能超过 1"):
+            Rule1(always_pity)
+
     def test_six_star_hard_pity_zeroes_five_star_probability(self):
         config = load_pool_config()
         disabled = replace(

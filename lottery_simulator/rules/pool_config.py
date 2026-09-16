@@ -11,7 +11,10 @@ from typing import Any, Mapping
 def _finite_number(value: Any, field: str) -> float:
     if isinstance(value, bool) or not isinstance(value, Real):
         raise ValueError(f"{field} must be a finite number")
-    number = float(value)
+    try:
+        number = float(value)
+    except OverflowError:
+        raise ValueError(f"{field} must be a finite number") from None
     if not math.isfinite(number):
         raise ValueError(f"{field} must be a finite number")
     return number
@@ -213,9 +216,10 @@ class PoolConfig:
     def six_star_character_probabilities(self) -> dict[str, float]:
         ups = tuple(character for character in self.six_star_characters if character.is_up)
         non_ups = tuple(character for character in self.six_star_characters if not character.is_up)
-        total_up_weight = sum(character.up_weight for character in ups)
+        max_up_weight = max(character.up_weight for character in ups)
+        total_up_weight = sum(character.up_weight / max_up_weight for character in ups)
         result = {
-            character.name: self.up_share * character.up_weight / total_up_weight
+            character.name: self.up_share * (character.up_weight / max_up_weight) / total_up_weight
             for character in ups
         }
         if non_ups:

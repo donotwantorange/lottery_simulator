@@ -223,6 +223,25 @@ class DashboardAppTest(unittest.TestCase):
         self.assertEqual(list(self.root.glob("jobs/*/state.json")), [])
         self.assertEqual(self.repository().list_runs({}, 10, 0), [])
 
+    def test_joint_probability_admission_shows_specific_chinese_error_without_job(self):
+        for probability, threshold, pool in ((0.3, 10, "主池"), (1.0, 1, "赠送池")):
+            with self.subTest(pool=pool):
+                app = self.load()
+                self.widget(app.number_input, "主池抽数").set_value(30)
+                self.widget(app.number_input, "五星概率").set_value(probability)
+                self.widget(app.number_input, "五星硬保底").set_value(threshold)
+                self.widget(app.button, "开始模拟").click().run()
+
+                self.assertEqual(len(app.exception), 0)
+                errors = " ".join(item.value for item in app.error)
+                self.assertIn(pool, errors)
+                self.assertIn("配置无效", errors)
+                self.assertRegex(errors, "五星.*六星.*不能超过 1")
+                self.assertNotIn("exceed", errors)
+                self.assertNotIn("模拟任务失败", errors)
+                self.assertEqual(list(self.root.glob("jobs/*/state.json")), [])
+                self.assertEqual(self.repository().list_runs({}, 10, 0), [])
+
     def test_uploaded_configuration_and_initial_five_pity_are_saved_as_job_snapshot(self):
         raw = load_pool_config().to_dict()
         raw["up_share"] = 0.6
@@ -328,6 +347,44 @@ class DashboardAppTest(unittest.TestCase):
             ).fetchone()[0], 0)
         self.assertTrue(all(not isinstance(value, HistoryRepository)
                             for value in app.session_state.filtered_state.values()))
+
+    def test_history_comparison_shows_each_saved_configuration_and_five_star_progress(self):
+        repository = self.repository()
+        ids = []
+        for threshold, reward, initial, share, probability in (
+            (8, 3, 2, 0.6, 0.04), (12, 7, 4, 0.7, 0.06),
+        ):
+            raw = load_pool_config().to_dict()
+            raw["up_share"] = share
+            raw["five_star"].update(hard_pity=threshold, base_probability=probability)
+            raw["rewards"][0]["four_star"] = reward
+            rule = Rule1(PoolConfig.from_dict(raw))
+            payload = result_payload(
+                simulate(rule, 1, seed=42, initial_five_star_pity=initial), rule, 0.25,
+            )
+            ids.append(repository.save_run(payload, trace_enabled=False))
+        app = self.load()
+        self.widget(app.number_input, "五星硬保底").set_value(20)
+        self.widget(app.number_input, FIVE_STAR_PITY_LABEL).set_value(9)
+        self.widget(app.number_input, "UP占比").set_value(0.9)
+        self.widget(app.multiselect, "选择历史运行").set_value(ids).run()
+
+        self.assertEqual(len(app.exception), 0)
+        summaries = [item for item in app.expander if item.label == "配置摘要"]
+        self.assertEqual(len(summaries), 2)
+        first, second = [item.text[0].value for item in summaries]
+        for summary, share, threshold, probability, reward, initial in (
+            (first, "60.0000%", "8", "4.0000%", "3", "2"),
+            (second, "70.0000%", "12", "6.0000%", "7", "4"),
+        ):
+            self.assertIn(f"UP占比：{share}", summary)
+            self.assertIn(f"五星保底：开启（硬保底 {threshold} 抽，基础概率 {probability}）", summary)
+            self.assertIn(f"奖励A：四星 {reward}，五星 5，六星 25", summary)
+            self.assertIn(f"初始五星进度：{initial}", summary)
+            self.assertNotIn("硬保底 20 抽", summary)
+            self.assertNotIn("90.0000%", summary)
+            self.assertNotIn("初始五星进度：9", summary)
+        self.assertEqual(sum("rule1 · 2.0" in item.value for item in app.caption), 2)
 
     def test_history_reuse_restores_full_configuration_and_initial_five_star_pity(self):
         raw = load_pool_config().to_dict()
