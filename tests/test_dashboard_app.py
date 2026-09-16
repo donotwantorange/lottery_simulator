@@ -178,6 +178,14 @@ class DashboardAppTest(unittest.TestCase):
         self.assertEqual(list(reward_editor.value.columns),
                          ["奖励名称", "四星", "五星", "六星"])
         self.assertEqual(len(reward_editor.value), 0)
+        self.assertEqual([str(dtype) for dtype in reward_editor.value.dtypes],
+                         ["string", "float64", "float64", "float64"])
+        column_config = json.loads(reward_editor.proto.columns)
+        self.assertEqual(column_config["奖励名称"]["type_config"]["type"], "text")
+        for column in ("四星", "五星", "六星"):
+            with self.subTest(column=column):
+                self.assertEqual(column_config[column]["type_config"]["type"], "number")
+                self.assertEqual(column_config[column]["type_config"]["min_value"], 0)
 
     def test_disabling_five_star_pity_disables_and_zeroes_initial_progress(self):
         app = self.load()

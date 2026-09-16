@@ -2,6 +2,8 @@
 
 import json
 
+import pandas as pd
+
 from lottery_simulator.rules.pool_config import PoolConfig, load_pool_config
 
 
@@ -131,13 +133,25 @@ def render_pool_config_editor(st) -> PoolConfig:
             st.session_state["pool_character_rows"], num_rows="dynamic",
             key="pool_character_editor",
         )
+        reward_editor_data = st.session_state["pool_reward_rows"] or pd.DataFrame({
+            "奖励名称": pd.Series(dtype="string"),
+            "四星": pd.Series(dtype="float64"),
+            "五星": pd.Series(dtype="float64"),
+            "六星": pd.Series(dtype="float64"),
+        })
         reward_rows = st.data_editor(
-            st.session_state["pool_reward_rows"] or {
-                column: [] for column in _REWARD_COLUMNS
-            }, num_rows="dynamic",
+            reward_editor_data, num_rows="dynamic",
             key="pool_reward_editor",
+            column_config={
+                "奖励名称": st.column_config.TextColumn(),
+                "四星": st.column_config.NumberColumn(min_value=0),
+                "五星": st.column_config.NumberColumn(min_value=0),
+                "六星": st.column_config.NumberColumn(min_value=0),
+            },
         )
-        if isinstance(reward_rows, dict):
+        if isinstance(reward_rows, pd.DataFrame):
+            reward_rows = reward_rows.to_dict("records")
+        elif isinstance(reward_rows, dict):
             reward_rows = [
                 dict(zip(_REWARD_COLUMNS, values))
                 for values in zip(*(reward_rows[column] for column in _REWARD_COLUMNS))
