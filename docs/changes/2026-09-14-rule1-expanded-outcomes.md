@@ -1,7 +1,7 @@
 # 规则 1 扩展结果：实现与本地验收记录
 
 日期：2026-09-16
-状态：✅ 本地自动化、部署路径和三项 CLI 验收完成；⚠️ 服务器现场部署验收未执行。
+状态：✅ 终审 I1–I4/M1 已修复，本地完整自动化 236 项及三项 CLI 验收通过；⚠️ R1 真实浏览器连续编辑仍待证，服务器现场部署验收未执行。
 设计： [规则 1 多星级、角色池、五星保底与附赠奖励设计](2026-09-14-rule1-expanded-outcomes-design.md)
 
 ## 范围与数据库路径
@@ -71,15 +71,49 @@
 
 这些命令用于检查规则 `2.0`、默认 9 角色/2 奖励配置、每轮 30 主抽加 10 赠送、星级/角色/奖励守恒和 Trace 的赠送状态隔离。它们不能替代概率正确性的穷举测试，也不验证网页、部署或真实服务器。
 
+## 整分支终审后的唯一修复波（2026-09-16）
+
+✅ 修复提交：`edcaf68 fix: address rule1 final review findings`，共 4 个生产文件、5 个测试文件；无新增依赖。依据为 `.superpowers/sdd/2026-09-14-rule1-expanded-outcomes-plan/final-review.md`，完整过程见同目录 `final-fix-report.md`（本地审计报告，沿用 `.superpowers/` 的 Git 忽略规则）。
+
+| Finding | 根因与修复 | RED → GREEN | 最小突变 → 恢复 |
+| --- | --- | --- | --- |
+| I1 | 有限权重直接求和得到 `inf`；共享概率函数按最大 UP 权重缩放后归一化。 | ✅ 两个 `1e308` 的 UP 各应为 `0.25`，旧值为 0 而 FAIL；修复后 UP 总份额 `0.5`、全角色 `1.0`、一抽角色期望合计 `0.008`。 | ✅ 缩放因子改为 `1.0` 后同一测试再次 FAIL；恢复后通过。 |
+| I2 | 主池阈值 1 使基础五星率不可达，但赠送池阈值 10 使其可达；规则构造时预先验证已启用的第 30 抽临时池。 | ✅ `1.0/开启/阈值1` 原 admission 不拒绝，实际网页创建任务后失败；修复后 29/30/31 抽均在创建前拒绝，job/历史均为空，关闭子规则仍接受该主池。 | ✅ 去掉临时池预校验，规则与 admission 检查共 4 个失败；恢复后 2 项测试通过。 |
+| I3 | 历史页未展示保存配置；每份历史版本下增加配置摘要，复用既有 CLI formatter 并加入初始五星进度。 | ✅ 相同版本、阈值 8/12、四星奖励 3/7、初始进度 2/4 的快照原有 0 个摘要而 FAIL；修复后两份各自显示，侧栏阈值 20/进度 9/UP 90% 不污染摘要。 | ✅ 去掉保存配置的 formatter 调用，摘要缺 UP/概率/奖励而 FAIL；恢复后通过。 |
+| I4 | `float(10**400)` 的 `OverflowError` 绕过字段校验；共享转换捕获后抛现有字段级 `ValueError`。 | ✅ PoolConfig 及真实 CLI 先因异常类型/退出码 1 而 FAIL；修复后字段错误明确，CLI 退出码 2、中文配置错误、无 traceback 或输入内容泄漏。 | ✅ 改回直接重抛 OverflowError 后两项 FAIL；恢复后两项通过。 |
+| M1/D8 | 联合五/六星概率错误原为英文，CLI 丢失具体原因；共享规则给出主池/赠送池中文约束，CLI 保留安全规则错误。 | ✅ 网页与真实 CLI 的主池/赠送池 4 个子用例先 FAIL，修复后均显示具体中文配置错误，不误归抽数/轮数。 | ✅ 改回英文后 4 个子用例 FAIL；恢复后两项测试通过。 |
+
+✅ 新鲜验证输出：
+
+```text
+python -m unittest -v tests.test_pool_config tests.test_rule_1 tests.test_bonus_rule tests.test_analysis tests.test_cli tests.test_jobs tests.test_dashboard_app tests.test_simulation_view
+Ran 139 tests in 9.746s
+OK
+
+python -m unittest discover -v
+Ran 236 tests in 83.091s
+OK
+```
+
+实际使用解释器为 `/home/qykj/202607/test/lottery_simulator/.venv/bin/python`。输出仍包含既有 AppTest bare-mode 提示及有意触发的 CLI 参数错误；没有测试失败或错误。`git diff --check` 通过。
+
+✅ 三项既定 CLI 命令再次执行且均 exit 0：分析版本为 `2.0`、9 角色/2 奖励/80 概率行；1000 轮各来源抽数为 `30/10/40`、六星与角色均值分别同为 `0.249/0.08/0.329`，奖励按默认字面量独立重算相符；40 条文字 Trace 为 30 主抽加 10 赠送，赠送期间主池累计数恒 30、状态恒 `(10,0)`，赠送来源初始状态 `(0,0)`。这些数据验证默认配置输出与守恒，不能替代全配置证明或浏览器/服务器验证。
+
+R1 的实际调查步骤与边界：
+
+1. ✅ 完整读取 `browser:control-in-app-browser` 技能，以临时 `/tmp` 数据目录、`APP_ENVIRONMENT=development`、`APP_AUTH_MODE=disabled`，在 `127.0.0.1:18516` 启动本地 Streamlit；沙箱初次绑定端口受限，授权升级后的本地启动成功，`/_stcore/health` 返回 `ok`。
+2. ✅ 两次检查可调用工具目录，均没有技能要求的 `mcp__node_repl__js`，也没有可用 `tool_search` 入口；因此没有连接真实浏览器、编辑单元格或下载编辑结果。服务器启动/健康检查不能证明应用会话或编辑器状态正确。
+3. ⚠️ 连续编辑丢失尚未确认，也未排除。按终审裁定保留风险，未修改 `dashboard/views/configuration.py`，未注入私有 delta/session-state 协议，未用 AppTest 代替浏览器。测试服务器已通过本次会话正常停止（exit 0）。
+
 ## 已知盲区与未执行现场验收
 
 - ⚠️ 未执行 Docker build、`docker compose config` 官方解析/运行、Caddy、systemd 安装、卷权限、备份定时器、真实卷停机恢复、DNS、自动证书、真实 HTTPS/HSTS 或 OIDC。文档中的服务器命令是未来现场步骤，不是本次成功记录。
 - ⚠️ 本地 SQLite 备份测试证明隔离临时库的 backup/restore 行为；不证明容器卷路径上的恢复流程。
-- ⚠️ AppTest 不提供 data editor 动态增删行的公开浏览器 API；转换和提交流程已自动化，真实浏览器新增/删除行仍待人工验收。
+- ⚠️ AppTest 与纯转换测试不能确认或排除 R1；真实浏览器连续编辑/增删行仍待验证，工具与启动证据见上节。
 - ⚠️ Task 2 仍有公共 `advance_rarity()` 对无效 rarity/不可能强制保底 miss 转换缺少硬化的 Minor；内部抽取路径不会产生这些输入。
-- ⚠️ Task 4 非 Trace 测试证明结果不保留记录，不能独立证明内部从未临时构造 `DrawRecord`。
-- ⚠️ Task 8 的界面联合五/六星概率校验错误详情仍是英文，阻断行为已验证。
-- ⚠️ Task 9 Trace 回归测试尚未显式命名 `probabilities` 和 `source` 字段；生产数据透传已覆盖，最终审查应评估是否补强。
+- ✅ Task 4 的终审补充实验以抛错构造器确认非 Trace 主/赠路径没有构造 `DrawRecord`，Trace 正面对照会触发；⚠️ 原持久化测试仍只检查空 records，本次按裁定不扩修，也不据此声称完全没有逐抽临时对象。
+- ✅ Task 8 联合概率英文详情已由本次 M1/D8 修复，网页和 CLI 的具体中文配置错误均通过回归。
+- ⚠️ Task 9 Trace 测试未显式命名 `probability`/`source` 的补强按终审裁定保留；✅ 终审已检查实际概率、来源字段透传。本次不扩修。
 
 ## 结论
 
