@@ -156,8 +156,8 @@ def render_pool_config_editor(st) -> PoolConfig:
                 dict(zip(_REWARD_COLUMNS, values))
                 for values in zip(*(reward_rows[column] for column in _REWARD_COLUMNS))
             ]
-        st.session_state["pool_character_rows"] = character_rows
-        st.session_state["pool_reward_rows"] = reward_rows
+        # Dynamic editor identity includes input data: keep its baseline stable.
+        # Only explicit import/default/history resets replace that baseline.
         try:
             config = editor_rows_to_config(
                 up_share=up_share,

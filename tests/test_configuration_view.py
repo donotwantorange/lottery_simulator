@@ -1,13 +1,52 @@
 import json
 import unittest
+from contextlib import nullcontext
+from copy import deepcopy
+from types import SimpleNamespace
 
 from dashboard.views.configuration import (
     config_to_editor_rows,
     editor_rows_to_config,
     pool_config_from_json,
     pool_config_to_json,
+    render_pool_config_editor,
+    set_pool_config_editor_state,
 )
 from lottery_simulator.rules.pool_config import PoolConfig, load_pool_config
+
+
+class EditorBoundary:
+    """Record public editor inputs; no Streamlit delta/state protocol emulation."""
+
+    def __init__(self):
+        self.session_state = {}
+        self.inputs = {}
+        self.edited_rows = {}
+        self.download = None
+        self.column_config = SimpleNamespace(
+            TextColumn=lambda: None, NumberColumn=lambda **kwargs: None,
+        )
+
+    def expander(self, label):
+        return nullcontext()
+
+    def file_uploader(self, *args, **kwargs):
+        return None
+
+    def button(self, label):
+        return False
+
+    def number_input(self, label, *, key, **kwargs):
+        return self.session_state[key]
+
+    toggle = number_input
+
+    def data_editor(self, data, *, key, **kwargs):
+        self.inputs[key] = deepcopy(data)
+        return deepcopy(self.edited_rows.get(key, data))
+
+    def download_button(self, label, *, data, **kwargs):
+        self.download = data
 
 
 class ConfigurationViewTest(unittest.TestCase):
@@ -77,6 +116,52 @@ class ConfigurationViewTest(unittest.TestCase):
         self.assertIsInstance(exported, bytes)
         self.assertIn("限定角色甲".encode("utf-8"), exported)
         self.assertEqual(pool_config_from_json(exported), rebuilt)
+
+    def test_consecutive_edits_keep_widget_inputs_stable_and_export_latest_values(self):
+        st = EditorBoundary()
+        set_pool_config_editor_state(st, self.original)
+        characters, rewards = deepcopy(self.characters), deepcopy(self.rewards)
+        for name, weight, four, five, six in (
+            ("UP-X", 2, 3, 2, 25),
+            ("UP-Y", 3, 3, 7, 25),
+            ("UP-Y", 3, 3, 7, 30),
+        ):
+            characters[0].update({"角色名称": name, "UP权重": weight})
+            rewards[0].update({"四星": four, "六星": six})
+            rewards[1]["五星"] = five
+            st.edited_rows = {
+                "pool_character_editor": characters,
+                "pool_reward_editor": rewards,
+            }
+            config = render_pool_config_editor(st)
+            # Changing the next input invalidates dynamic widget identity.
+            self.assertEqual(st.inputs["pool_character_editor"][0]["角色名称"], "UP-A")
+            self.assertEqual(st.inputs["pool_character_editor"][0]["UP权重"], 1)
+            self.assertEqual(st.inputs["pool_reward_editor"][0]["四星"], 1)
+            self.assertEqual(st.inputs["pool_reward_editor"][1]["五星"], 2)
+            self.assertEqual(config.six_star_characters[0].name, name)
+            self.assertEqual(config.six_star_characters[0].up_weight, weight)
+            exported = json.loads(st.download)
+            self.assertEqual(exported["rewards"][0]["four_star"], four)
+            self.assertEqual(exported["rewards"][1]["five_star"], five)
+            self.assertEqual(exported["rewards"][0]["six_star"], six)
+
+    def test_explicit_configuration_reset_replaces_bases_and_clears_editor_state(self):
+        st = EditorBoundary()
+        set_pool_config_editor_state(st, self.original)
+        st.session_state["pool_character_editor"] = {"old": "edit"}
+        st.session_state["pool_reward_editor"] = {"old": "edit"}
+        raw = self.original.to_dict()
+        raw["six_star_characters"][0]["name"] = "导入角色"
+        raw["rewards"][0]["four_star"] = 9
+        set_pool_config_editor_state(st, PoolConfig.from_dict(raw))
+        self.assertNotIn("pool_character_editor", st.session_state)
+        self.assertNotIn("pool_reward_editor", st.session_state)
+        config = render_pool_config_editor(st)
+        self.assertEqual(st.inputs["pool_character_editor"][0]["角色名称"], "导入角色")
+        self.assertEqual(st.inputs["pool_reward_editor"][0]["四星"], 9)
+        self.assertEqual(config.six_star_characters[0].name, "导入角色")
+        self.assertEqual(json.loads(st.download)["rewards"][0]["four_star"], 9)
 
 
 if __name__ == "__main__":

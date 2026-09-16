@@ -1,0 +1,19 @@
+# 网页表格连续编辑丢失修复
+
+## 问题与根因
+
+用户在真实浏览器执行连续编辑时复现：一次修改不生效，再次修改才成功。角色和奖励编辑器每次把返回行回写为下次 `st.data_editor` 输入；Streamlit 动态编辑器身份包含输入数据，输入变化会重置控件。
+
+## 修改
+
+删除 `render_pool_config_editor()` 的两处输入回写。角色、奖励表输入仅由现有 `set_pool_config_editor_state()` 在初始化、导入、恢复默认和历史复用时替换。编辑返回行仍用于校验、导出配置和提交模拟。抽取引擎及历史结构不变，无新增依赖。
+
+## 验证证据与边界
+
+- ✅ 先新增连续三次编辑的公开渲染边界测试；旧实现第二轮输入为 `UP-X` 而非初始 `UP-A`，测试 FAIL。
+- ✅ 修复后配置测试 8/8 PASS，最新角色/奖励值可返回并导出；显式重置仍替换输入并清理编辑器状态。
+- ✅ 临时恢复两处回写，同一回归再次 FAIL；恢复修复后 8/8 PASS。突变未保留。
+- ⚠️ 测试记录项目传给编辑器的输入及消费返回值，不模拟 Streamlit 私有 delta，也不等同于真实浏览器修改后的验收。本环境缺少可调用浏览器工具，需用户刷新页面后连续修改不同单元格并核对导出/模拟快照。
+- ✅ 完整回归：`PYTHONDONTWRITEBYTECODE=1 /home/qykj/202607/test/lottery_simulator/.venv/bin/python -m unittest discover -q`，238 项、90.622 秒，exit 0，0 failures、0 errors。仅有既有负向 CLI 提示和 Streamlit 裸模式警告。
+- ✅ 独立审查 Approved，无 Critical/Important/Minor；确认模拟消费最新返回配置，导入/默认/历史复用仍通过显式重置入口。
+- ✅ `git diff --check` 无空白错误。未合并、未推送、未部署服务器。
