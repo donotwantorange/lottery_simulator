@@ -59,6 +59,18 @@ class ResultRenderingRegressionTest(unittest.TestCase):
         self.assertAlmostEqual(payload["mean_count_error"], -0.096)
         self.assertEqual(payload["mean_count_relative_error"], -1.0)
 
+    def test_real_renderer_exposes_six_result_regions_and_source_switch(self):
+        app = AppTest.from_function(render_fixture).run()
+
+        self.assertEqual(len(app.exception), 0)
+        self.assertEqual(
+            [tab.label for tab in app.tabs],
+            ["总览", "六星构成", "具体角色", "附赠奖励", "保底统计", "Trace"],
+        )
+        source = next(item for item in app.radio if item.label == "数据来源")
+        self.assertEqual(source.options, ["主池", "赠送", "总计"])
+        self.assertEqual(source.value, "总计")
+
 
 class DashboardAppTest(unittest.TestCase):
     def setUp(self):

@@ -16,7 +16,7 @@ class _Context:
 
 
 class RecordingStreamlit:
-    def __init__(self):
+    def __init__(self, source="总计", reward_name="奖励A"):
         self.events = []
         self.metrics = []
         self.charts = []
@@ -24,6 +24,8 @@ class RecordingStreamlit:
         self.labels = []
         self.downloads = []
         self.writes = []
+        self.source = source
+        self.reward_name = reward_name
 
     def columns(self, count):
         return [self] * count
@@ -58,6 +60,16 @@ class RecordingStreamlit:
         self.events.append(("tabs", tuple(labels)))
         return [_Context() for _ in labels]
 
+    def radio(self, label, options, **kwargs):
+        self.labels.append(label)
+        self.events.append(("radio", (label, tuple(options), kwargs)))
+        return self.source
+
+    def selectbox(self, label, options, **kwargs):
+        self.labels.append(label)
+        self.events.append(("selectbox", (label, tuple(options), kwargs)))
+        return self.reward_name
+
     def write(self, value):
         self.writes.append(value)
 
@@ -78,44 +90,24 @@ class SimulationResultViewTest(unittest.TestCase):
         )
         self.payload["备注"] = "六星"
 
-    def test_renderer_shows_all_labels_charts_numeric_tables_trace_and_utf8_download(self):
+    @staticmethod
+    def table_with_column(st, column):
+        return next(table for table in st.dataframes if table and column in table[0])
+
+    def test_renderer_shows_six_regions_dynamic_rows_trace_and_utf8_download(self):
         st = RecordingStreamlit()
 
         render_result(st, self.payload, trace_enabled=True)
 
         self.assertEqual(
-            st.labels,
-            [
-                "主池抽数",
-                "赠送抽数",
-                "总抽数",
-                "主池模拟六星均值",
-                "赠送模拟六星均值",
-                "总模拟六星均值",
-                "主池理论期望",
-                "赠送理论期望",
-                "总理论期望",
-                "绝对误差",
-                "相对误差",
-                "初始主池累计抽数",
-                "结束主池累计抽数",
-                "随机种子",
-                "运行耗时（秒）",
-                "主池六星概率",
-                "查看主池六星概率数值",
-                "六星数量分布",
-                "查看六星数量分布数值",
-                "模拟值与理论期望",
-                "查看来源对比数值",
-                "汇总",
-                "主池与赠送拆分",
-                "逐抽记录",
-                "下载结果 JSON",
-            ],
+            next(value for event, value in st.events if event == "tabs"),
+            ("总览", "六星构成", "具体角色", "附赠奖励", "保底统计", "Trace"),
         )
-        self.assertEqual([kind for kind, _, _ in st.charts], ["line", "bar", "bar"])
-        self.assertEqual(len(st.dataframes), 4)
-        probability_table, count_table, source_table, trace_table = st.dataframes
+        source_event = next(value for event, value in st.events if event == "radio")
+        self.assertEqual(source_event[0], "数据来源")
+        self.assertEqual(source_event[1], ("主池", "赠送", "总计"))
+
+        probability_table = self.table_with_column(st, "抽次")
         self.assertEqual(len(probability_table), 80)
         self.assertEqual(
             (probability_table[64]["抽次"], probability_table[64]["条件六星概率"]),
@@ -125,31 +117,42 @@ class SimulationResultViewTest(unittest.TestCase):
             (probability_table[65]["抽次"], probability_table[65]["条件六星概率"]),
             (66, 0.058),
         )
+
+        rarity_table = self.table_with_column(st, "星级")
+        self.assertEqual([row["星级"] for row in rarity_table], ["四星", "五星", "六星"])
+        self.assertEqual([row["模拟均值"] for row in rarity_table], [9.0, 3.0, 0.0])
+
+        category_table = self.table_with_column(st, "类型")
         self.assertEqual(
-            count_table, [{"六星数量": 0, "实验次数": 1, "占比": 1.0}]
+            [row["类型"] for row in category_table],
+            ["UP限定", "其他限定", "常驻"],
         )
-        expected_sources = [
-            {"来源": "主池", "模拟均值": 0.0, "理论期望": 0.016},
-            {"来源": "赠送", "模拟均值": 0.0, "理论期望": 0.08},
-            {"来源": "总计", "模拟均值": 0.0, "理论期望": 0.096},
-        ]
-        self.assertEqual(len(source_table), len(expected_sources))
-        for actual, expected in zip(source_table, expected_sources):
-            self.assertEqual(actual.keys(), expected.keys())
-            self.assertEqual(actual["来源"], expected["来源"])
-            self.assertEqual(actual["模拟均值"], expected["模拟均值"])
-            self.assertAlmostEqual(actual["理论期望"], expected["理论期望"], places=12)
+
+        character_table = self.table_with_column(st, "角色")
+        self.assertEqual(len(character_table), 9)
+        self.assertEqual(character_table[0]["角色"], "UP-A")
+        self.assertEqual(character_table[-1]["角色"], "常驻-I")
+
+        reward_table = self.table_with_column(st, "奖励")
+        self.assertEqual([row["奖励"] for row in reward_table], ["奖励A", "奖励B"])
+        reward_distribution = self.table_with_column(st, "奖励总量")
+        self.assertEqual(reward_distribution, [
+            {"奖励总量": 24.0, "实验次数": 1, "占比": 1.0},
+        ])
+
+        pity_table = self.table_with_column(st, "保底类型")
+        self.assertEqual(
+            [row["保底类型"] for row in pity_table],
+            ["五星保底", "六星硬保底"],
+        )
+
+        trace_table = next(table for table in st.dataframes if table is self.payload["records"])
         self.assertEqual(trace_table, self.payload["records"])
-        event_start = 0
-        for chart, expander in (
-            ("line_chart", "查看主池六星概率数值"),
-            ("bar_chart", "查看六星数量分布数值"),
-            ("bar_chart", "查看来源对比数值"),
-        ):
-            chart_index = st.events.index((chart, None), event_start)
-            self.assertEqual(st.events[chart_index + 1], ("expander", expander))
-            self.assertEqual(st.events[chart_index + 2], ("dataframe", None))
-            event_start = chart_index + 3
+        self.assertTrue({
+            "rarity", "six_star_character", "rewards", "source_state_before",
+            "source_state_after", "five_star_pity_triggered",
+            "six_star_hard_pity_triggered",
+        }.issubset(trace_table[0]))
         label, download = st.downloads[0]
         self.assertEqual(label, "下载结果 JSON")
         self.assertEqual(download["file_name"], "simulation-result.json")
@@ -158,12 +161,28 @@ class SimulationResultViewTest(unittest.TestCase):
         self.assertIn("六星".encode("utf-8"), download["data"])
         self.assertEqual(json.loads(download["data"].decode("utf-8")), self.payload)
 
+    def test_renderer_switches_all_summary_tables_between_sources(self):
+        expected = {
+            "主池": [2.0, 0.0, 0.0],
+            "赠送": [7.0, 3.0, 0.0],
+            "总计": [9.0, 3.0, 0.0],
+        }
+        for label, rarity_means in expected.items():
+            with self.subTest(source=label):
+                st = RecordingStreamlit(source=label)
+
+                render_result(st, self.payload, trace_enabled=False)
+
+                rarity_table = self.table_with_column(st, "星级")
+                self.assertEqual(
+                    [row["模拟均值"] for row in rarity_table], rarity_means
+                )
+
     def test_renderer_never_passes_records_to_dataframe_without_trace(self):
         st = RecordingStreamlit()
 
         render_result(st, self.payload, trace_enabled=False)
 
-        self.assertEqual(len(st.dataframes), 3)
         self.assertNotIn(self.payload["records"], st.dataframes)
         self.assertIn("本次运行未保存逐抽记录", st.labels)
 

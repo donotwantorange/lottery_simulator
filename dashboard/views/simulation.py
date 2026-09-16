@@ -3,14 +3,33 @@
 import json
 
 from dashboard.charts import (
-    count_distribution_rows,
+    character_rows,
+    pity_rows,
     probability_rows,
-    source_comparison_rows,
+    rarity_comparison_rows,
+    reward_distribution_rows,
+    reward_rows,
+    six_star_category_rows,
 )
 from lottery_simulator.cli import RULES
 
 
 def render_result(st, payload: dict, trace_enabled: bool, *, saved_snapshot=False) -> None:
+    source_options = ("主池", "赠送", "总计")
+    source_kwargs = {"key": f'result-source-{payload["id"]}'} if saved_snapshot else {}
+    source_label = st.radio(
+        "数据来源", source_options, index=2, horizontal=True, **source_kwargs
+    )
+    source = {"主池": "main", "赠送": "bonus", "总计": "total"}[source_label]
+    (
+        overview_tab,
+        category_tab,
+        character_tab,
+        reward_tab,
+        pity_tab,
+        trace_tab,
+    ) = st.tabs(("总览", "六星构成", "具体角色", "附赠奖励", "保底统计", "Trace"))
+
     relative_error = payload["mean_count_relative_error"]
     metrics = (
         ("主池抽数", payload["main_draws"]),
@@ -29,45 +48,38 @@ def render_result(st, payload: dict, trace_enabled: bool, *, saved_snapshot=Fals
         ("随机种子", payload["seed"]),
         ("运行耗时（秒）", f'{payload["duration_seconds"]:.3f}'),
     )
-    for start in range(0, len(metrics), 3):
-        for column, (label, value) in zip(st.columns(3), metrics[start : start + 3]):
-            column.metric(label, value)
 
-    count_data = count_distribution_rows(payload)
-    source_data = source_comparison_rows(payload)
+    with overview_tab:
+        for start in range(0, len(metrics), 3):
+            for column, (label, value) in zip(
+                st.columns(3), metrics[start : start + 3]
+            ):
+                column.metric(label, value)
 
-    if saved_snapshot:
-        st.info("历史快照未保存概率曲线；仅展示保存时的指标与分布")
-    else:
-        rule = RULES[payload["rule_name"]]()
-        probability_data = probability_rows(rule)
-        st.subheader("主池六星概率")
-        st.line_chart(
-            probability_data,
-            x="抽次",
-            y=("条件六星概率", "首次六星累计概率"),
+        if saved_snapshot:
+            st.info("历史快照未保存概率曲线；仅展示保存时的指标与分布")
+        else:
+            rule = RULES[payload["rule_name"]]()
+            probability_data = probability_rows(rule)
+            st.line_chart(
+                probability_data,
+                x="抽次",
+                y=("条件六星概率", "首次六星累计概率"),
+                width="stretch",
+            )
+            with st.expander("查看主池六星概率数值"):
+                st.dataframe(probability_data, hide_index=True, width="stretch")
+
+        rarity_data = rarity_comparison_rows(payload, source)
+        st.bar_chart(
+            rarity_data,
+            x="星级",
+            y=("模拟均值", "理论期望"),
             width="stretch",
         )
-        with st.expander("查看主池六星概率数值"):
-            st.dataframe(probability_data, hide_index=True, width="stretch")
+        with st.expander("查看星级对比数值"):
+            st.dataframe(rarity_data, hide_index=True, width="stretch")
 
-    st.subheader("六星数量分布")
-    st.bar_chart(count_data, x="六星数量", y="实验次数", width="stretch")
-    with st.expander("查看六星数量分布数值"):
-        st.dataframe(count_data, hide_index=True, width="stretch")
-
-    st.subheader("模拟值与理论期望")
-    st.bar_chart(
-        source_data,
-        x="来源",
-        y=("模拟均值", "理论期望"),
-        width="stretch",
-    )
-    with st.expander("查看来源对比数值"):
-        st.dataframe(source_data, hide_index=True, width="stretch")
-
-    summary_tab, source_tab = st.tabs(("汇总", "主池与赠送拆分"))
-    with summary_tab:
         st.write(
             {
                 "规则": payload["rule_name"],
@@ -78,15 +90,81 @@ def render_result(st, payload: dict, trace_enabled: bool, *, saved_snapshot=Fals
                 "完整周期理论平均间隔": payload["theoretical_mean_interval"],
             }
         )
-    with source_tab:
-        st.write(source_data)
 
-    st.subheader("逐抽记录")
-    records = payload.get("records")
-    if trace_enabled and records:
-        st.dataframe(records, hide_index=True, width="stretch")
-    else:
-        st.info("本次运行未保存逐抽记录")
+    with category_tab:
+        category_data = six_star_category_rows(payload, source)
+        st.bar_chart(
+            category_data,
+            x="类型",
+            y=("模拟均值", "理论期望"),
+            width="stretch",
+        )
+        with st.expander("查看六星构成数值"):
+            st.dataframe(category_data, hide_index=True, width="stretch")
+
+    with character_tab:
+        character_data = character_rows(payload, source)
+        st.bar_chart(
+            character_data,
+            x="角色",
+            y=("模拟均值", "理论期望"),
+            width="stretch",
+        )
+        with st.expander("查看具体角色数值"):
+            st.dataframe(character_data, hide_index=True, width="stretch")
+
+    with reward_tab:
+        rewards = reward_rows(payload, source)
+        if rewards:
+            st.bar_chart(
+                rewards,
+                x="奖励",
+                y=("模拟均值", "理论期望"),
+                width="stretch",
+            )
+            with st.expander("查看附赠奖励数值"):
+                st.dataframe(rewards, hide_index=True, width="stretch")
+            reward_kwargs = (
+                {"key": f'result-reward-{payload["id"]}'} if saved_snapshot else {}
+            )
+            reward_name = st.selectbox(
+                "奖励分布",
+                tuple(row["奖励"] for row in rewards),
+                **reward_kwargs,
+            )
+            reward_distribution = reward_distribution_rows(
+                payload, source, reward_name
+            )
+            st.bar_chart(
+                reward_distribution,
+                x="奖励总量",
+                y="实验次数",
+                width="stretch",
+            )
+            with st.expander("查看奖励分布数值"):
+                st.dataframe(
+                    reward_distribution, hide_index=True, width="stretch"
+                )
+        else:
+            st.info("当前配置没有附赠奖励")
+
+    with pity_tab:
+        pity_data = pity_rows(payload, source)
+        st.bar_chart(
+            pity_data,
+            x="保底类型",
+            y=("模拟均值", "理论期望"),
+            width="stretch",
+        )
+        with st.expander("查看保底统计数值"):
+            st.dataframe(pity_data, hide_index=True, width="stretch")
+
+    with trace_tab:
+        records = payload.get("records")
+        if trace_enabled and records:
+            st.dataframe(records, hide_index=True, width="stretch")
+        else:
+            st.info("本次运行未保存逐抽记录")
 
     st.download_button(
         "下载结果 JSON",
