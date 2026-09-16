@@ -53,6 +53,28 @@ class DeploymentFilesTest(unittest.TestCase):
         self.assertTrue(path.is_file(), f"Missing deployment file: {name}")
         return path.read_text()
 
+    def compose_services(self):
+        return mapping(self.read("docker-compose.yml"))["services"]
+
+    def backup_command(self):
+        service = configparser.ConfigParser(interpolation=None)
+        service.read_string(self.read("deploy/lottery-backup.service"))
+        return shlex.split(service["Service"]["ExecStart"])
+
+    def test_compose_and_backup_use_v2_database_path(self):
+        compose = self.compose_services()
+        self.assertEqual(
+            compose["app"]["environment"]["LOTTERY_DB_PATH"],
+            "/app/data/lottery_v2.sqlite3",
+        )
+        command = self.backup_command()
+        self.assertEqual(command[:2], ["/bin/sh", "-c"])
+        self.assertEqual(
+            command[2],
+            "/usr/bin/docker compose exec -T app python3 scripts/backup_db.py "
+            "/app/data/lottery_v2.sqlite3 /app/backups/lottery-v2-$(date +%%F).sqlite3",
+        )
+
     def test_compose_public_boundary_and_persistent_paths(self):
         compose = mapping(self.read("docker-compose.yml"))
         app, caddy = (compose["services"][name] for name in ("app", "caddy"))
@@ -64,7 +86,7 @@ class DeploymentFilesTest(unittest.TestCase):
         self.assertEqual(environment["APP_ENVIRONMENT"], "production")
         self.assertEqual(environment["APP_AUTH_MODE"], "oidc")
         self.assertIn("${ALLOWED_EMAILS", environment["ALLOWED_EMAILS"])
-        self.assertEqual(environment["LOTTERY_DB_PATH"], "/app/data/lottery.sqlite3")
+        self.assertEqual(environment["LOTTERY_DB_PATH"], "/app/data/lottery_v2.sqlite3")
         config = AuthConfig(environment["APP_ENVIRONMENT"], environment["APP_AUTH_MODE"],
                             environment["STREAMLIT_SERVER_ADDRESS"], ("owner@example.invalid",))
         self.assertEqual(config.mode, "oidc")
@@ -110,7 +132,7 @@ class DeploymentFilesTest(unittest.TestCase):
         command = shlex.split(service["Service"]["ExecStart"])
         self.assertEqual(command[:2], ["/bin/sh", "-c"])
         self.assertEqual(command[2], "/usr/bin/docker compose exec -T app python3 scripts/backup_db.py "
-                         "/app/data/lottery.sqlite3 /app/backups/lottery-$(date +%%F).sqlite3")
+                         "/app/data/lottery_v2.sqlite3 /app/backups/lottery-v2-$(date +%%F).sqlite3")
         timer = configparser.ConfigParser(interpolation=None)
         timer.read_string(self.read("deploy/lottery-backup.timer"))
         self.assertEqual(timer["Timer"]["OnCalendar"], "daily")

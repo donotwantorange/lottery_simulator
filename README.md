@@ -1,10 +1,51 @@
 # 抽奖模拟器
 
-一个 Python 3.11+ 六星动态保底模拟器。命令行核心无第三方依赖；可选网页仪表盘使用 Streamlit，公网部署使用 Docker/Caddy。
+Python 3.11+ 的规则 1（版本 `2.0`）抽奖模拟器。命令行核心没有第三方依赖；网页仪表盘使用 Streamlit；公网部署接口使用 Docker/Caddy。
 
-## 网页仪表盘
+## 默认奖池与保底
 
-本地开发（仅监听本机，显式免登录）：
+默认配置是 [configs/rule1_default.json](configs/rule1_default.json)：六星池有 9 名角色，其中 `UP-A` 是 1 名 UP，`限定-B`、`限定-C` 为其他限定；UP 合计占六星结果 50%，其余 8 名角色各占 6.25%。默认五星基础概率为 8%，五星保底开启且第 10 抽保证至少五星；六星仍使用原有动态保底，第 80 抽必出六星。
+
+每次抽取只会落在四、五、六星之一：普通抽的五星概率保持配置值，四星吸收六星软保底带来的变化；到达五星保底位时先保留六星概率，剩余概率都归五星。五星重置五星保底但不重置六星保底，六星同时重置两者。
+
+六星角色支持多个 UP 及各自权重；所有非 UP 角色平分余下的六星份额。每抽同时按星级结算全部奖励：默认奖励A为四/五/六星 `1/5/25`，奖励B为 `0/2/10`。角色、奖励和保底参数由同一个 JSON 配置校验。
+
+## 命令行
+
+精确查看当前配置和 80 行主池六星概率表：
+
+```bash
+python3 -m lottery_simulator analyze --format json
+```
+
+用默认配置批量模拟：
+
+```bash
+python3 -m lottery_simulator simulate --draws 100 --trials 100000 \
+  --pool-config configs/rule1_default.json --seed 42
+```
+
+`--draws` 是每轮主池抽数。首次累计完成第 30 次主池抽取时，系统会以独立临时池赠送 10 抽；临时池沿用角色、UP、五星基础概率和奖励配置，但从独立双保底状态开始，固定六星概率 0.8%，五星保底强制为 10 抽。赠送不会推进或重置主池的任何保底，也不会递归触发赠送。
+
+常用参数：
+
+- `--pool-config PATH`：读取自定义 JSON；省略时加载默认配置。
+- `--initial-pity N`：开始前主池连续未出六星次数，同时是已完成主池抽数；它决定首次 30 抽赠送是否已领取。
+- `--initial-five-star-pity N`：开始前连续未出五星及以上次数；默认 0。五星保底关闭时只能为 0。
+- `--trace`：仅限 `--trials 1`，输出每一抽的结构化记录。
+- `--format text|json`：JSON 包含 `pool_config`、`source_summaries`、`theoretical_source_summaries`、`source_distributions` 与 `at_least_one_rates`；Trace 时另有 `records`。
+
+例如查看一次 30 主抽与赠送记录：
+
+```bash
+python3 -m lottery_simulator simulate --draws 30 --trials 1 --seed 42 --trace
+```
+
+结果按 `main`（主池）、`bonus`（赠送）和 `total`（总计）分别给出四/五/六星、UP/其他限定/常驻、具体角色、奖励、五星/六星硬保底以及分布。`--format json --trace` 的每条记录包含来源、主池累计抽数、星级、具体角色、UP/限定标记、奖励、概率和抽取前后的双保底状态；网页 Trace 直接展示该结构化记录。终端文字 Trace 保留原来源、序号、累计、保底位置、六星概率、是否六星和主池六星状态，并追加星级、角色、按星级奖励、4/5/6 星概率、主池抽后双保底、来源池抽前/后双保底及两个保底触发标记。批量非 Trace 模式不保存逐抽记录。
+
+## 网页仪表盘与配置 JSON
+
+本地开发（仅监听本机，并显式免登录）：
 
 ```bash
 python3 -m venv .venv
@@ -12,9 +53,15 @@ python3 -m venv .venv
 APP_ENVIRONMENT=development APP_AUTH_MODE=disabled STREAMLIT_SERVER_ADDRESS=127.0.0.1 .venv/bin/python -m streamlit run dashboard/app.py --server.headless=true --server.address=127.0.0.1
 ```
 
-打开 `http://127.0.0.1:8501`。支持后台进度/停止、指标与图表数值表、单轮 Trace、JSON 下载、历史筛选、双运行对比、参数复用和二次确认删除。开发历史默认保存到 `data/history.sqlite3`，任务状态位于 `data/jobs/`；可用 `LOTTERY_DATA_DIR` 改数据目录，`LOTTERY_DB_PATH` 单独覆盖数据库路径。
+打开 `http://127.0.0.1:8501`。侧栏的“高级设置”可设初始五星保底；“奖池与奖励设置”可修改 UP 占比、五星保底、角色表与奖励表，恢复默认配置，导入 UTF-8 JSON，或下载当前已校验的 JSON。后台任务和历史记录保存的是不可变配置快照，运行中继续编辑不会改变已启动任务；历史“复用参数”会恢复当次完整配置。
 
-Linux 公网部署须先按 [部署与运维手册](docs/deployment.md) 配好 DNS、`.env` 的 `DOMAIN`/`ALLOWED_EMAILS` 和私密 `.streamlit/secrets.toml`，再运行：
+结果页提供“总览、六星构成、具体角色、附赠奖励、保底统计、Trace”六个区域，并可在主池、赠送、总计之间切换；每个图表都有可展开的数值表和 JSON 结果下载。开发默认历史库是 `data/history_v2.sqlite3`，任务状态在 `data/jobs/`。可用 `LOTTERY_DATA_DIR` 更改数据目录，或用 `LOTTERY_DB_PATH` 单独覆盖数据库路径。
+
+旧 `data/history.sqlite3` 不读取、不迁移、不覆盖，也不自动删除；如需保留，请自行备份。显式把 `LOTTERY_DB_PATH` 指向旧 schema 时，程序会安全拒绝而不会改写旧库。
+
+## 公网部署
+
+Linux 公网部署先按 [部署与运维手册](docs/deployment.md) 配置 DNS、`.env` 中的 `DOMAIN`/`ALLOWED_EMAILS` 和私密 `.streamlit/secrets.toml`，再运行：
 
 ```bash
 docker compose config --quiet
@@ -23,66 +70,12 @@ docker compose ps
 docker compose logs --tail=100 app caddy
 ```
 
-Compose 固定 production/OIDC，仅 Caddy 发布 80/443，并声明 HSTS `max-age=31536000; includeSubDomains`；页面及 worker 使用 `LOTTERY_DB_PATH=/app/data/lottery.sqlite3`，与每日备份路径一致。数据、备份和证书保存在命名卷，secrets 只读挂载。手册包含定时备份安装、停机恢复、升级与命名 Git 提交回滚命令；不要执行 `docker compose down -v`。
+Compose 固定 production/OIDC；仅 Caddy 发布 80/443，并声明 HSTS。页面、worker 和每日备份统一使用 `LOTTERY_DB_PATH=/app/data/lottery_v2.sqlite3`。旧 `/app/data/lottery.sqlite3` 不迁移、不删除。数据、备份和证书在命名卷中，secrets 只读挂载；不要执行 `docker compose down -v`。
 
-✅ 本地功能及服务器部署接口已实现，部署静态合同已验证。⚠️ 按当前范围，真正服务器部署和测试暂缓；镜像、Compose 运行以及公网 HTTPS/HSTS/OIDC 均为服务器现场未验，不能用本地测试替代。详细证据和验收边界见 [变更记录](docs/changes/2026-09-10-web-dashboard.md)。
-
-## 精确分析
-
-`python3 -m lottery_simulator analyze`
-
-## 批量模拟
-
-`python3 -m lottery_simulator simulate --draws 100 --trials 100000 --seed 42`
-
-`--draws` 表示每轮的主池抽数。若本轮经过累计第 30 次主池抽取，程序会自动追加 10 次赠送抽，并将主池、赠送和总结果分开统计。
-
-## 单轮跟踪
-
-`python3 -m lottery_simulator simulate --draws 30 --trials 1 --initial-pity 60 --seed 123 --trace`
-
-## 参数
-
-- `--rule`：规则模块，默认 `rule1`。
-- `--draws`：每轮抽数，必填正整数。
-- `--trials`：实验轮数，默认 1。
-- `--seed`：整数随机种子；省略时程序生成并显示实际种子。
-- `--initial-pity`：开始前连续未出六星次数，规则 1 接受 0–79。它同时作为模拟开始时的累计主抽数：例如 `--draws 1 --initial-pity 29` 会在这次主抽后触发 10 次赠送；初始值大于或等于 30 时视为赠送已经领取，不再触发。
-- `--trace`：显示逐抽详情，仅可用于一轮实验。
-- `--format`：`text` 或 `json`。
-
-## 结果含义
-
-`analyze` 是主池保底规则由概率公式计算的精确理论结果。`simulate` 是伪随机实验；指定相同参数和种子可复现。长期综合六星率为平均完整保底周期的倒数；有限抽数内的主池理论六星数量由状态动态规划计算。
-
-## 当前规则 1（版本 1.2）
-
-- 主池第 1–65 抽的六星概率均为 0.8%；
-- 第 66–79 抽从 5.8% 开始，每抽增加 5 个百分点，即 `0.8% + 5% ×（当前抽数 - 65）`；
-- 第 79 抽为 70.8%；
-- 第 80 抽为 100%，必出六星；
-- 主池抽到六星后保底进度清零，下一抽重新按 0.8% 计算。
-
-按此规则，完整主池保底周期的六星平均间隔约为 `53.89927` 抽，长期综合六星率约为 `1.85531%`。首次 30 抽赠送机制仍由下面的独立子规则处理，不改变主池保底。
-
-## 首次 30 抽赠送子规则
-
-规则 1 组合了 `FirstThirtyBonusRule`：
-
-- 累计完成第 30 次主池抽取后，立即赠送 10 抽；
-- 每次赠送抽的六星概率固定为 0.8%；
-- 赠送抽不增加也不重置主池保底；
-- 主池提前抽到六星不会推迟第 30 次主池抽取后的赠送；
-- 每轮最多触发一次，赠送记录从 1 到 10 单独编号。
-
-例如 `--draws 30 --initial-pity 0` 会执行 30 次主池抽取和 10 次赠送抽，总抽数为 40；`--draws 1 --initial-pity 30` 视为赠送已经领取，只执行 1 次主池抽取。
-
-触发赠送时，赠送六星期望固定为 `10 × 0.8% = 0.08`。模拟输出分别给出主池、赠送及总抽数，以及对应的模拟六星均值和理论期望。
-
-模拟汇总同时显示初始和结束主池累计抽数；JSON 对应字段为 `initial_main_draws` 和 `final_main_draws`。使用 `--trace` 时，每条主池或赠送记录都包含 `main_draws_completed`：主池抽取后加一，赠送抽期间保持不变。
-
-批量模拟中的“期望误差”比较模拟平均六星数和相同有限抽数下的精确期望，可以用于检查抽样收敛，但单次小样本偏差不能证明实现错误。相同地，期望误差很小或与理论一致也不能证明实现正确。“已完成周期平均间隔”忽略模拟结束时尚未完成的周期，短模拟会有截尾偏差，不能单独用于验证规则。
+✅ 本地功能和部署静态合同已验证。⚠️ Docker/Caddy 实际运行、卷权限、自动证书、真实公网 HTTPS/HSTS 与 OIDC 仍是服务器现场未验，不能由本地测试替代。完整操作与边界见[部署与运维手册](docs/deployment.md)及[本次变更记录](docs/changes/2026-09-14-rule1-expanded-outcomes.md)。
 
 ## 测试
 
-`python3 -m unittest discover -v`
+```bash
+python3 -m unittest discover -v
+```

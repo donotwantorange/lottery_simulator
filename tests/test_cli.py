@@ -86,6 +86,33 @@ class CliTest(unittest.TestCase):
         self.assertIn("赠送  1", output)
         self.assertIn("赠送  10", output)
 
+    def test_trace_text_displays_structured_outcomes_and_isolates_bonus_state(self):
+        code, output = self.run_cli(
+            "simulate", "--draws", "30", "--trials", "1", "--seed", "42",
+            "--trace",
+        )
+
+        self.assertEqual(code, 0)
+        self.assertIn(
+            "星级  角色  奖励  4/5/6星概率  主池后双保底  来源池前双保底  "
+            "来源池后双保底  五星保底触发  六星硬保底触发",
+            output,
+        )
+        for line in (
+            "1  主池  1  1  1  0.8%  未出  1  4星  —  奖励A=1, 奖励B=0  "
+            "91.2%/8.0%/0.8%  主池后(1,1)  来源池前(0,0)  来源池后(1,1)  否  否",
+            "20  主池  20  20  20  0.8%  六星  0  6星  常驻-F  奖励A=25, 奖励B=10  "
+            "91.2%/8.0%/0.8%  主池后(0,0)  来源池前(19,6)  来源池后(0,0)  否  否",
+            "30  主池  30  30  10  0.8%  未出  10  5星  —  奖励A=5, 奖励B=2  "
+            "0.0%/99.2%/0.8%  主池后(10,0)  来源池前(9,9)  来源池后(10,0)  是  否",
+            "31  赠送  1  30  10  0.8%  未出  10  4星  —  奖励A=1, 奖励B=0  "
+            "91.2%/8.0%/0.8%  主池后(10,0)  来源池前(0,0)  来源池后(1,1)  否  否",
+            "40  赠送  10  30  10  0.8%  未出  10  5星  —  奖励A=5, 奖励B=2  "
+            "0.0%/99.2%/0.8%  主池后(10,0)  来源池前(9,9)  来源池后(10,0)  是  否",
+        ):
+            with self.subTest(line=line.split("  ", 1)[0]):
+                self.assertIn(line, output)
+
     def test_main_draw_counter_is_in_text_and_json_results(self):
         code, text_output = self.run_cli(
             "simulate", "--draws", "2", "--trials", "1", "--seed", "42",

@@ -232,18 +232,35 @@ def _write_text_simulation(payload, output: TextIO, trace: bool) -> None:
             print(f"  {pity_names.get(pity_name, pity_name)}：{count:.6f}", file=output)
     if trace:
         print(
-            "抽次  来源  来源序号  主池累计抽数  保底位置  六星概率  结果  抽后主池保底",
+            "抽次  来源  来源序号  主池累计抽数  保底位置  六星概率  结果  抽后主池保底  "
+            "星级  角色  奖励  4/5/6星概率  主池后双保底  来源池前双保底  "
+            "来源池后双保底  五星保底触发  六星硬保底触发",
             file=output,
         )
         for record in payload["records"]:
             result = "六星" if record["is_six_star"] else "未出"
             after = record["state_after"]["misses_since_six_star"]
             source = "主池" if record["source"] == "main" else "赠送"
+            probabilities = record["rarity_probabilities"]
+            rewards = ", ".join(
+                f"{name}={amount:g}" for name, amount in record["rewards"].items()
+            ) or "—"
+            state_text = lambda state: (
+                f"({state['misses_since_six_star']},{state['misses_since_five_or_higher']})"
+            )
             print(
                 f"{record['draw_index']}  {source}  {record['source_index']}  "
                 f"{record['main_draws_completed']}  "
                 f"{record['pity_position']}  "
-                f"{record['probability']:.1%}  {result}  {after}",
+                f"{record['probability']:.1%}  {result}  {after}"
+                f"  {record['rarity']}星  {record['six_star_character'] or '—'}  "
+                f"{rewards}  {probabilities['four_star']:.1%}/"
+                f"{probabilities['five_star']:.1%}/{probabilities['six_star']:.1%}  "
+                f"主池后{state_text(record['state_after'])}  "
+                f"来源池前{state_text(record['source_state_before'])}  "
+                f"来源池后{state_text(record['source_state_after'])}  "
+                f"{'是' if record['five_star_pity_triggered'] else '否'}  "
+                f"{'是' if record['six_star_hard_pity_triggered'] else '否'}",
                 file=output,
             )
 
