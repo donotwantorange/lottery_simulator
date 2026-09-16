@@ -17,3 +17,7 @@
 - ✅ 完整回归：`PYTHONDONTWRITEBYTECODE=1 /home/qykj/202607/test/lottery_simulator/.venv/bin/python -m unittest discover -q`，238 项、90.622 秒，exit 0，0 failures、0 errors。仅有既有负向 CLI 提示和 Streamlit 裸模式警告。
 - ✅ 独立审查 Approved，无 Critical/Important/Minor；确认模拟消费最新返回配置，导入/默认/历史复用仍通过显式重置入口。
 - ✅ `git diff --check` 无空白错误。未合并、未推送、未部署服务器。
+
+## 用户验收闭环
+
+✅ 用户在修复后确认连续编辑验证通过，R1 本地交互验收关闭。此项依据用户真实浏览器反馈，不冒称助手执行了浏览器操作。结合修复后的 238 项自动化回归及独立审查，本轮本地开发与验收完成；真实服务器部署仍不在本轮范围，分支未合并、未推送。
