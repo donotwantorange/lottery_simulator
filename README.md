@@ -2,6 +2,10 @@
 
 Python 3.11+ 的规则 1（版本 `2.0`）抽奖模拟器。命令行核心没有第三方依赖；网页仪表盘使用 Streamlit；公网部署接口使用 Docker/Caddy。
 
+## 本地使用入口
+
+本项目本地操作的唯一主目录是 `/home/qykj/202607/test/lottery_simulator`。请先进入该目录，再按[本地使用手册](docs/local-usage.md)创建或复用 `.venv`、启动网页、运行 CLI 和管理历史数据；已合并到 `master` 后不需要进入旧 worktree 路径。
+
 ## 默认奖池与保底
 
 默认配置是 [configs/rule1_default.json](configs/rule1_default.json)：六星池有 9 名角色，其中 `UP-A` 是 1 名 UP，`限定-B`、`限定-C` 为其他限定；UP 合计占六星结果 50%，其余 8 名角色各占 6.25%。默认五星基础概率为 8%，五星保底开启且第 10 抽保证至少五星；六星仍使用原有动态保底，第 80 抽必出六星。
@@ -15,13 +19,13 @@ Python 3.11+ 的规则 1（版本 `2.0`）抽奖模拟器。命令行核心没�
 精确查看当前配置和 80 行主池六星概率表：
 
 ```bash
-python3 -m lottery_simulator analyze --format json
+.venv/bin/python -m lottery_simulator analyze --format json
 ```
 
 用默认配置批量模拟：
 
 ```bash
-python3 -m lottery_simulator simulate --draws 100 --trials 100000 \
+.venv/bin/python -m lottery_simulator simulate --draws 100 --trials 100000 \
   --pool-config configs/rule1_default.json --seed 42
 ```
 
@@ -38,19 +42,19 @@ python3 -m lottery_simulator simulate --draws 100 --trials 100000 \
 例如查看一次 30 主抽与赠送记录：
 
 ```bash
-python3 -m lottery_simulator simulate --draws 30 --trials 1 --seed 42 --trace
+.venv/bin/python -m lottery_simulator simulate --draws 30 --trials 1 --seed 42 --trace
 ```
 
 结果按 `main`（主池）、`bonus`（赠送）和 `total`（总计）分别给出四/五/六星、UP/其他限定/常驻、具体角色、奖励、五星/六星硬保底以及分布。`--format json --trace` 的每条记录包含来源、主池累计抽数、星级、具体角色、UP/限定标记、奖励、概率和抽取前后的双保底状态；网页 Trace 直接展示该结构化记录。终端文字 Trace 保留原来源、序号、累计、保底位置、六星概率、是否六星和主池六星状态，并追加星级、角色、按星级奖励、4/5/6 星概率、主池抽后双保底、来源池抽前/后双保底及两个保底触发标记。批量非 Trace 模式不保存逐抽记录。
 
 ## 网页仪表盘与配置 JSON
 
-本地开发（仅监听本机，并显式免登录）：
+本地开发（仅监听本机，并显式免登录；以下假设已有可用 `.venv`，首次安装请先按[本地使用手册](docs/local-usage.md)创建）：
 
 ```bash
-python3 -m venv .venv
+cd /home/qykj/202607/test/lottery_simulator
 .venv/bin/python -m pip install -r requirements.txt
-APP_ENVIRONMENT=development APP_AUTH_MODE=disabled STREAMLIT_SERVER_ADDRESS=127.0.0.1 .venv/bin/python -m streamlit run dashboard/app.py --server.headless=true --server.address=127.0.0.1
+APP_ENVIRONMENT=development APP_AUTH_MODE=disabled STREAMLIT_SERVER_ADDRESS=127.0.0.1 .venv/bin/python -m streamlit run dashboard/app.py --server.address=127.0.0.1
 ```
 
 打开 `http://127.0.0.1:8501`。侧栏的“高级设置”可设初始五星保底；“奖池与奖励设置”可修改 UP 占比、五星保底、角色表与奖励表，恢复默认配置，导入 UTF-8 JSON，或下载当前已校验的 JSON。后台任务和历史记录保存的是不可变配置快照，运行中继续编辑不会改变已启动任务；历史“复用参数”会恢复当次完整配置。
