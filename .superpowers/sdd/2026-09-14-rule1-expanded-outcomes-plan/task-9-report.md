@@ -132,3 +132,73 @@ GREEN 命令：
 ## Concerns
 
 无阻塞问题。
+
+---
+
+## Fix round 1/5
+
+### 状态
+
+✅ 三项 Important 已修复并验证。
+
+### 变更
+
+- `character_rows()` 增加 `占比误差`，定义为“六星内实际占比 − 六星内理论占比”；零六星时与实际占比一同返回 `None`。
+- 角色模拟与理论测试字典改为与 `pool_config.six_star_characters` 相反的插入顺序，验证输出仍严格遵循配置顺序。
+- 三来源渲染测试分别为星级、六星类别、首名角色、奖励、奖励分布和保底设置互异的字面量哨兵，并逐区断言。
+
+### RED
+
+先只修改 `tests/test_charts.py` 与 `tests/test_simulation_view.py`，运行：
+
+```text
+/home/qykj/202607/test/lottery_simulator/.venv/bin/python -m unittest tests.test_charts tests.test_simulation_view -v
+```
+
+结果：`Ran 13 tests ... FAILED (errors=2)`；两个错误均为预期的 `KeyError: '占比误差'`：一个覆盖正值与符号，一个覆盖零六星边界。反序角色字典和六区三来源哨兵测试在现有正确路径上通过。
+
+### GREEN
+
+最小生产修改仅在角色行增加误差字段后运行同一命令：
+
+```text
+/home/qykj/202607/test/lottery_simulator/.venv/bin/python -m unittest tests.test_charts tests.test_simulation_view -v
+```
+
+结果：`Ran 13 tests in 0.009s — OK`。
+
+### 最终关联测试
+
+```text
+/home/qykj/202607/test/lottery_simulator/.venv/bin/python -m unittest tests.test_charts tests.test_simulation_view tests.test_dashboard_app -v
+```
+
+结果：`Ran 47 tests in 7.844s — OK`。只有允许的 Streamlit 裸模式 `missing ScriptRunContext` 提示，无测试失败或弃用参数警告。
+
+### 突变 / 恢复
+
+临时把 `占比误差` 从“实际 − 理论”反转为“理论 − 实际”，运行：
+
+```text
+/home/qykj/202607/test/lottery_simulator/.venv/bin/python -m unittest tests.test_charts.ChartDataTest.test_character_rows_compare_simulation_and_theory -v
+```
+
+结果：✅ 按预期失败；实际为 `-0.16666666666666663`，字面量期望为 `+0.16666666666666663`。
+
+恢复“实际 − 理论”后运行同一命令，结果：`Ran 1 test ... OK`。突变未提交。
+
+### 自审
+
+- ✅ 生产修改仅 5 行，没有改变模拟、理论、配置验证或 UI 布局。
+- ✅ 正值测试固定误差方向，零六星测试固定 `None` 语义。
+- ✅ 角色字典顺序与配置顺序相反，错误遍历统计字典会使角色顺序断言失败。
+- ✅ 每个来源在六个汇总输出中都有独立哨兵，任一区错误固定到 `total` 都会失败。
+- ✅ `git diff --check` 无空白错误；未添加依赖、未处理 Task 10、未推送。
+
+### Commit
+
+- `fix: complete result chart coverage`
+
+### Concerns
+
+无。

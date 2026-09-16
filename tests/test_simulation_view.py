@@ -162,12 +162,81 @@ class SimulationResultViewTest(unittest.TestCase):
         self.assertEqual(json.loads(download["data"].decode("utf-8")), self.payload)
 
     def test_renderer_switches_all_summary_tables_between_sources(self):
-        expected = {
-            "主池": [2.0, 0.0, 0.0],
-            "赠送": [7.0, 3.0, 0.0],
-            "总计": [9.0, 3.0, 0.0],
+        self.payload["source_summaries"]["main"]["mean_rarity_counts"] = {
+            "4": 10.1, "5": 10.2, "6": 10.3,
         }
-        for label, rarity_means in expected.items():
+        self.payload["source_summaries"]["bonus"]["mean_rarity_counts"] = {
+            "4": 20.1, "5": 20.2, "6": 20.3,
+        }
+        self.payload["source_summaries"]["total"]["mean_rarity_counts"] = {
+            "4": 30.1, "5": 30.2, "6": 30.3,
+        }
+        self.payload["source_summaries"]["main"]["mean_six_star_categories"] = {
+            "up": 11.1, "other_limited": 11.2, "standard": 11.3,
+        }
+        self.payload["source_summaries"]["bonus"]["mean_six_star_categories"] = {
+            "up": 21.1, "other_limited": 21.2, "standard": 21.3,
+        }
+        self.payload["source_summaries"]["total"]["mean_six_star_categories"] = {
+            "up": 31.1, "other_limited": 31.2, "standard": 31.3,
+        }
+        self.payload["source_summaries"]["main"]["mean_character_counts"]["UP-A"] = 12.1
+        self.payload["source_summaries"]["bonus"]["mean_character_counts"]["UP-A"] = 22.1
+        self.payload["source_summaries"]["total"]["mean_character_counts"]["UP-A"] = 32.1
+        self.payload["source_summaries"]["main"]["mean_rewards"] = {
+            "奖励A": 13.1, "奖励B": 13.2,
+        }
+        self.payload["source_summaries"]["bonus"]["mean_rewards"] = {
+            "奖励A": 23.1, "奖励B": 23.2,
+        }
+        self.payload["source_summaries"]["total"]["mean_rewards"] = {
+            "奖励A": 33.1, "奖励B": 33.2,
+        }
+        self.payload["source_distributions"]["main"]["reward_totals"]["奖励A"] = {
+            "14.1": 1,
+        }
+        self.payload["source_distributions"]["bonus"]["reward_totals"]["奖励A"] = {
+            "24.1": 1,
+        }
+        self.payload["source_distributions"]["total"]["reward_totals"]["奖励A"] = {
+            "34.1": 1,
+        }
+        self.payload["source_summaries"]["main"]["mean_pity_triggers"] = {
+            "five_star": 15.1, "six_star_hard": 15.2,
+        }
+        self.payload["source_summaries"]["bonus"]["mean_pity_triggers"] = {
+            "five_star": 25.1, "six_star_hard": 25.2,
+        }
+        self.payload["source_summaries"]["total"]["mean_pity_triggers"] = {
+            "five_star": 35.1, "six_star_hard": 35.2,
+        }
+        expected = {
+            "主池": {
+                "rarities": [10.1, 10.2, 10.3],
+                "categories": [11.1, 11.2, 11.3],
+                "character": 12.1,
+                "rewards": [13.1, 13.2],
+                "distribution": [{"奖励总量": 14.1, "实验次数": 1, "占比": 1.0}],
+                "pity": [15.1, 15.2],
+            },
+            "赠送": {
+                "rarities": [20.1, 20.2, 20.3],
+                "categories": [21.1, 21.2, 21.3],
+                "character": 22.1,
+                "rewards": [23.1, 23.2],
+                "distribution": [{"奖励总量": 24.1, "实验次数": 1, "占比": 1.0}],
+                "pity": [25.1, 25.2],
+            },
+            "总计": {
+                "rarities": [30.1, 30.2, 30.3],
+                "categories": [31.1, 31.2, 31.3],
+                "character": 32.1,
+                "rewards": [33.1, 33.2],
+                "distribution": [{"奖励总量": 34.1, "实验次数": 1, "占比": 1.0}],
+                "pity": [35.1, 35.2],
+            },
+        }
+        for label, source_values in expected.items():
             with self.subTest(source=label):
                 st = RecordingStreamlit(source=label)
 
@@ -175,7 +244,31 @@ class SimulationResultViewTest(unittest.TestCase):
 
                 rarity_table = self.table_with_column(st, "星级")
                 self.assertEqual(
-                    [row["模拟均值"] for row in rarity_table], rarity_means
+                    [row["模拟均值"] for row in rarity_table],
+                    source_values["rarities"],
+                )
+                category_table = self.table_with_column(st, "类型")
+                self.assertEqual(
+                    [row["模拟均值"] for row in category_table],
+                    source_values["categories"],
+                )
+                character_table = self.table_with_column(st, "角色")
+                self.assertEqual(
+                    character_table[0]["模拟均值"], source_values["character"]
+                )
+                reward_table = self.table_with_column(st, "奖励")
+                self.assertEqual(
+                    [row["模拟均值"] for row in reward_table],
+                    source_values["rewards"],
+                )
+                reward_distribution = self.table_with_column(st, "奖励总量")
+                self.assertEqual(
+                    reward_distribution, source_values["distribution"]
+                )
+                pity_table = self.table_with_column(st, "保底类型")
+                self.assertEqual(
+                    [row["模拟均值"] for row in pity_table],
+                    source_values["pity"],
                 )
 
     def test_renderer_never_passes_records_to_dataframe_without_trace(self):

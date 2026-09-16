@@ -28,18 +28,26 @@ class ChartDataTest(unittest.TestCase):
             {"name": "常驻-I", "is_up": False, "is_limited": False, "up_weight": None},
         ]
         simulated_characters = {
-            name: value
-            for name, value in zip(
-                [character["name"] for character in characters],
-                (2.0, 0.3, 0.2, 0.1, 0.1, 0.1, 0.1, 0.05, 0.05),
-            )
+            "常驻-I": 0.05,
+            "常驻-H": 0.05,
+            "常驻-G": 0.1,
+            "常驻-F": 0.1,
+            "常驻-E": 0.1,
+            "常驻-D": 0.1,
+            "限定-C": 0.2,
+            "限定-B": 0.3,
+            "UP-A": 2.0,
         }
         theoretical_characters = {
-            name: value
-            for name, value in zip(
-                [character["name"] for character in characters],
-                (1.5, 0.1875, 0.1875, 0.1875, 0.1875, 0.1875, 0.1875, 0.1875, 0.1875),
-            )
+            "常驻-I": 0.1875,
+            "常驻-H": 0.1875,
+            "常驻-G": 0.1875,
+            "常驻-F": 0.1875,
+            "常驻-E": 0.1875,
+            "常驻-D": 0.1875,
+            "限定-C": 0.1875,
+            "限定-B": 0.1875,
+            "UP-A": 1.5,
         }
         self.payload = {
             "trials": 10,
@@ -119,6 +127,7 @@ class ChartDataTest(unittest.TestCase):
         self.assertEqual(rows[0]["类型"], "UP限定")
         self.assertAlmostEqual(rows[0]["六星内理论占比"], 0.5)
         self.assertAlmostEqual(rows[0]["六星内实际占比"], 2.0 / 3.0)
+        self.assertAlmostEqual(rows[0]["占比误差"], 0.16666666666666663)
         self.assertAlmostEqual(
             sum(row["理论期望"] for row in rows),
             self.payload["theoretical_source_summaries"]["total"]
@@ -131,6 +140,7 @@ class ChartDataTest(unittest.TestCase):
         rows = character_rows(self.payload, "total")
 
         self.assertTrue(all(row["六星内实际占比"] is None for row in rows))
+        self.assertTrue(all(row["占比误差"] is None for row in rows))
 
     def test_reward_rows_follow_pool_configuration_order(self):
         self.assertEqual(

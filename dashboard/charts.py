@@ -56,6 +56,11 @@ def character_rows(payload: dict, source: str) -> list[dict]:
                 simulated[character.name] / six_mean if six_mean else None
             ),
             "六星内理论占比": probabilities[character.name],
+            "占比误差": (
+                simulated[character.name] / six_mean - probabilities[character.name]
+                if six_mean
+                else None
+            ),
         }
         for character in config.six_star_characters
     ]
