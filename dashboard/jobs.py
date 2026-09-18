@@ -13,6 +13,7 @@ from uuid import UUID, uuid4
 
 from dashboard.models import JobState, RunParameters, read_json, write_json
 from lottery_simulator.cli import RULES
+from lottery_simulator.formats import RESULT_FORMAT_VERSION, require_version
 from lottery_simulator.rules.pool_config import PoolConfig, load_pool_config
 
 
@@ -124,8 +125,11 @@ class JobManager:
         if job_dir is None:
             return None
         try:
-            return JobState(**read_json(job_dir / "state.json")).validate()
+            return JobState.from_dict(read_json(job_dir / "state.json"))
         except FileNotFoundError:
+            return None
+        except (OSError, TypeError, ValueError):
+            logging.getLogger(__name__).warning("Ignoring invalid job state %s", job_id)
             return None
 
     def get_result(self, job_id) -> dict | None:
@@ -137,8 +141,16 @@ class JobManager:
         if result_path.resolve().parent != job_dir:
             return None
         try:
-            return read_json(result_path)
+            result = read_json(result_path)
+            require_version(
+                result.get("result_format_version"), RESULT_FORMAT_VERSION, "结果格式"
+            )
+            require_version(result.get("sampling_version"), state.sampling_version, "抽样")
+            return result
         except FileNotFoundError:
+            return None
+        except (OSError, TypeError, ValueError):
+            logging.getLogger(__name__).warning("Ignoring invalid job result %s", job_id)
             return None
 
     def cancel(self, job_id) -> JobState | None:

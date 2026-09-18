@@ -61,18 +61,18 @@ class DeploymentFilesTest(unittest.TestCase):
         service.read_string(self.read("deploy/lottery-backup.service"))
         return shlex.split(service["Service"]["ExecStart"])
 
-    def test_compose_and_backup_use_v2_database_path(self):
+    def test_compose_and_backup_use_v3_database_path(self):
         compose = self.compose_services()
         self.assertEqual(
             compose["app"]["environment"]["LOTTERY_DB_PATH"],
-            "/app/data/lottery_v2.sqlite3",
+            "/app/data/lottery_v3.sqlite3",
         )
         command = self.backup_command()
         self.assertEqual(command[:2], ["/bin/sh", "-c"])
         self.assertEqual(
             command[2],
             "/usr/bin/docker compose exec -T app python3 scripts/backup_db.py "
-            "/app/data/lottery_v2.sqlite3 /app/backups/lottery-v2-$(date +%%F).sqlite3",
+            "/app/data/lottery_v3.sqlite3 /app/backups/lottery-v3-$(date +%%F).sqlite3",
         )
 
     def test_compose_public_boundary_and_persistent_paths(self):
@@ -86,7 +86,7 @@ class DeploymentFilesTest(unittest.TestCase):
         self.assertEqual(environment["APP_ENVIRONMENT"], "production")
         self.assertEqual(environment["APP_AUTH_MODE"], "oidc")
         self.assertIn("${ALLOWED_EMAILS", environment["ALLOWED_EMAILS"])
-        self.assertEqual(environment["LOTTERY_DB_PATH"], "/app/data/lottery_v2.sqlite3")
+        self.assertEqual(environment["LOTTERY_DB_PATH"], "/app/data/lottery_v3.sqlite3")
         config = AuthConfig(environment["APP_ENVIRONMENT"], environment["APP_AUTH_MODE"],
                             environment["STREAMLIT_SERVER_ADDRESS"], ("owner@example.invalid",))
         self.assertEqual(config.mode, "oidc")
@@ -109,7 +109,7 @@ class DeploymentFilesTest(unittest.TestCase):
             instructions.setdefault(command, []).append(value)
         self.assertEqual(instructions["USER"], ["app"])
         self.assertTrue(any("useradd" in line for line in instructions["RUN"]))
-        self.assertTrue(any("/app/data/jobs" in line and "chown" in line
+        self.assertTrue(any("/app/data/jobs_v3" in line and "chown" in line
                             for line in instructions["RUN"]))
         command = json.loads(instructions["CMD"][0])
         self.assertEqual(command[:5], ["python3", "-m", "streamlit", "run", "dashboard/app.py"])
@@ -132,7 +132,7 @@ class DeploymentFilesTest(unittest.TestCase):
         command = shlex.split(service["Service"]["ExecStart"])
         self.assertEqual(command[:2], ["/bin/sh", "-c"])
         self.assertEqual(command[2], "/usr/bin/docker compose exec -T app python3 scripts/backup_db.py "
-                         "/app/data/lottery_v2.sqlite3 /app/backups/lottery-v2-$(date +%%F).sqlite3")
+                         "/app/data/lottery_v3.sqlite3 /app/backups/lottery-v3-$(date +%%F).sqlite3")
         timer = configparser.ConfigParser(interpolation=None)
         timer.read_string(self.read("deploy/lottery-backup.timer"))
         self.assertEqual(timer["Timer"]["OnCalendar"], "daily")
@@ -165,7 +165,7 @@ class BackupDatabaseTest(unittest.TestCase):
         self.repository = HistoryRepository(self.source)
         self.repository.initialize()
         rule = Rule1()
-        self.payload = result_payload(simulate(rule, 12, seed=42), rule, 0.25)
+        self.payload = result_payload(simulate(rule, 12, seed=42, collect_records=True), rule, 0.25)
         self.run_id = self.repository.save_run(self.payload, trace_enabled=True)
 
     def backup(self, source=None, destination=None):

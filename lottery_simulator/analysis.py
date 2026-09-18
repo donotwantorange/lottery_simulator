@@ -45,6 +45,7 @@ def expected_pool_results(
         next_states: dict[DrawState, float] = {}
         for state, mass in states.items():
             if state not in transitions:
+                _probability(rule, state)
                 probabilities = rule.rarity_probabilities(state)
                 branches = (
                     (4, probabilities.four_star),
@@ -58,7 +59,7 @@ def expected_pool_results(
                     raise ValueError("rule returned invalid rarity probabilities")
                 transitions[state] = (
                     rule.five_star_pity_active(state),
-                    state.misses_since_six_star == rule.max_pity - 1,
+                    rule.six_star_hard_pity_active(state),
                     tuple(
                         (str(rarity), probability, rule.advance_rarity(state, rarity))
                         for rarity, probability in branches if probability > 0.0
@@ -79,7 +80,7 @@ def expected_pool_results(
 
     character_counts = {
         name: rarity_counts["6"] * share
-        for name, share in rule.config.six_star_character_probabilities().items()
+        for name, share in rule.config.character_probabilities(6).items()
     }
     categories = {"up": 0.0, "other_limited": 0.0, "standard": 0.0}
     for character in rule.config.six_star_characters:
@@ -144,16 +145,18 @@ def _state(initial_pity: int, rule: LotteryRule) -> DrawState:
 def waiting_time_distribution(
     rule: LotteryRule, initial_pity: int = 0
 ) -> tuple[float, ...]:
-    state = _state(initial_pity, rule)
+    """Rule1's dynamic cycle; its six-star probability ignores five-star progress."""
+    if rule.fixed_six_star_probability is not None:
+        raise ValueError("fixed-probability pools do not have a dynamic pity cycle")
+    _state(initial_pity, rule)
     survival = 1.0
     probabilities: list[float] = []
-    for _ in range(rule.max_pity - initial_pity):
-        probability = _probability(rule, state)
+    for offset in range(rule.max_pity - initial_pity):
+        probability = _probability(rule, DrawState(initial_pity + offset, 0))
         probabilities.append(survival * probability)
         survival *= 1.0 - probability
         if probability == 1.0:
             break
-        state = rule.advance(state, False)
     if abs(sum(probabilities) - 1.0) > 1e-12:
         raise ValueError("rule does not produce a complete waiting-time distribution")
     return tuple(probabilities)
@@ -190,28 +193,7 @@ def distribution_stats(
 def expected_six_stars(
     rule: LotteryRule, draws: int, initial_pity: int = 0
 ) -> float:
-    if isinstance(draws, bool) or not isinstance(draws, int) or draws <= 0:
-        raise ValueError("draws must be a positive integer")
-    initial = _state(initial_pity, rule)
-    states = {initial: 1.0}
-    expected = 0.0
-    for _ in range(draws):
-        next_states: dict[DrawState, float] = {}
-        for state, mass in states.items():
-            probability = _probability(rule, state)
-            success_mass = mass * probability
-            expected += success_mass
-            success_state = rule.advance(state, True)
-            next_states[success_state] = (
-                next_states.get(success_state, 0.0) + success_mass
-            )
-            if probability < 1.0:
-                miss_state = rule.advance(state, False)
-                next_states[miss_state] = (
-                    next_states.get(miss_state, 0.0) + mass * (1.0 - probability)
-                )
-        states = next_states
-    return expected
+    return expected_pool_results(rule, draws, DrawState(initial_pity, 0)).rarity_counts["6"]
 
 
 def expected_bonus_six_stars(

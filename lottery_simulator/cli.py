@@ -6,6 +6,7 @@ from typing import TextIO
 
 from lottery_simulator.analysis import distribution_stats
 from lottery_simulator.engine import SimulationResult, simulate
+from lottery_simulator.formats import RESULT_FORMAT_VERSION, sampling_metadata
 from lottery_simulator.rules.base import DrawState
 from lottery_simulator.rules.pool_config import load_pool_config
 from lottery_simulator.rules.rule_1 import Rule1
@@ -37,6 +38,8 @@ def build_parser() -> argparse.ArgumentParser:
 def _write_config_summary(pool_config: dict, output: TextIO) -> None:
     five_star = pool_config["five_star"]
     print("配置摘要：", file=output)
+    print(f"  四星角色人数：{len(pool_config['four_star_characters'])}", file=output)
+    print(f"  五星角色人数：{len(pool_config['five_star_characters'])}", file=output)
     print(f"  UP占比：{pool_config['up_share']:.4%}", file=output)
     pity_status = "开启" if five_star["pity_enabled"] else "关闭"
     print(
@@ -78,7 +81,8 @@ def _analysis_payload(rule):
         )
     return {
         "rule": rule.name,
-        "rule_version": getattr(rule, "version", None),
+        "rule_version": rule.version,
+        "result_format_version": RESULT_FORMAT_VERSION,
         "pool_config": rule.config.to_dict(),
         "hard_pity": rule.max_pity,
         "probability_table": table,
@@ -102,7 +106,9 @@ def _simulation_payload(result: SimulationResult, rule, include_records: bool):
         theoretical_source_summaries[source] = summary
     payload = {
         "rule": result.rule_name,
-        "rule_version": getattr(rule, "version", None),
+        "rule_version": rule.version,
+        "result_format_version": RESULT_FORMAT_VERSION,
+        **sampling_metadata(),
         "draws": result.draws,
         "main_draws": result.draws,
         "bonus_draws": result.bonus_draws,
@@ -232,18 +238,18 @@ def _write_text_simulation(payload, output: TextIO, trace: bool) -> None:
             print(f"  {pity_names.get(pity_name, pity_name)}：{count:.6f}", file=output)
     if trace:
         print(
-            "抽次  来源  来源序号  主池累计抽数  保底位置  六星概率  结果  抽后主池保底  "
-            "星级  角色  奖励  4/5/6星概率  主池后双保底  来源池前双保底  "
+            "抽次  来源  来源序号  主池累计抽数  "
+            "星级  角色  奖励  4/5/6星概率  主池前双保底  主池后双保底  来源池前双保底  "
             "来源池后双保底  五星保底触发  六星硬保底触发",
             file=output,
         )
         for record in payload["records"]:
-            result = "六星" if record["is_six_star"] else "未出"
-            after = record["state_after"]["misses_since_six_star"]
+            draw_result = record["draw_result"]
+            outcome = draw_result["outcome"]
             source = "主池" if record["source"] == "main" else "赠送"
-            probabilities = record["rarity_probabilities"]
+            probabilities = draw_result["probabilities"]
             rewards = ", ".join(
-                f"{name}={amount:g}" for name, amount in record["rewards"].items()
+                f"{name}={amount:g}" for name, amount in outcome["rewards"].items()
             ) or "—"
             state_text = lambda state: (
                 f"({state['misses_since_six_star']},{state['misses_since_five_or_higher']})"
@@ -251,16 +257,15 @@ def _write_text_simulation(payload, output: TextIO, trace: bool) -> None:
             print(
                 f"{record['draw_index']}  {source}  {record['source_index']}  "
                 f"{record['main_draws_completed']}  "
-                f"{record['pity_position']}  "
-                f"{record['probability']:.1%}  {result}  {after}"
-                f"  {record['rarity']}星  {record['six_star_character'] or '—'}  "
+                f"{outcome['rarity']}星  {outcome['character_name'] or '未配置角色名单'}  "
                 f"{rewards}  {probabilities['four_star']:.1%}/"
                 f"{probabilities['five_star']:.1%}/{probabilities['six_star']:.1%}  "
-                f"主池后{state_text(record['state_after'])}  "
-                f"来源池前{state_text(record['source_state_before'])}  "
-                f"来源池后{state_text(record['source_state_after'])}  "
-                f"{'是' if record['five_star_pity_triggered'] else '否'}  "
-                f"{'是' if record['six_star_hard_pity_triggered'] else '否'}",
+                f"主池前{state_text(record['main_state_before'])}  "
+                f"主池后{state_text(record['main_state_after'])}  "
+                f"来源池前{state_text(draw_result['state_before'])}  "
+                f"来源池后{state_text(draw_result['state_after'])}  "
+                f"{'是' if outcome['five_star_pity_triggered'] else '否'}  "
+                f"{'是' if outcome['six_star_hard_pity_triggered'] else '否'}",
                 file=output,
             )
 

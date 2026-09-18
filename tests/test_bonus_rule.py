@@ -1,8 +1,11 @@
+from dataclasses import replace
 import unittest
+from unittest.mock import patch
 
-from lottery_simulator.engine import draw_once
+from lottery_simulator.engine import draw_once, simulate
 from lottery_simulator.rules.base import BonusEvent, DrawState
 from lottery_simulator.rules.first_thirty_bonus import FirstThirtyBonusRule
+from lottery_simulator.rules.pool_config import WeightedCharacter, load_pool_config
 from lottery_simulator.rules.rule_1 import Rule1
 
 
@@ -67,6 +70,86 @@ class FirstThirtyBonusRuleTest(unittest.TestCase):
         self.assertEqual(temporary.config.five_star.hard_pity, 10)
         self.assertEqual(temporary.subrules, ())
 
+    def test_bonus_has_no_six_star_hard_pity(self):
+        rule = Rule1(fixed_six_star_probability=0.008, subrules=())
+        self.assertFalse(rule.six_star_hard_pity_active(DrawState(79, 0)))
+        self.assertTrue(Rule1().six_star_hard_pity_active(DrawState(79, 0)))
+
+    def test_fixed_pool_allows_six_star_misses_past_main_pool_limit(self):
+        rule = Rule1(fixed_six_star_probability=0.008, subrules=())
+        for misses in (79, 80, 1000):
+            with self.subTest(misses=misses):
+                state = DrawState(misses, 0)
+                self.assertEqual(rule.probability(state), 0.008)
+                self.assertFalse(rule.six_star_hard_pity_active(state))
+                self.assertEqual(rule.advance_rarity(state, 4), DrawState(misses + 1, 1))
+                self.assertEqual(rule.advance_rarity(state, 5), DrawState(misses + 1, 0))
+                self.assertEqual(rule.advance_rarity(state, 6), DrawState())
+                self.assertEqual(rule.character_probabilities(4, state), {})
+        for state in (DrawState(-1, 0), DrawState(80, 10)):
+            with self.assertRaises(ValueError):
+                rule.rarity_probabilities(state)
+        disabled_config = replace(
+            rule.config, five_star=replace(rule.config.five_star, pity_enabled=False),
+        )
+        disabled = Rule1(disabled_config, fixed_six_star_probability=0.008, subrules=())
+        self.assertEqual(disabled.advance_rarity(DrawState(80, 0), 4), DrawState(81, 0))
+        with self.assertRaises(ValueError):
+            disabled.rarity_probabilities(DrawState(80, 1))
+
+    def test_bonus_inherits_all_lists_rewards_and_up(self):
+        config = load_pool_config()
+        config = replace(
+            config, up_share=0.7,
+            five_star=replace(config.five_star, pity_enabled=False, hard_pity=3),
+            four_star_characters=(WeightedCharacter("四星A"),),
+            five_star_characters=(WeightedCharacter("五星A"),),
+        )
+        main = Rule1(config)
+        event = FirstThirtyBonusRule().events_after_main_draw(30)[0]
+        temporary = main.for_bonus(event)
+        for field in ("four_star_characters", "five_star_characters",
+                      "six_star_characters", "rewards"):
+            self.assertIs(getattr(temporary.config, field), getattr(config, field))
+        self.assertEqual(temporary.config.up_share, 0.7)
+        self.assertTrue(temporary.config.five_star.pity_enabled)
+        self.assertEqual(temporary.config.five_star.hard_pity, 10)
+        self.assertEqual(temporary.subrules, ())
+        temporary.advance_rarity(DrawState(80, 9), 5)
+        self.assertEqual(main.probability(DrawState(79, 0)), 1.0)
+        self.assertFalse(main.config.five_star.pity_enabled)
+        self.assertEqual(main.config.five_star.hard_pity, 3)
+
+    def test_real_bonus_draw_chain_keeps_main_state_and_inherits_names(self):
+        config = replace(load_pool_config(),
+                         four_star_characters=(WeightedCharacter("四星A"),),
+                         five_star_characters=(WeightedCharacter("五星A"),))
+        # A high roll produces main 4/5, bonus nine fours then pity five.
+        with patch("lottery_simulator.engine.random.Random", return_value=ConstantRandom(0.999)):
+            result = simulate(Rule1(config), 2, seed=42, initial_pity=29,
+                              initial_five_star_pity=8, collect_records=True)
+        first_main, *middle, last_main = result.records
+        self.assertTrue(hasattr(first_main, "draw_result"), "Trace must nest source draw state")
+        self.assertEqual(first_main.main_state_before, DrawState(29, 8))
+        self.assertEqual(first_main.main_state_after, DrawState(30, 9))
+        self.assertEqual(first_main.draw_result.state_before, first_main.main_state_before)
+        self.assertEqual(first_main.draw_result.state_after, first_main.main_state_after)
+        self.assertEqual(len(middle), 10)
+        for index, record in enumerate(middle):
+            self.assertEqual(record.source, "bonus")
+            self.assertEqual(record.main_draws_completed, 30)
+            self.assertEqual(record.main_state_before, DrawState(30, 9))
+            self.assertEqual(record.main_state_after, DrawState(30, 9))
+            self.assertEqual(record.draw_result.state_before, DrawState(index, index))
+            self.assertEqual(record.draw_result.state_after,
+                             DrawState(index + 1, index + 1 if index < 9 else 0))
+            self.assertEqual(record.draw_result.outcome.character_name,
+                             "四星A" if index < 9 else "五星A")
+        self.assertEqual(last_main.main_state_before, DrawState(30, 9))
+        self.assertEqual(last_main.main_state_after, DrawState(31, 0))
+        self.assertEqual(last_main.draw_result.outcome.rarity, 5)
+        self.assertEqual(last_main.main_draws_completed, 31)
+
     def test_temporary_pool_guarantees_at_least_five_star_in_ten_draws(self):
         temporary = Rule1().for_bonus(
             FirstThirtyBonusRule().events_after_main_draw(30)[0]
@@ -76,8 +159,9 @@ class FirstThirtyBonusRuleTest(unittest.TestCase):
         rng = ConstantRandom(0.999)
 
         for _ in range(10):
-            outcome, state, _ = draw_once(temporary, state, rng)
-            rarities.append(outcome.rarity)
+            result = draw_once(temporary, state, rng)
+            state = result.state_after
+            rarities.append(result.outcome.rarity)
 
         self.assertEqual(rarities, [4] * 9 + [5])
 

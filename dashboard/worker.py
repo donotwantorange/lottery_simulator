@@ -22,6 +22,18 @@ def run(job_dir: Path, database_path: Path):
         state = manager.get(job_dir.name)
         if state is None or state.status != "queued":
             return
+        try:
+            parameters = RunParameters.from_dict(read_json(job_dir / "parameters.json"))
+        except (OSError, TypeError, ValueError):
+            logging.getLogger(__name__).exception(
+                "Invalid parameters for job %s", state.job_id
+            )
+            result_path.unlink(missing_ok=True)
+            write_json(state_path, replace(
+                state, status="failed", error="模拟任务失败", result_path=None,
+                updated_at=timestamp(),
+            ).to_dict())
+            return
         state = replace(state, status="running", pid=os.getpid(), started_at=timestamp(),
                         updated_at=timestamp())
         write_json(state_path, state.to_dict())
@@ -39,7 +51,6 @@ def run(job_dir: Path, database_path: Path):
 
     status, error = "completed", None
     try:
-        parameters = RunParameters(**read_json(job_dir / "parameters.json"))
         if parameters.pool_config is None:
             raise ValueError("worker requires a serialized pool configuration")
         parameters = validate_parameters_for_active_rule(parameters)

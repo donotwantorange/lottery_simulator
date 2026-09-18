@@ -1,0 +1,38 @@
+import platform
+import unittest
+
+from lottery_simulator.formats import (
+    require_version,
+    sampling_metadata,
+)
+
+
+class FormatsTest(unittest.TestCase):
+    def test_require_version_accepts_matching_integer(self):
+        self.assertIsNone(require_version(1, 1, "任务"))
+
+    def test_integer_version_rejects_bool_and_nonmatching_values(self):
+        for value in (True, "1", None, 2):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                require_version(value, 1, "任务")
+
+    def test_sampling_metadata_describes_the_runtime(self):
+        metadata = sampling_metadata()
+
+        self.assertEqual(
+            set(metadata),
+            {
+                "sampling_version",
+                "rng_algorithm",
+                "python_implementation",
+                "python_version",
+            },
+        )
+        self.assertEqual(metadata["sampling_version"], 1)
+        self.assertEqual(metadata["rng_algorithm"], "python.random.Random")
+        self.assertEqual(metadata["python_implementation"], platform.python_implementation())
+        self.assertEqual(metadata["python_version"], platform.python_version())
+
+
+if __name__ == "__main__":
+    unittest.main()

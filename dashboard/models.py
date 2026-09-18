@@ -8,6 +8,13 @@ from pathlib import Path
 from typing import Any, ClassVar
 
 from lottery_simulator.analysis import distribution_stats
+from lottery_simulator.formats import (
+    JOB_FORMAT_VERSION,
+    RESULT_FORMAT_VERSION,
+    SAMPLING_VERSION,
+    require_version,
+    sampling_metadata,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -20,8 +27,23 @@ class RunParameters:
     trace: bool
     initial_five_star_pity: int = 0
     pool_config: dict[str, Any] | None = None
+    job_format_version: int = JOB_FORMAT_VERSION
+    sampling_version: int = SAMPLING_VERSION
+
+    @classmethod
+    def from_dict(cls, raw: dict[str, Any]) -> "RunParameters":
+        if not isinstance(raw, dict):
+            raise ValueError("任务参数必须是对象")
+        require_version(raw.get("job_format_version"), JOB_FORMAT_VERSION, "任务格式")
+        require_version(raw.get("sampling_version"), SAMPLING_VERSION, "抽样")
+        try:
+            return cls(**raw).validate()
+        except TypeError as error:
+            raise ValueError("任务参数格式无效") from error
 
     def validate(self) -> "RunParameters":
+        require_version(self.job_format_version, JOB_FORMAT_VERSION, "任务格式")
+        require_version(self.sampling_version, SAMPLING_VERSION, "抽样")
         if not isinstance(self.rule_name, str) or not self.rule_name:
             raise ValueError("rule_name must be a non-empty string")
         if isinstance(self.draws, bool) or not isinstance(self.draws, int) or self.draws <= 0:
@@ -70,12 +92,27 @@ class JobState:
     error: str | None = None
     result_path: str | None = None
     persistence_error: str | None = None
+    job_format_version: int = JOB_FORMAT_VERSION
+    sampling_version: int = SAMPLING_VERSION
 
     _STATUSES: ClassVar[frozenset[str]] = frozenset(
         ("queued", "running", "completed", "cancelled", "failed")
     )
 
+    @classmethod
+    def from_dict(cls, raw: dict[str, Any]) -> "JobState":
+        if not isinstance(raw, dict):
+            raise ValueError("任务状态必须是对象")
+        require_version(raw.get("job_format_version"), JOB_FORMAT_VERSION, "任务格式")
+        require_version(raw.get("sampling_version"), SAMPLING_VERSION, "抽样")
+        try:
+            return cls(**raw).validate()
+        except TypeError as error:
+            raise ValueError("任务状态格式无效") from error
+
     def validate(self) -> "JobState":
+        require_version(self.job_format_version, JOB_FORMAT_VERSION, "任务格式")
+        require_version(self.sampling_version, SAMPLING_VERSION, "抽样")
         if self.status not in self._STATUSES:
             raise ValueError("status must be one of queued/running/completed/cancelled/failed")
         if isinstance(self.completed_units, bool) or not isinstance(self.completed_units, int) or self.completed_units < 0:
@@ -86,6 +123,10 @@ class JobState:
             raise ValueError("completed_units cannot exceed total_units")
         if isinstance(self.parameters, RunParameters):
             self.parameters.validate()
+        elif isinstance(self.parameters, dict):
+            RunParameters.from_dict(self.parameters)
+        else:
+            raise ValueError("parameters must be serialized run parameters")
         return self
 
     def to_dict(self) -> dict[str, Any]:
@@ -94,6 +135,10 @@ class JobState:
 
 def result_payload(result: Any, rule: Any, duration_seconds: float) -> dict[str, Any]:
     payload = json.loads(json.dumps(asdict(result)))
+    if not result.records:
+        payload.pop("records")
+    payload["result_format_version"] = RESULT_FORMAT_VERSION
+    payload.update(sampling_metadata())
     mean_count_error = result.mean_six_stars - result.theoretical_expected_count
     payload["rule_version"] = rule.version
     payload["main_draws"] = result.draws

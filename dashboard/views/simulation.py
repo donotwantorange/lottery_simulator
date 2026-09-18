@@ -11,7 +11,18 @@ from dashboard.charts import (
     reward_rows,
     six_star_category_rows,
 )
+from dashboard.trace import trace_rows
 from lottery_simulator.cli import RULES
+
+
+def _trace_column_config(st):
+    number_column = getattr(getattr(st, "column_config", None), "NumberColumn", None)
+    if number_column is None:
+        return {}
+    return {
+        name: number_column(format="percent")
+        for name in ("四星概率", "五星概率", "六星概率")
+    }
 
 
 def render_result(st, payload: dict, trace_enabled: bool, *, saved_snapshot=False) -> None:
@@ -90,6 +101,13 @@ def render_result(st, payload: dict, trace_enabled: bool, *, saved_snapshot=Fals
                 "完整周期理论平均间隔": payload["theoretical_mean_interval"],
             }
         )
+        with st.expander("运行信息"):
+            st.write({
+                "sampling_version": payload.get("sampling_version"),
+                "rng_algorithm": payload.get("rng_algorithm"),
+                "python_implementation": payload.get("python_implementation"),
+                "python_version": payload.get("python_version"),
+            })
 
     with category_tab:
         category_data = six_star_category_rows(payload, source)
@@ -162,7 +180,15 @@ def render_result(st, payload: dict, trace_enabled: bool, *, saved_snapshot=Fals
     with trace_tab:
         records = payload.get("records")
         if trace_enabled and records:
-            st.dataframe(records, hide_index=True, width="stretch")
+            reward_names = tuple(
+                reward["name"] for reward in payload.get("pool_config", {}).get("rewards", ())
+            )
+            st.dataframe(
+                trace_rows(records, reward_names),
+                hide_index=True,
+                width="stretch",
+                column_config=_trace_column_config(st),
+            )
         else:
             st.info("本次运行未保存逐抽记录")
 

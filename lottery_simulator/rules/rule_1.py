@@ -7,7 +7,6 @@ from lottery_simulator.rules.base import (
 from lottery_simulator.rules.first_thirty_bonus import FirstThirtyBonusRule
 from lottery_simulator.rules.pool_config import (
     PoolConfig,
-    SixStarCharacter,
     load_pool_config,
 )
 
@@ -21,6 +20,10 @@ class Rule1:
     @cached_property
     def config(self) -> PoolConfig:
         return load_pool_config()
+
+    @property
+    def fixed_six_star_probability(self) -> float | None:
+        return getattr(self, "_fixed_six_star_probability", None)
 
     def __init__(
         self,
@@ -57,7 +60,12 @@ class Rule1:
         misses = state.misses_since_six_star
         if isinstance(misses, bool) or not isinstance(misses, int):
             raise TypeError("misses_since_six_star must be an integer")
-        if not 0 <= misses < self.max_pity:
+        if misses < 0:
+            raise ValueError("misses_since_six_star must be non-negative")
+        if (
+            getattr(self, "_fixed_six_star_probability", None) is None
+            and misses >= self.max_pity
+        ):
             raise ValueError("misses_since_six_star must be between 0 and 79")
         five_misses = state.misses_since_five_or_higher
         if isinstance(five_misses, bool) or not isinstance(five_misses, int):
@@ -105,6 +113,17 @@ class Rule1:
             == self.config.five_star.hard_pity - 1
         )
 
+    def six_star_hard_pity_active(self, state: DrawState) -> bool:
+        self._validate(state)
+        return (
+            getattr(self, "_fixed_six_star_probability", None) is None
+            and state.misses_since_six_star == self.max_pity - 1
+        )
+
+    def character_probabilities(self, rarity: int, state: DrawState) -> dict[str, float]:
+        self._validate(state)
+        return self.config.character_probabilities(rarity)
+
     def rarity_probabilities(self, state: DrawState) -> RarityProbabilities:
         six = self.probability(state)
         five = (
@@ -114,10 +133,22 @@ class Rule1:
             if self.five_star_pity_active(state)
             else self.config.five_star.base_probability
         )
-        return RarityProbabilities(max(0.0, 1.0 - six - five), five, six)
+        four = 1.0 - six - five
+        if four < -1e-12:
+            raise ValueError("four-star remainder must not be negative beyond rounding error")
+        return RarityProbabilities(max(0.0, four), five, six)
 
     def advance_rarity(self, state: DrawState, rarity: int) -> DrawState:
-        self._validate(state)
+        if (
+            isinstance(rarity, bool)
+            or not isinstance(rarity, int)
+            or rarity not in (4, 5, 6)
+        ):
+            raise ValueError("rarity must be 4, 5, or 6")
+        probabilities = self.rarity_probabilities(state)
+        if {4: probabilities.four_star, 5: probabilities.five_star,
+            6: probabilities.six_star}[rarity] <= 0.0:
+            raise ValueError("rarity has zero probability in this state")
         if rarity == 6:
             return DrawState(0, 0)
         six_misses = state.misses_since_six_star + 1
@@ -127,23 +158,3 @@ class Rule1:
             else state.misses_since_five_or_higher + 1
         )
         return DrawState(six_misses, five_misses)
-
-    def pick_six_star(self, roll: float) -> SixStarCharacter:
-        probabilities = self.config.six_star_character_probabilities()
-        cumulative = 0.0
-        for character in self.config.six_star_characters:
-            cumulative += probabilities[character.name]
-            if roll < cumulative:
-                return character
-        return self.config.six_star_characters[-1]
-
-    def advance(self, state: DrawState, is_six_star: bool) -> DrawState:
-        self._validate(state)
-        if is_six_star:
-            return DrawState(0, 0)
-        if state.misses_since_six_star == self.max_pity - 1:
-            raise ValueError("the guaranteed pull cannot miss")
-        return DrawState(
-            state.misses_since_six_star + 1,
-            state.misses_since_five_or_higher,
-        )

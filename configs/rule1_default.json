@@ -1,4 +1,5 @@
 {
+  "format_version": 1,
   "up_share": 0.5,
   "five_star": {
     "base_probability": 0.08,
@@ -16,6 +17,8 @@
     {"name": "常驻-H", "is_up": false, "is_limited": false, "up_weight": null},
     {"name": "常驻-I", "is_up": false, "is_limited": false, "up_weight": null}
   ],
+  "four_star_characters": [],
+  "five_star_characters": [],
   "rewards": [
     {"name": "奖励A", "four_star": 1, "five_star": 5, "six_star": 25},
     {"name": "奖励B", "four_star": 0, "five_star": 2, "six_star": 10}

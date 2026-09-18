@@ -71,14 +71,14 @@ docker compose logs --tail=100 app caddy
 
 | 命名卷 | 容器路径 | 内容 |
 | --- | --- | --- |
-| `lottery_data` | app `/app/data` | `lottery_v2.sqlite3`、任务文件 `jobs/` |
+| `lottery_data` | app `/app/data` | `lottery_v3.sqlite3`、任务文件 `jobs_v3/` |
 | `lottery_backups` | app `/app/backups` | SQLite 备份 |
 | `caddy_data` | Caddy `/data` | 证书、私钥及 ACME 状态 |
 | `caddy_config` | Caddy `/config` | Caddy 持久配置 |
 
 实际卷名会带 Compose 项目前缀。升级和恢复时保持同一项目目录/项目名，避免误用新空卷。不要执行 `docker compose down -v`，它会删除持久卷。
 
-Compose 显式设置 `LOTTERY_DATA_DIR=/app/data`、`LOTTERY_DB_PATH=/app/data/lottery_v2.sqlite3`。页面和 worker 共用这个数据库路径，定时备份也使用它。非容器开发未设置 `LOTTERY_DB_PATH` 时使用 `LOTTERY_DATA_DIR/history_v2.sqlite3`。旧的 `lottery.sqlite3`（包括旧 `data/history.sqlite3` 或已存在卷中的 `/app/data/lottery.sqlite3`）不读取、不迁移、不覆盖，也不自动删除；需要保留它时请单独备份。自定义数据库路径时，父目录需已存在且可写。
+Compose 显式设置 `LOTTERY_DATA_DIR=/app/data`、`LOTTERY_DB_PATH=/app/data/lottery_v3.sqlite3`。页面和 worker 共用这个数据库路径，定时备份也使用它。非容器开发未设置 `LOTTERY_DB_PATH` 时使用 `LOTTERY_DATA_DIR/history_v3.sqlite3`，任务状态使用同目录下的 `jobs_v3/`。旧的 `lottery.sqlite3`（包括旧 `data/history.sqlite3` 或已存在卷中的 `/app/data/lottery.sqlite3`）不读取、不迁移、不覆盖，也不自动删除；需要保留它时请单独备份。自定义数据库路径时，父目录需已存在且可写。
 
 ## 3. 健康检查和公网验收
 
@@ -103,10 +103,10 @@ curl -I https://lottery.example.com
 
 ## 4. 在线备份和每日定时任务
 
-先完成一次登录和模拟，确认 `/app/data/lottery_v2.sqlite3` 存在。手动在线备份：
+先完成一次登录和模拟，确认 `/app/data/lottery_v3.sqlite3` 存在。手动在线备份：
 
 ```bash
-docker compose exec -T app python3 scripts/backup_db.py /app/data/lottery_v2.sqlite3 /app/backups/lottery-v2-$(date +%F).sqlite3
+docker compose exec -T app python3 scripts/backup_db.py /app/data/lottery_v3.sqlite3 /app/backups/lottery-v3-$(date +%F).sqlite3
 ```
 
 脚本只读打开源库，使用 SQLite 在线 backup API，包含已提交 WAL 数据；创建目标父目录，拒绝同一路径/符号链接/硬链接别名，并检查目标 `PRAGMA integrity_check`。退出码为 0 且输出 `Backup integrity_check: ok` 才算成功。非零退出后目标可能已存在或已覆盖，不可使用该次输出恢复；同日命令会覆盖同名备份，重要操作前使用带时分秒的独立文件名。该脚本只备份 SQLite 历史，不备份任务文件、OIDC secrets 或证书。
@@ -128,7 +128,7 @@ timer 按服务器时区每日执行，`Persistent=true` 在错过计划后补�
 
 ```bash
 install -d -m 700 backups
-docker compose cp app:/app/backups/lottery-v2-$(date +%F).sqlite3 backups/
+docker compose cp app:/app/backups/lottery-v3-$(date +%F).sqlite3 backups/
 chmod 600 backups/*.sqlite3
 ```
 
@@ -143,20 +143,20 @@ cd /opt/lottery-simulator
 sudo systemctl stop lottery-backup.timer
 sudo systemctl stop lottery-backup.service
 docker compose stop app
-docker compose run --rm --no-deps app python3 scripts/backup_db.py /app/data/lottery_v2.sqlite3 /app/backups/pre-restore-v2-$(date +%F-%H%M%S).sqlite3
-docker compose run --rm --no-deps app python3 scripts/backup_db.py /app/backups/lottery-v2-2026-09-14.sqlite3 /app/data/lottery_v2.sqlite3
+docker compose run --rm --no-deps app python3 scripts/backup_db.py /app/data/lottery_v3.sqlite3 /app/backups/pre-restore-v3-$(date +%F-%H%M%S).sqlite3
+docker compose run --rm --no-deps app python3 scripts/backup_db.py /app/backups/lottery-v3-2026-09-14.sqlite3 /app/data/lottery_v3.sqlite3
 ```
 
 每条备份/恢复命令必须检查退出码；任何一步失败就停下，不要继续启动服务。首次空库恢复可以跳过不存在源库的 pre-restore 步骤；不要跳过现有库的保护备份。
 
 ```bash
-docker compose run --rm --no-deps app python3 -c "import sqlite3; c=sqlite3.connect('file:/app/data/lottery_v2.sqlite3?mode=ro', uri=True); print(c.execute('PRAGMA integrity_check').fetchall()); print(c.execute('SELECT count(*) FROM simulation_runs').fetchone()); c.close()"
+docker compose run --rm --no-deps app python3 -c "import sqlite3; c=sqlite3.connect('file:/app/data/lottery_v3.sqlite3?mode=ro', uri=True); print(c.execute('PRAGMA integrity_check').fetchall()); print(c.execute('SELECT count(*) FROM simulation_runs').fetchone()); c.close()"
 docker compose up -d app
 docker compose ps
 sudo systemctl start lottery-backup.timer
 ```
 
-校验输出必须是 `[('ok',)]`，历史数量须符合所选快照；重新登录检查历史/Trace，并运行一个小模拟验证恢复后仍可写。备份不会恢复未完成任务；若有旧任务状态影响运行，先保留 `jobs/` 并调查，不要批量清理数据目录。⚠️ 当前已在临时真实 SQLite 上验证恢复及继续写入，但容器卷上的停机恢复仍须现场验证。
+校验输出必须是 `[('ok',)]`，历史数量须符合所选快照；重新登录检查历史/Trace，并运行一个小模拟验证恢复后仍可写。备份不会恢复未完成任务；若有旧任务状态影响运行，先保留 `jobs_v3/` 并调查，不要批量清理数据目录。⚠️ 当前已在临时真实 SQLite 上验证恢复及继续写入，但容器卷上的停机恢复仍须现场验证。
 
 ## 6. 镜像升级与按 Git 提交回滚
 
@@ -165,7 +165,7 @@ sudo systemctl start lottery-backup.timer
 ```bash
 git status --short
 git tag deployment-before-upgrade-2026-09-14 HEAD
-docker compose exec -T app python3 scripts/backup_db.py /app/data/lottery_v2.sqlite3 /app/backups/pre-upgrade-v2-$(date +%F-%H%M%S).sqlite3
+docker compose exec -T app python3 scripts/backup_db.py /app/data/lottery_v3.sqlite3 /app/backups/pre-upgrade-v3-$(date +%F-%H%M%S).sqlite3
 ```
 
 先处理工作区中已有修改；不要覆盖它们。如果这个 tag 已存在，选一个新的明确名称。获取并切换到已经审查的目标提交，例如先 `git fetch --all`，再 `git switch --detach <目标提交>`（替换尖括号参数）。保持部署目录与卷项目名不变，再运行：

@@ -18,7 +18,7 @@ from streamlit.testing.v1 import AppTest
 from streamlit.runtime.secrets import AttrDict
 
 from dashboard.jobs import JobManager
-from dashboard.models import JobState, RunParameters, result_payload, write_json
+from dashboard.models import JobState, RunParameters, read_json, result_payload, write_json
 from dashboard.repository import HistoryRepository
 from dashboard.worker import run
 from lottery_simulator.engine import simulate
@@ -114,7 +114,7 @@ class DashboardAppTest(unittest.TestCase):
         self.assertEqual(self.widget(app.number_input, "主池抽数").value, 10_000_000)
         self.assertEqual(self.widget(app.number_input, PITY_LABEL).value, 29)
         self.assertIsNone(app.session_state.filtered_state.get("current_job_id"))
-        self.assertEqual(list(self.root.glob("jobs/*/state.json")), [])
+        self.assertEqual(list(self.root.glob("jobs_v3/*/state.json")), [])
 
     def test_deployment_database_override_is_used_by_page_and_worker(self):
         database = self.root / "lottery.sqlite3"
@@ -123,7 +123,7 @@ class DashboardAppTest(unittest.TestCase):
             self.widget(app.button, "开始模拟").click().run()
         self.assertEqual(len(app.exception), 0)
         self.assertTrue(database.is_file(), "Deployment database must receive simulations")
-        self.assertFalse((self.root / "history_v2.sqlite3").exists())
+        self.assertFalse((self.root / "history_v3.sqlite3").exists())
         runs = HistoryRepository(database).list_runs({}, 20, 0)
         self.assertEqual(len(runs), 1)
         self.assertEqual(runs[0]["main_draws"], 100)
@@ -146,20 +146,48 @@ class DashboardAppTest(unittest.TestCase):
         self.assertNotIn("synthetic migration detail", " ".join(item.value for item in app.error))
 
     def repository(self):
-        repository = HistoryRepository(self.root / "history_v2.sqlite3")
+        repository = HistoryRepository(self.root / "history_v3.sqlite3")
         repository.initialize()
         return repository
 
-    def test_default_database_is_v2_and_legacy_database_is_never_read_or_changed(self):
-        legacy = self.root / "history.sqlite3"
-        legacy.write_bytes(b"legacy database must stay untouched")
-        before = legacy.read_bytes()
+    def test_default_database_is_v3_and_old_databases_are_never_read_or_changed(self):
+        old_databases = [self.root / "history.sqlite3", self.root / "history_v2.sqlite3"]
+        for path in old_databases:
+            path.write_bytes(b"old database must stay untouched")
+        before = {path: path.read_bytes() for path in old_databases}
 
         app = self.load()
 
         self.assertEqual(len(app.exception), 0)
-        self.assertTrue((self.root / "history_v2.sqlite3").is_file())
-        self.assertEqual(legacy.read_bytes(), before)
+        self.assertTrue((self.root / "history_v3.sqlite3").is_file())
+        for path in old_databases:
+            self.assertEqual(path.read_bytes(), before[path])
+
+    def test_old_job_root_and_missing_session_references_are_ignored_and_cleared(self):
+        old_id = str(uuid4())
+        parameters = RunParameters("rule1", 1, 1, 0, 42, False)
+        old_state = JobState(old_id, "completed", parameters.to_dict(), 1, 1,
+                             result_path="result.json").to_dict()
+        old_state.pop("job_format_version", None)
+        old_job_dir = self.root / "jobs" / old_id
+        write_json(old_job_dir / "state.json", old_state)
+        write_json(old_job_dir / "result.json", {"private": "old result"})
+
+        app = self.load()
+        app.session_state["current_job_id"] = old_id
+        app.session_state["pending_reuse_id"] = str(uuid4())
+        app.session_state["pending_delete_id"] = str(uuid4())
+        app.run()
+
+        self.assertEqual(len(app.exception), 0)
+        self.assertNotIn("current_job_id", app.session_state.filtered_state)
+        self.assertNotIn("pending_reuse_id", app.session_state.filtered_state)
+        self.assertNotIn("pending_delete_id", app.session_state.filtered_state)
+        self.assertTrue((self.root / "jobs_v3").is_dir())
+        self.assertEqual(read_json(old_job_dir / "result.json"), {"private": "old result"})
+        self.assertEqual(len(app.metric), 0)
+        self.assertTrue(any("失效" in item.value or "不存在" in item.value
+                            for item in app.warning))
 
     def test_configuration_sections_render_default_editors_and_utf8_download(self):
         app = self.load()
@@ -220,7 +248,7 @@ class DashboardAppTest(unittest.TestCase):
         self.assertEqual(len(app.exception), 0)
         self.assertTrue(any("配置 JSON 无效" in item.value for item in app.error))
         self.assertNotIn("private-invalid", " ".join(item.value for item in app.error))
-        self.assertEqual(list(self.root.glob("jobs/*/state.json")), [])
+        self.assertEqual(list(self.root.glob("jobs_v3/*/state.json")), [])
         self.assertEqual(self.repository().list_runs({}, 10, 0), [])
 
     def test_joint_probability_admission_shows_specific_chinese_error_without_job(self):
@@ -239,7 +267,7 @@ class DashboardAppTest(unittest.TestCase):
                 self.assertRegex(errors, "五星.*六星.*不能超过 1")
                 self.assertNotIn("exceed", errors)
                 self.assertNotIn("模拟任务失败", errors)
-                self.assertEqual(list(self.root.glob("jobs/*/state.json")), [])
+                self.assertEqual(list(self.root.glob("jobs_v3/*/state.json")), [])
                 self.assertEqual(self.repository().list_runs({}, 10, 0), [])
 
     def test_uploaded_configuration_and_initial_five_pity_are_saved_as_job_snapshot(self):
@@ -279,14 +307,14 @@ class DashboardAppTest(unittest.TestCase):
         ids = []
         for index in range(3):
             rule = Rule1()
+            trace_enabled = index != 1
             payload = result_payload(simulate(rule, index + 2, trials=2 if index == 1 else 1,
                                               seed=42 + index,
-                                              initial_pity=29), rule, 0.25)
+                                              initial_pity=29,
+                                              collect_records=trace_enabled), rule, 0.25)
             if index == 0:
                 payload["rule_name"] = "retired-rule"
-            if index == 1:
-                payload["rule_version"] = "0.9"
-            ids.append(repository.save_run(payload, trace_enabled=index != 1))
+            ids.append(repository.save_run(payload, trace_enabled=trace_enabled))
         with closing(sqlite3.connect(repository.path)) as connection, connection:
             for index, run_id in enumerate(ids):
                 connection.execute("UPDATE simulation_runs SET created_at=? WHERE id=?",
@@ -307,7 +335,7 @@ class DashboardAppTest(unittest.TestCase):
         self.widget(app.multiselect, "选择历史运行").set_value(ids[1:]).run()
         self.assertEqual(len(app.exception), 0)
         self.assertEqual(len(app.metric), 30)
-        self.assertTrue(any("统计口径不同" in item.value for item in app.warning))
+        self.assertFalse(any("统计口径不同" in item.value for item in app.warning))
         self.widget(app.multiselect, "选择历史运行").set_value(ids).run()
         self.assertEqual(len(app.exception), 0)
         self.assertTrue(any("最多选择两次运行" in item.value for item in app.error))
@@ -327,7 +355,7 @@ class DashboardAppTest(unittest.TestCase):
         self.assertEqual(self.widget(app.number_input, PITY_LABEL).value, 29)
         self.assertEqual(self.widget(app.text_input, "随机种子（留空自动生成）").value, "43")
         self.assertTrue(self.widget(app.toggle, "Trace").disabled)
-        self.assertEqual(list(self.root.glob("jobs/*/state.json")), [])
+        self.assertEqual(list(self.root.glob("jobs_v3/*/state.json")), [])
         self.assertIsNone(app.session_state.filtered_state.get("current_job_id"))
         self.assertEqual(len(repository.list_runs({}, 20, 0)), 3)
         self.widget(app.button, "删除历史 " + ids[0]).click().run()
@@ -392,7 +420,8 @@ class DashboardAppTest(unittest.TestCase):
         raw["six_star_characters"][0]["name"] = "历史UP"
         rule = Rule1(config=PoolConfig.from_dict(raw))
         payload = result_payload(
-            simulate(rule, 2, seed=42, initial_five_star_pity=7), rule, 0.25
+            simulate(rule, 2, seed=42, initial_five_star_pity=7,
+                     collect_records=True), rule, 0.25
         )
         repository = self.repository()
         run_id = repository.save_run(payload, trace_enabled=True)
@@ -407,7 +436,7 @@ class DashboardAppTest(unittest.TestCase):
                           if item.key == "pool_character_editor")
         self.assertEqual(characters.iloc[0]["角色名称"], "历史UP")
 
-    def test_history_date_range_pagination_and_schema_warning(self):
+    def test_history_date_range_and_pagination(self):
         repository, ids = self.seed_history()
         app = self.load()
         self.widget(app.date_input, "历史开始日期（UTC）").set_value(date(2026, 9, 11))
@@ -423,15 +452,10 @@ class DashboardAppTest(unittest.TestCase):
         self.assertEqual(app.dataframe[0].value["运行 ID"].tolist(), [ids[1], ids[0]])
         self.widget(app.number_input, "历史页码").set_value(3).run()
         self.assertTrue(any("没有历史记录" in item.value for item in app.info))
-        with closing(sqlite3.connect(repository.path)) as connection, connection:
-            connection.execute("PRAGMA ignore_check_constraints=ON")
-            connection.execute("UPDATE simulation_runs SET schema_version=1 WHERE id=?",
-                               (newest[0],))
         self.widget(app.number_input, "历史页码").set_value(1).run()
         self.widget(app.multiselect, "选择历史运行").set_value(newest[:2]).run()
         self.assertEqual(len(app.exception), 0)
         self.assertEqual(len(app.metric), 30)
-        self.assertTrue(any("统计口径不同" in item.value for item in app.warning))
 
     def test_history_queries_draw_records_only_for_selected_trace_runs(self):
         _, ids = self.seed_history()
@@ -449,7 +473,7 @@ class DashboardAppTest(unittest.TestCase):
         self.assertEqual(dict(calls), {ids[0]: True, ids[1]: False})
         self.assertEqual(len(calls), 2)
 
-    def test_history_retired_rule_reuse_is_safe_and_missing_selection_clears(self):
+    def test_retired_rule_reuse_is_safe_and_missing_selection_clears(self):
         repository, ids = self.seed_history()
         app = self.load()
         self.widget(app.multiselect, "选择历史运行").set_value([ids[0]]).run()
@@ -457,7 +481,7 @@ class DashboardAppTest(unittest.TestCase):
         self.widget(app.button, "复用参数 " + ids[0]).click().run()
         self.assertTrue(any("不支持此历史规则" in item.value for item in app.warning))
         self.assertEqual(self.widget(app.number_input, "主池抽数").value, 100)
-        self.assertEqual(list(self.root.glob("jobs/*/state.json")), [])
+        self.assertEqual(list(self.root.glob("jobs_v3/*/state.json")), [])
         repository.delete_run(ids[0])
         app.run()
         self.assertEqual(len(app.exception), 0)
@@ -483,7 +507,7 @@ class DashboardAppTest(unittest.TestCase):
         )
         state = JobState(str(uuid4()), status, parameters.to_dict(), 1, 2,
                          duration_seconds=2.0)
-        job_dir = self.root / "jobs" / state.job_id
+        job_dir = self.root / "jobs_v3" / state.job_id
         write_json(job_dir / "parameters.json", parameters.to_dict())
         write_json(job_dir / "state.json", state.to_dict())
         app = self.load()
@@ -503,8 +527,8 @@ class DashboardAppTest(unittest.TestCase):
 
     def test_process_startup_reconciles_only_its_job_root_once(self):
         parameters = RunParameters("rule1", 10_000, 10_000, 29, 42, False)
-        database = self.root / "history_v2.sqlite3"
-        manager = JobManager(self.root / "jobs", database)
+        database = self.root / "history_v3.sqlite3"
+        manager = JobManager(self.root / "jobs_v3", database)
         unrelated = JobManager(self.root / "unrelated-jobs", self.root / "unrelated.sqlite3")
         self.addCleanup(manager.reconcile_after_restart)
         self.addCleanup(unrelated.reconcile_after_restart)
@@ -540,6 +564,7 @@ class DashboardAppTest(unittest.TestCase):
             "initial_pity", "seed_text", "trace", "initial_five_star_pity",
             "pool_up_share", "pool_five_star_probability",
             "pool_five_star_pity_enabled", "pool_five_star_hard_pity",
+            "pool_four_star_characters", "pool_five_star_characters",
             "pool_character_rows", "pool_reward_rows", "pool_character_editor",
             "pool_reward_editor", "pool_config_upload",
         })
@@ -574,7 +599,7 @@ class DashboardAppTest(unittest.TestCase):
                 self.widget(app.button, "停止模拟").click().run()
                 self.assertEqual(len(app.exception), 0)
                 self.assertTrue((job_dir / "cancel.request").exists())
-                manager = JobManager(job_dir.parent, self.root / "history_v2.sqlite3")
+                manager = JobManager(job_dir.parent, self.root / "history_v3.sqlite3")
                 self.assertEqual(manager.get(job_dir.name).status, status)
                 manager.reconcile_after_restart()
 
@@ -600,7 +625,7 @@ class DashboardAppTest(unittest.TestCase):
               self.assertLogs(level="ERROR")):
             self.start_small(app)
         self.assertEqual([item.value for item in app.error], ["模拟任务启动失败"])
-        self.assertEqual(list(self.root.glob("jobs/*/state.json")), [])
+        self.assertEqual(list(self.root.glob("jobs_v3/*/state.json")), [])
         self.assertEqual(len(app.metric), 0)
 
     def test_stop_only_requests_cancel_then_terminal_has_no_history_or_result(self):
@@ -609,10 +634,10 @@ class DashboardAppTest(unittest.TestCase):
         self.widget(app.button, "停止模拟").click().run()
         self.assertEqual(len(app.exception), 0)
         self.assertTrue((job_dir / "cancel.request").exists())
-        manager = JobManager(job_dir.parent, self.root / "history_v2.sqlite3")
+        manager = JobManager(job_dir.parent, self.root / "history_v3.sqlite3")
         self.assertEqual(manager.get(job_dir.name).status, "queued")
         self.assertEqual(self.repository().list_runs({}, 10, 0), [])
-        run(job_dir, self.root / "history_v2.sqlite3")
+        run(job_dir, self.root / "history_v3.sqlite3")
         app.run()
         self.assertEqual(len(app.exception), 0)
         self.assertTrue(any("模拟已取消" in item.value for item in app.info))
@@ -634,7 +659,7 @@ class DashboardAppTest(unittest.TestCase):
         self.assertEqual(len(app.exception), 0)
         self.assertEqual([item.value for item in app.error], ["初始保底必须在 0 到 79 之间"])
         self.assertEqual(self.widget(app.number_input, PITY_LABEL).value, 80)
-        self.assertEqual(list(self.root.glob("jobs/*/state.json")), [])
+        self.assertEqual(list(self.root.glob("jobs_v3/*/state.json")), [])
         self.assertEqual(self.repository().list_runs({}, 10, 0), [])
 
     def test_failed_shows_only_safe_summary_without_history_or_result(self):
@@ -646,7 +671,7 @@ class DashboardAppTest(unittest.TestCase):
 
     def test_repository_failure_keeps_result_download_and_safe_warning(self):
         self.repository()
-        with closing(sqlite3.connect(self.root / "history_v2.sqlite3")) as connection:
+        with closing(sqlite3.connect(self.root / "history_v3.sqlite3")) as connection:
             connection.executescript("""
                 CREATE TRIGGER fail_save BEFORE INSERT ON simulation_runs
                 BEGIN SELECT RAISE(ABORT, 'private database failure'); END;
@@ -709,7 +734,7 @@ assert app.title[0].value == '抽奖概率实验室'
             if job_id == job_dir.name:
                 reads += 1
                 if reads == 2:
-                    run(job_dir, self.root / "history_v2.sqlite3")
+                    run(job_dir, self.root / "history_v3.sqlite3")
             return original_get(manager, job_id)
 
         with patch.object(JobManager, "get", new=complete_on_poll):
@@ -728,7 +753,7 @@ assert app.title[0].value == '抽奖概率实验室'
         self.assertEqual([item.value for item in app.error], ["随机种子必须为整数"])
         self.assertEqual(self.widget(app.text_input, "随机种子（留空自动生成）").value,
                          "private-not-an-int")
-        self.assertEqual(list(self.root.glob("jobs/*/state.json")), [])
+        self.assertEqual(list(self.root.glob("jobs_v3/*/state.json")), [])
 
 
 if __name__ == "__main__":

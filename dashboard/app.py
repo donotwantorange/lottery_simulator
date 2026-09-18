@@ -52,8 +52,8 @@ st.set_page_config(page_title="抽奖概率实验室", layout="wide")
 require_dashboard_access()
 
 data_dir = Path(os.environ.get("LOTTERY_DATA_DIR", project_root / "data"))
-database_path = Path(os.environ.get("LOTTERY_DB_PATH", data_dir / "history_v2.sqlite3"))
-manager = startup_job_manager(str(data_dir / "jobs"), str(database_path))
+database_path = Path(os.environ.get("LOTTERY_DB_PATH", data_dir / "history_v3.sqlite3"))
+manager = startup_job_manager(str(data_dir / "jobs_v3"), str(database_path))
 repository = HistoryRepository(database_path)
 try:
     repository.initialize()
@@ -64,14 +64,21 @@ except Exception:
 apply_pending_reuse(st, repository)
 current_id = st.session_state.get("current_job_id")
 current = manager.get_active()
+invalid_current_reference = False
 if current is not None:
     current_id = current.job_id
     st.session_state["current_job_id"] = current_id
 else:
     current = manager.get(current_id)
+    if current_id is not None and current is None:
+        st.session_state.pop("current_job_id", None)
+        current_id = None
+        invalid_current_reference = True
 live = current is not None and current.status in ACTIVE_STATUSES
 
 st.title("抽奖概率实验室")
+if invalid_current_reference:
+    st.warning("当前任务结果已失效")
 st.session_state.setdefault("draws", 100)
 with st.sidebar:
     rule_name = st.selectbox("规则", tuple(RULES), key="rule_name")

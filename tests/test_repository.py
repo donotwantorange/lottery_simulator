@@ -30,7 +30,7 @@ class HistoryRepositoryTest(unittest.TestCase):
         self.repository = HistoryRepository(self.path)
         self.repository.initialize()
         rule = Rule1()
-        self.payload = result_payload(simulate(rule, 12, seed=42), rule, 0.25)
+        self.payload = result_payload(simulate(rule, 12, seed=42, collect_records=True), rule, 0.25)
 
     def counts(self):
         with closing(sqlite3.connect(self.path)) as connection:
@@ -39,7 +39,7 @@ class HistoryRepositoryTest(unittest.TestCase):
 
     def test_initialize_empty_version_zero_and_repeat_preserves_run(self):
         with closing(sqlite3.connect(self.path)) as connection:
-            self.assertEqual(connection.execute("PRAGMA user_version").fetchone()[0], 2)
+            self.assertEqual(connection.execute("PRAGMA user_version").fetchone()[0], 3)
             self.assertEqual(
                 [row[1] for row in connection.execute("PRAGMA table_info(simulation_runs)")],
                 [
@@ -81,6 +81,14 @@ class HistoryRepositoryTest(unittest.TestCase):
             connection.execute("CREATE TABLE legacy_marker(value TEXT)")
             connection.execute("INSERT INTO legacy_marker VALUES ('keep')")
         self.assert_initialize_rejected_without_changes(path, 0)
+
+    def test_initialize_rejects_v2_without_modifying_it(self):
+        path = self.path.with_name("v2.sqlite3")
+        with closing(sqlite3.connect(path)) as connection, connection:
+            connection.execute("CREATE TABLE legacy_marker(value TEXT)")
+            connection.execute("INSERT INTO legacy_marker VALUES ('keep')")
+            connection.execute("PRAGMA user_version = 2")
+        self.assert_initialize_rejected_without_changes(path, 2)
 
     def test_initialize_rejects_version_zero_view_without_modifying_it(self):
         path = self.path.with_name("view-only.sqlite3")
@@ -480,7 +488,7 @@ os._exit(19)
                     (0, (True, False, False, False), (0, False)),
                     (0, (True, False, False, False), (0, False)),
                 ],
-                "source_version": 2,
+                "source_version": 3,
                 "source_tables": ["draw_records", "simulation_runs"],
                 "source_integrity": "ok",
             },
@@ -489,17 +497,17 @@ os._exit(19)
     def test_initialize_rejects_future_version_without_changes(self):
         path = self.path.with_name("future.sqlite3")
         with closing(sqlite3.connect(path)) as connection, connection:
-            connection.execute("PRAGMA user_version = 3")
-        self.assert_initialize_rejected_without_changes(path, 3)
+            connection.execute("PRAGMA user_version = 4")
+        self.assert_initialize_rejected_without_changes(path, 4)
 
-    def test_v2_round_trip_preserves_config_summary_and_trace(self):
+    def test_v3_round_trip_preserves_config_summary_and_trace(self):
         original = deepcopy(self.payload)
         run_id = self.repository.save_run(self.payload, trace_enabled=True)
         run = self.repository.get_run(run_id, include_records=True)
         self.assertEqual(run["pool_config"], original["pool_config"])
         self.assertEqual(run["records"], original["records"])
         self.assertEqual(run["initial_five_star_pity"], original["initial_five_star_pity"])
-        self.assertEqual(run["schema_version"], 2)
+        self.assertEqual(run["schema_version"], 3)
 
     def test_save_and_read_trace_preserve_payload_and_metadata(self):
         original = deepcopy(self.payload)
@@ -508,23 +516,149 @@ os._exit(19)
         run = self.repository.get_run(run_id, include_records=True)
         self.assertEqual(str(UUID(run_id)), run_id)
         self.assertGreaterEqual(datetime.fromisoformat(run["created_at"]), before)
-        self.assertEqual(run["schema_version"], 2)
+        self.assertEqual(run["schema_version"], 3)
         self.assertIs(run["trace_enabled"], True)
         for key, value in original.items():
             self.assertEqual(run[key], value, key)
         self.assertEqual(len(run["records"]), 12)
-        self.assertIsInstance(run["records"][0]["is_six_star"], bool)
+        self.assertIsInstance(run["records"][0]["draw_result"]["outcome"]["is_up"], bool)
         self.assertNotIn("records", self.repository.get_run(run_id))
         self.assertEqual(self.payload, original)
 
     def test_bonus_trace_round_trips_nested_state(self):
         rule = Rule1()
-        payload = result_payload(simulate(rule, 2, seed=42, initial_pity=29), rule, 0.1)
+        payload = result_payload(simulate(rule, 2, seed=42, initial_pity=29, collect_records=True), rule, 0.1)
         run_id = self.repository.save_run(payload, trace_enabled=True)
         records = self.repository.get_run(run_id, include_records=True)["records"]
         self.assertEqual(len(records), 12)
         self.assertEqual(records, payload["records"])
         self.assertEqual(records[1]["source"], "bonus")
+        self.assertEqual(records[1]["main_state_before"], records[1]["main_state_after"])
+
+    def test_save_rejects_missing_bool_and_unsupported_versions_without_inserts(self):
+        for key in ("result_format_version", "sampling_version"):
+            for value in (None, True, "1", 2):
+                with self.subTest(key=key, value=value):
+                    payload = deepcopy(self.payload)
+                    if value is None:
+                        payload.pop(key, None)
+                    else:
+                        payload[key] = value
+                    with self.assertRaises(ValueError):
+                        self.repository.save_run(payload, trace_enabled=False)
+                    self.assertEqual(self.counts(), (0, 0))
+        for value in (None, True, "1", 2):
+            payload = deepcopy(self.payload)
+            if value is None:
+                payload["pool_config"].pop("format_version")
+            else:
+                payload["pool_config"]["format_version"] = value
+            with self.subTest(config_version=value), self.assertRaises(ValueError):
+                self.repository.save_run(payload, trace_enabled=False)
+            self.assertEqual(self.counts(), (0, 0))
+
+    def test_reject_invalid_sampling_version_before_insert(self):
+        payload = deepcopy(self.payload)
+        payload["sampling_version"] = True
+        with self.assertRaises(ValueError):
+            self.repository.save_run(payload, trace_enabled=False)
+        self.assertEqual(self.counts(), (0, 0))
+
+    def test_save_rejects_missing_or_unsupported_record_version_before_insert(self):
+        for value in (None, "1", 2):
+            payload = deepcopy(self.payload)
+            if value is None:
+                payload["records"][0].pop("record_format_version")
+            else:
+                payload["records"][0]["record_format_version"] = value
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                self.repository.save_run(payload, trace_enabled=True)
+            self.assertEqual(self.counts(), (0, 0))
+
+    def test_save_rejects_invalid_nested_leaf_types_before_insert(self):
+        changes = (
+            ("state_before", "misses_since_six_star", True),
+            ("state_after", "misses_since_five_or_higher", -1),
+            ("probabilities", "six_star", True),
+            ("probabilities", "four_star", float("nan")),
+            ("outcome", "rarity", True), ("outcome", "character_name", 4),
+            ("outcome", "is_up", 1), ("outcome", "is_limited", None),
+            ("outcome", "five_star_pity_triggered", "False"),
+            ("outcome", "six_star_hard_pity_triggered", 0),
+            ("outcome", "rewards", []),
+            ("outcome", "rewards", {"奖励A": True}),
+        )
+        for section, key, value in changes:
+            payload = deepcopy(self.payload)
+            payload["records"][0]["draw_result"][section][key] = value
+            with self.subTest(section=section, key=key), self.assertRaises(ValueError):
+                self.repository.save_run(payload, trace_enabled=True)
+            self.assertEqual(self.counts(), (0, 0))
+
+    def test_save_rejects_invalid_rule_version_without_inserts(self):
+        for value in (None, True, 2.0, "1.0", ""):
+            payload = deepcopy(self.payload)
+            payload["rule_version"] = value
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                self.repository.save_run(payload, trace_enabled=False)
+            self.assertEqual(self.counts(), (0, 0))
+
+    def test_save_rejects_invalid_trace_types_without_inserts(self):
+        invalid = (
+            ("record_format_version", True), ("record_format_version", None),
+            ("draw_index", True), ("source_index", 0), ("source_index", True),
+            ("source", "old"), ("main_draws_completed", "1"),
+            ("draw_result", []), ("main_state_before", None),
+            ("main_state_after", []), ("bonus_event", 1),
+        )
+        for key, value in invalid:
+            payload = deepcopy(self.payload)
+            payload["records"][0][key] = value
+            with self.subTest(key=key, value=value), self.assertRaises(ValueError):
+                self.repository.save_run(payload, trace_enabled=True)
+            self.assertEqual(self.counts(), (0, 0))
+        for key in ("outcome", "probabilities", "state_before", "state_after"):
+            payload = deepcopy(self.payload)
+            payload["records"][0]["draw_result"][key] = None
+            with self.subTest(nested=key), self.assertRaises(ValueError):
+                self.repository.save_run(payload, trace_enabled=True)
+            self.assertEqual(self.counts(), (0, 0))
+
+    def test_save_rejects_multiple_trial_trace_without_inserts(self):
+        payload = deepcopy(self.payload)
+        payload["trials"] = 2
+        with self.assertRaises(ValueError):
+            self.repository.save_run(payload, trace_enabled=True)
+        self.assertEqual(self.counts(), (0, 0))
+
+    def test_get_run_rejects_invalid_snapshot_and_config_versions(self):
+        run_id = self.repository.save_run(self.payload, trace_enabled=False)
+        for key in ("result_format_version", "sampling_version", "rule_version"):
+            payload = deepcopy(self.payload)
+            payload.pop(key)
+            with closing(sqlite3.connect(self.path)) as connection, connection:
+                connection.execute("UPDATE simulation_runs SET result_json=? WHERE id=?",
+                                   (json.dumps(payload), run_id))
+            with self.subTest(key=key), self.assertRaises(ValueError):
+                self.repository.get_run(run_id)
+        with closing(sqlite3.connect(self.path)) as connection, connection:
+            config = deepcopy(self.payload["pool_config"])
+            config["format_version"] = True
+            connection.execute("UPDATE simulation_runs SET result_json=?, pool_config_json=? WHERE id=?",
+                               (json.dumps(self.payload), json.dumps(config), run_id))
+        with self.assertRaises(ValueError):
+            self.repository.get_run(run_id)
+
+    def test_get_run_validates_records_only_when_requested(self):
+        run_id = self.repository.save_run(self.payload, trace_enabled=True)
+        record = deepcopy(self.payload["records"][0])
+        record["record_format_version"] = True
+        with closing(sqlite3.connect(self.path)) as connection, connection:
+            connection.execute("UPDATE draw_records SET record_json=? WHERE run_id=? AND draw_index=1",
+                               (json.dumps(record), run_id))
+        self.assertIsNotNone(self.repository.get_run(run_id))
+        with self.assertRaises(ValueError):
+            self.repository.get_run(run_id, include_records=True)
 
     def test_non_trace_saves_no_records_even_in_snapshot(self):
         run_id = self.repository.save_run(self.payload, trace_enabled=False)

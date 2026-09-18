@@ -27,6 +27,9 @@ class EditorBoundary:
             TextColumn=lambda: None, NumberColumn=lambda **kwargs: None,
         )
 
+    def caption(self, text):
+        self.caption_text = text
+
     def expander(self, label):
         return nullcontext()
 
@@ -116,6 +119,18 @@ class ConfigurationViewTest(unittest.TestCase):
         self.assertIsInstance(exported, bytes)
         self.assertIn("限定角色甲".encode("utf-8"), exported)
         self.assertEqual(pool_config_from_json(exported), rebuilt)
+
+    def test_editor_rebuild_keeps_imported_optional_roster(self):
+        raw = load_pool_config().to_dict()
+        raw["four_star_characters"] = [{"name": "四星A", "weight": 2}]
+        st = EditorBoundary()
+        config = PoolConfig.from_dict(raw)
+
+        set_pool_config_editor_state(st, config)
+        rebuilt = render_pool_config_editor(st)
+
+        self.assertEqual(rebuilt.four_star_characters, config.four_star_characters)
+        self.assertEqual(PoolConfig.from_dict(json.loads(st.download)), rebuilt)
 
     def test_consecutive_edits_keep_widget_inputs_stable_and_export_latest_values(self):
         st = EditorBoundary()

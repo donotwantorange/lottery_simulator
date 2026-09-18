@@ -93,6 +93,69 @@ class AnalysisTest(unittest.TestCase):
         self.assertAlmostEqual(sum(probabilities), 1.0, places=12)
         self.assertAlmostEqual(probabilities[-1], 0.00029933681818068074)
 
+    def test_waiting_distribution_does_not_advance_five_star_state(self):
+        class NoAdvanceRule(Rule1):
+            def advance(self, *args):
+                raise AssertionError("waiting time must not use old advance")
+
+            def advance_rarity(self, *args):
+                raise AssertionError("waiting time must not invent a rarity")
+
+        values = waiting_time_distribution(NoAdvanceRule(), initial_pity=64)
+        self.assertEqual(len(values), 16)
+        self.assertAlmostEqual(sum(values), 1.0, places=12)
+        self.assertAlmostEqual(values[0], 0.008, places=12)
+        self.assertAlmostEqual(values[1], 0.992 * 0.058, places=12)
+
+    def test_waiting_distribution_matches_independent_direct_product(self):
+        for initial_pity in (0, 64, 65, 78, 79):
+            survival = Fraction(1)
+            expected = []
+            for misses in range(initial_pity, 80):
+                probability = (
+                    Fraction(1) if misses == 79 else
+                    Fraction(8, 1000) + max(0, misses - 64) * Fraction(5, 100)
+                )
+                expected.append(float(survival * probability))
+                survival *= 1 - probability
+            with self.subTest(initial_pity=initial_pity):
+                actual = waiting_time_distribution(self.rule, initial_pity)
+                self.assertEqual(len(actual), 80 - initial_pity)
+                for probability, reference in zip(actual, expected):
+                    self.assertAlmostEqual(probability, reference, places=12)
+                self.assertAlmostEqual(sum(actual), 1.0, places=12)
+
+    def test_theory_uses_explicit_hard_pity_flag(self):
+        class NoHardFlagRule(Rule1):
+            def six_star_hard_pity_active(self, state):
+                return False
+
+        result = expected_pool_results(NoHardFlagRule(), 1, DrawState(79, 0))
+        self.assertEqual(result.rarity_counts["6"], 1.0)
+        self.assertEqual(result.pity_triggers["six_star_hard"], 0.0)
+
+    def test_fixed_pool_has_no_complete_cycle_or_six_star_hard_pity(self):
+        for probability in (0.008, 1.0):
+            rule = Rule1(fixed_six_star_probability=probability, subrules=())
+            with self.subTest(probability=probability):
+                for analysis in (waiting_time_distribution, distribution_stats):
+                    with self.assertRaisesRegex(ValueError, "fixed"):
+                        analysis(rule)
+                result = expected_pool_results(rule, 2, DrawState(79, 0))
+                self.assertAlmostEqual(result.rarity_counts["6"], 2 * probability)
+                self.assertEqual(result.pity_triggers["six_star_hard"], 0.0)
+
+    def test_finite_six_star_expectation_uses_real_rarity_transitions(self):
+        class NoAdvanceRule(Rule1):
+            def advance(self, *args):
+                raise AssertionError("finite expectation must not use old advance")
+
+        self.assertAlmostEqual(expected_six_stars(NoAdvanceRule(), 2, 78),
+                               enumerate_rule_1_expectation(2, 78), places=12)
+
+    def test_old_advance_interface_is_removed(self):
+        self.assertFalse(hasattr(self.rule, "advance"))
+
     def test_rule_1_reference_statistics(self):
         stats = distribution_stats(self.rule)
         self.assertAlmostEqual(stats.mean, 53.89927355371174)
@@ -143,6 +206,7 @@ class AnalysisTest(unittest.TestCase):
         for initial in (
             DrawState(0, 0), DrawState(64, 8), DrawState(65, 9),
             DrawState(78, 8), DrawState(79, 9),
+            *(DrawState(six, five) for six in (0, 64, 65, 78) for five in (0, 9)),
         ):
             for draws in range(1, 6):
                 with self.subTest(initial=initial, draws=draws):

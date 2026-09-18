@@ -7,6 +7,8 @@ from numbers import Real
 from pathlib import Path
 from typing import Any, Mapping
 
+from lottery_simulator.formats import CONFIG_FORMAT_VERSION, require_version
+
 
 def _finite_number(value: Any, field: str) -> float:
     if isinstance(value, bool) or not isinstance(value, Real):
@@ -74,6 +76,19 @@ class SixStarCharacter:
 
 
 @dataclass(frozen=True, slots=True)
+class WeightedCharacter:
+    name: str
+    weight: float = 1.0
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "name", _non_empty_name(self.name, "character name"))
+        weight = _finite_number(self.weight, "weight")
+        if weight <= 0:
+            raise ValueError("weight must be positive")
+        object.__setattr__(self, "weight", weight)
+
+
+@dataclass(frozen=True, slots=True)
 class RewardRule:
     name: str
     four_star: float
@@ -95,6 +110,8 @@ class PoolConfig:
     five_star: FiveStarPolicy
     six_star_characters: tuple[SixStarCharacter, ...]
     rewards: tuple[RewardRule, ...]
+    four_star_characters: tuple[WeightedCharacter, ...] = ()
+    five_star_characters: tuple[WeightedCharacter, ...] = ()
 
     def __post_init__(self) -> None:
         up_share = _probability(self.up_share, "up_share")
@@ -118,6 +135,17 @@ class PoolConfig:
             raise ValueError("at least one UP character is required")
         if up_share < 1.0 and len(ups) == len(self.six_star_characters):
             raise ValueError("up_share below 1 requires a non-UP character")
+        for rarity, characters in (
+            (4, self.four_star_characters),
+            (5, self.five_star_characters),
+        ):
+            if not isinstance(characters, tuple) or not all(
+                isinstance(character, WeightedCharacter) for character in characters
+            ):
+                raise ValueError(f"{rarity}-star characters must be a tuple of characters")
+            names = [character.name for character in characters]
+            if len(names) != len(set(names)):
+                raise ValueError(f"{rarity}-star character names must be unique")
         if not isinstance(self.rewards, tuple) or not all(
             isinstance(reward, RewardRule) for reward in self.rewards
         ):
@@ -130,6 +158,7 @@ class PoolConfig:
     def from_dict(cls, raw: Mapping[str, Any]) -> "PoolConfig":
         if not isinstance(raw, Mapping):
             raise ValueError("pool config must be an object")
+        require_version(raw.get("format_version"), CONFIG_FORMAT_VERSION, "配置格式")
         try:
             up_share = raw["up_share"]
             five_star_raw = raw["five_star"]
@@ -166,6 +195,28 @@ class PoolConfig:
                     f"missing six_star_characters[{index}] field: {error.args[0]}"
                 ) from error
 
+        def parse_weighted_characters(field: str) -> tuple[WeightedCharacter, ...]:
+            characters_raw = raw.get(field, [])
+            if not isinstance(characters_raw, list):
+                raise ValueError(f"{field} must be a list")
+            characters: list[WeightedCharacter] = []
+            for index, character_raw in enumerate(characters_raw):
+                if not isinstance(character_raw, Mapping):
+                    raise ValueError(f"{field}[{index}] must be an object")
+                try:
+                    characters.append(WeightedCharacter(
+                        name=character_raw["name"],
+                        weight=character_raw.get("weight", 1.0),
+                    ))
+                except KeyError as error:
+                    raise ValueError(
+                        f"missing {field}[{index}] field: {error.args[0]}"
+                    ) from error
+            return tuple(characters)
+
+        four_star_characters = parse_weighted_characters("four_star_characters")
+        five_star_characters = parse_weighted_characters("five_star_characters")
+
         if not isinstance(rewards_raw, (list, tuple)):
             raise ValueError("rewards must be a list")
         rewards: list[RewardRule] = []
@@ -183,10 +234,18 @@ class PoolConfig:
                 raise ValueError(
                     f"missing rewards[{index}] field: {error.args[0]}"
                 ) from error
-        return cls(up_share, five_star, tuple(characters), tuple(rewards))
+        return cls(
+            up_share=up_share,
+            five_star=five_star,
+            six_star_characters=tuple(characters),
+            four_star_characters=four_star_characters,
+            five_star_characters=five_star_characters,
+            rewards=tuple(rewards),
+        )
 
     def to_dict(self) -> dict[str, Any]:
         return {
+            "format_version": CONFIG_FORMAT_VERSION,
             "up_share": self.up_share,
             "five_star": {
                 "base_probability": self.five_star.base_probability,
@@ -202,6 +261,14 @@ class PoolConfig:
                 }
                 for character in self.six_star_characters
             ],
+            "four_star_characters": [
+                {"name": character.name, "weight": character.weight}
+                for character in self.four_star_characters
+            ],
+            "five_star_characters": [
+                {"name": character.name, "weight": character.weight}
+                for character in self.five_star_characters
+            ],
             "rewards": [
                 {
                     "name": reward.name,
@@ -213,19 +280,41 @@ class PoolConfig:
             ],
         }
 
-    def six_star_character_probabilities(self) -> dict[str, float]:
+    def character_probabilities(self, rarity: int) -> dict[str, float]:
+        if (
+            isinstance(rarity, bool)
+            or not isinstance(rarity, int)
+            or rarity not in (4, 5, 6)
+        ):
+            raise ValueError("rarity must be 4, 5, or 6")
+        if rarity in (4, 5):
+            characters = (
+                self.four_star_characters if rarity == 4 else self.five_star_characters
+            )
+            if not characters:
+                return {}
+            max_weight = max(character.weight for character in characters)
+            total_weight = math.fsum(
+                character.weight / max_weight for character in characters
+            )
+            return {
+                character.name: (character.weight / max_weight) / total_weight
+                for character in characters
+            }
         ups = tuple(character for character in self.six_star_characters if character.is_up)
         non_ups = tuple(character for character in self.six_star_characters if not character.is_up)
         max_up_weight = max(character.up_weight for character in ups)
-        total_up_weight = sum(character.up_weight / max_up_weight for character in ups)
-        result = {
-            character.name: self.up_share * (character.up_weight / max_up_weight) / total_up_weight
-            for character in ups
+        total_up_weight = math.fsum(
+            character.up_weight / max_up_weight for character in ups
+        )
+        non_up_share = (1.0 - self.up_share) / len(non_ups) if non_ups else 0.0
+        return {
+            character.name: (
+                self.up_share * (character.up_weight / max_up_weight) / total_up_weight
+                if character.is_up else non_up_share
+            )
+            for character in self.six_star_characters
         }
-        if non_ups:
-            share = (1.0 - self.up_share) / len(non_ups)
-            result.update({character.name: share for character in non_ups})
-        return result
 
     def rewards_for(self, rarity: int) -> dict[str, float]:
         field = {4: "four_star", 5: "five_star", 6: "six_star"}[rarity]

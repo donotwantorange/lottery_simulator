@@ -12,9 +12,104 @@ from lottery_simulator.rules.pool_config import (
 
 
 class PoolConfigTest(unittest.TestCase):
+    def test_optional_rosters_round_trip_with_weighted_ordered_probabilities(self):
+        raw = load_pool_config().to_dict()
+        raw["four_star_characters"] = [
+            {"name": "同名角色", "weight": 1},
+            {"name": "四星B", "weight": 3},
+        ]
+        raw["five_star_characters"] = [{"name": "同名角色"}]
+
+        config = PoolConfig.from_dict(raw)
+
+        self.assertEqual(
+            config.character_probabilities(4),
+            {"同名角色": 0.25, "四星B": 0.75},
+        )
+        self.assertEqual(config.character_probabilities(5), {"同名角色": 1.0})
+        self.assertEqual(PoolConfig.from_dict(config.to_dict()), config)
+
+    def test_optional_rosters_default_to_empty_and_keep_configuration_order(self):
+        raw = load_pool_config().to_dict()
+        del raw["four_star_characters"]
+        del raw["five_star_characters"]
+
+        config = PoolConfig.from_dict(raw)
+
+        self.assertEqual(config.character_probabilities(4), {})
+        self.assertEqual(config.character_probabilities(5), {})
+        self.assertEqual(config.to_dict()["four_star_characters"], [])
+        self.assertEqual(config.to_dict()["five_star_characters"], [])
+
+    def test_weighted_rosters_avoid_large_finite_weight_overflow(self):
+        raw = load_pool_config().to_dict()
+        raw["four_star_characters"] = [
+            {"name": "四星A", "weight": 1e308},
+            {"name": "四星B", "weight": 1e308},
+        ]
+
+        probabilities = PoolConfig.from_dict(raw).character_probabilities(4)
+
+        self.assertEqual(list(probabilities), ["四星A", "四星B"])
+        self.assertEqual(probabilities, {"四星A": 0.5, "四星B": 0.5})
+
+    def test_rosters_reject_invalid_names_weights_and_duplicate_names(self):
+        base = load_pool_config().to_dict()
+        cases = {
+            "null roster": lambda raw: raw.update({"four_star_characters": None}),
+            "non-list roster": lambda raw: raw.update({"four_star_characters": {}}),
+            "non-object entry": lambda raw: raw.update({"four_star_characters": ["A"]}),
+            "empty name": lambda raw: raw.update({"four_star_characters": [{"name": " "}]}),
+            "duplicate name": lambda raw: raw.update({"four_star_characters": [
+                {"name": "A"}, {"name": "A"},
+            ]}),
+            "zero weight": lambda raw: raw.update({"four_star_characters": [
+                {"name": "A", "weight": 0},
+            ]}),
+            "negative weight": lambda raw: raw.update({"four_star_characters": [
+                {"name": "A", "weight": -1},
+            ]}),
+            "nan weight": lambda raw: raw.update({"four_star_characters": [
+                {"name": "A", "weight": math.nan},
+            ]}),
+            "infinite weight": lambda raw: raw.update({"four_star_characters": [
+                {"name": "A", "weight": math.inf},
+            ]}),
+            "bool weight": lambda raw: raw.update({"four_star_characters": [
+                {"name": "A", "weight": True},
+            ]}),
+            "overflow weight": lambda raw: raw.update({"four_star_characters": [
+                {"name": "A", "weight": 10 ** 400},
+            ]}),
+        }
+        for description, mutate in cases.items():
+            with self.subTest(description=description):
+                raw = copy.deepcopy(base)
+                mutate(raw)
+                with self.assertRaises(ValueError):
+                    PoolConfig.from_dict(raw)
+
+    def test_pool_config_requires_exact_format_version_and_valid_rarity(self):
+        base = load_pool_config().to_dict()
+        for version in (None, 0, 2, True, "1"):
+            with self.subTest(version=version):
+                raw = copy.deepcopy(base)
+                if version is None:
+                    del raw["format_version"]
+                else:
+                    raw["format_version"] = version
+                with self.assertRaises(ValueError):
+                    PoolConfig.from_dict(raw)
+
+        config = load_pool_config()
+        for rarity in (False, 3, 7, "6", 4.0):
+            with self.subTest(rarity=rarity):
+                with self.assertRaises(ValueError):
+                    config.character_probabilities(rarity)
+
     def test_default_config_has_expected_roster_probabilities_and_rewards(self):
         config = load_pool_config()
-        probabilities = config.six_star_character_probabilities()
+        probabilities = config.character_probabilities(6)
 
         self.assertEqual(len(config.six_star_characters), 9)
         self.assertEqual(sum(c.is_up for c in config.six_star_characters), 1)
@@ -33,18 +128,31 @@ class PoolConfigTest(unittest.TestCase):
             {"is_up": True, "is_limited": True, "up_weight": 3}
         )
         config = PoolConfig.from_dict(raw)
-        probabilities = config.six_star_character_probabilities()
+        probabilities = config.character_probabilities(6)
 
         self.assertAlmostEqual(probabilities["UP-A"], 0.125)
         self.assertAlmostEqual(probabilities["限定-B"], 0.375)
         self.assertAlmostEqual(sum(probabilities.values()), 1.0)
+
+    def test_six_star_probabilities_keep_configuration_order_with_late_up(self):
+        raw = load_pool_config().to_dict()
+        raw["six_star_characters"][4].update(
+            {"is_up": True, "is_limited": True, "up_weight": 3}
+        )
+
+        probabilities = PoolConfig.from_dict(raw).character_probabilities(6)
+
+        self.assertEqual(
+            list(probabilities),
+            [character["name"] for character in raw["six_star_characters"]],
+        )
 
     def test_large_finite_up_weights_preserve_probabilities_and_character_expectations(self):
         raw = load_pool_config().to_dict()
         raw["six_star_characters"][0]["up_weight"] = 1e308
         raw["six_star_characters"][1].update(is_up=True, up_weight=1e308)
         config = PoolConfig.from_dict(raw)
-        probabilities = config.six_star_character_probabilities()
+        probabilities = config.character_probabilities(6)
 
         self.assertAlmostEqual(probabilities["UP-A"], 0.25)
         self.assertAlmostEqual(probabilities["限定-B"], 0.25)

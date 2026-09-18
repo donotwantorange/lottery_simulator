@@ -5,6 +5,7 @@ import sys
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import patch
 
 from lottery_simulator.cli import RULES, main
 from lottery_simulator.rules.rule_1 import Rule1
@@ -31,6 +32,10 @@ class CliTest(unittest.TestCase):
         payload = json.loads(output)
         self.assertAlmostEqual(payload["mean"], 53.89927355371174)
         self.assertEqual(payload["hard_pity"], 80)
+        self.assertEqual(payload["result_format_version"], 1)
+        self.assertEqual(payload["rule_version"], "2.0")
+        self.assertNotIn("sampling_version", payload)
+        self.assertNotIn("rng_algorithm", payload)
         self.assertEqual(len(payload["probability_table"]), 80)
         self.assertEqual(payload["probability_table"][64]["conditional_probability"], 0.008)
         self.assertEqual(payload["probability_table"][65]["conditional_probability"], 0.058)
@@ -44,6 +49,11 @@ class CliTest(unittest.TestCase):
         payload = json.loads(output)
         self.assertEqual(payload["rule"], "rule1")
         self.assertEqual(payload["seed"], 42)
+        self.assertEqual(payload["result_format_version"], 1)
+        self.assertEqual(payload["sampling_version"], 1)
+        self.assertEqual(payload["rng_algorithm"], "python.random.Random")
+        self.assertIsInstance(payload["python_implementation"], str)
+        self.assertIsInstance(payload["python_version"], str)
         self.assertEqual(payload["initial_pity"], 60)
         self.assertNotIn("records", payload)
         self.assertIn("mean_count_error", payload)
@@ -94,24 +104,43 @@ class CliTest(unittest.TestCase):
 
         self.assertEqual(code, 0)
         self.assertIn(
-            "星级  角色  奖励  4/5/6星概率  主池后双保底  来源池前双保底  "
+            "星级  角色  奖励  4/5/6星概率  主池前双保底  主池后双保底  来源池前双保底  "
             "来源池后双保底  五星保底触发  六星硬保底触发",
             output,
         )
         for line in (
-            "1  主池  1  1  1  0.8%  未出  1  4星  —  奖励A=1, 奖励B=0  "
-            "91.2%/8.0%/0.8%  主池后(1,1)  来源池前(0,0)  来源池后(1,1)  否  否",
-            "20  主池  20  20  20  0.8%  六星  0  6星  常驻-F  奖励A=25, 奖励B=10  "
-            "91.2%/8.0%/0.8%  主池后(0,0)  来源池前(19,6)  来源池后(0,0)  否  否",
-            "30  主池  30  30  10  0.8%  未出  10  5星  —  奖励A=5, 奖励B=2  "
-            "0.0%/99.2%/0.8%  主池后(10,0)  来源池前(9,9)  来源池后(10,0)  是  否",
-            "31  赠送  1  30  10  0.8%  未出  10  4星  —  奖励A=1, 奖励B=0  "
-            "91.2%/8.0%/0.8%  主池后(10,0)  来源池前(0,0)  来源池后(1,1)  否  否",
-            "40  赠送  10  30  10  0.8%  未出  10  5星  —  奖励A=5, 奖励B=2  "
-            "0.0%/99.2%/0.8%  主池后(10,0)  来源池前(9,9)  来源池后(10,0)  是  否",
+            "1  主池  1  1  4星  未配置角色名单  奖励A=1, 奖励B=0  "
+            "91.2%/8.0%/0.8%  主池前(0,0)  主池后(1,1)  来源池前(0,0)  来源池后(1,1)  否  否",
+            "20  主池  20  20  6星  常驻-F  奖励A=25, 奖励B=10  "
+            "91.2%/8.0%/0.8%  主池前(19,6)  主池后(0,0)  来源池前(19,6)  来源池后(0,0)  否  否",
+            "30  主池  30  30  5星  未配置角色名单  奖励A=5, 奖励B=2  "
+            "0.0%/99.2%/0.8%  主池前(9,9)  主池后(10,0)  来源池前(9,9)  来源池后(10,0)  是  否",
+            "31  赠送  1  30  4星  未配置角色名单  奖励A=1, 奖励B=0  "
+            "91.2%/8.0%/0.8%  主池前(10,0)  主池后(10,0)  来源池前(0,0)  来源池后(1,1)  否  否",
+            "40  赠送  10  30  5星  未配置角色名单  奖励A=5, 奖励B=2  "
+            "0.0%/99.2%/0.8%  主池前(10,0)  主池后(10,0)  来源池前(9,9)  来源池后(10,0)  是  否",
         ):
             with self.subTest(line=line.split("  ", 1)[0]):
                 self.assertIn(line, output)
+        self.assertIn("四星角色人数：0", output)
+        self.assertIn("五星角色人数：0", output)
+
+    def test_trace_json_uses_nested_record_without_old_keys(self):
+        _, output = self.run_cli("simulate", "--draws", "1", "--seed", "42",
+                                 "--trace", "--format", "json")
+        record = json.loads(output)["records"][0]
+        self.assertEqual(record["record_format_version"], 1)
+        self.assertEqual(record["draw_result"]["outcome"]["rarity"], 4)
+        self.assertNotIn("six_star_character", record)
+        self.assertNotIn("state_after", record)
+
+    def test_cli_trace_has_no_web_draw_cap_without_running_large_trace(self):
+        from lottery_simulator.engine import SimulationCancelled, simulate
+        with self.assertRaises(SimulationCancelled):
+            simulate(Rule1(), 100_001, collect_records=True, cancel_check=lambda: True)
+        with patch("lottery_simulator.cli.simulate", side_effect=SimulationCancelled):
+            with self.assertRaises(SimulationCancelled):
+                self.run_cli("simulate", "--draws", "100001", "--trace")
 
     def test_main_draw_counter_is_in_text_and_json_results(self):
         code, text_output = self.run_cli(
@@ -183,7 +212,9 @@ class CliTest(unittest.TestCase):
         )
         self.assertEqual(code, 0)
         self.assertIn("抽次", output)
-        self.assertIn("保底位置", output)
+        self.assertIn("来源池前双保底", output)
+        self.assertIn("1  主池  1  1  4星", output)
+        self.assertIn("2  主池  2  2  5星", output)
 
     def test_trace_rejects_multiple_trials(self):
         with self.assertRaises(SystemExit):
@@ -297,9 +328,11 @@ class CliTest(unittest.TestCase):
         record = json.loads(output)["records"][0]
         for field in (
             "rarity", "rewards", "five_star_pity_triggered",
-            "six_star_hard_pity_triggered", "source_state_before", "source_state_after",
+            "six_star_hard_pity_triggered",
         ):
-            self.assertIn(field, record)
+            self.assertIn(field, record["draw_result"]["outcome"])
+        self.assertIn("state_before", record["draw_result"])
+        self.assertIn("state_after", record["draw_result"])
 
     def run_module_cli(self, *arguments):
         return subprocess.run(

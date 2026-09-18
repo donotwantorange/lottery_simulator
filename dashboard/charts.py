@@ -36,7 +36,7 @@ def six_star_category_rows(payload: dict, source: str) -> list[dict]:
 
 def character_rows(payload: dict, source: str) -> list[dict]:
     config = PoolConfig.from_dict(payload["pool_config"])
-    probabilities = config.six_star_character_probabilities()
+    probabilities = config.character_probabilities(6)
     simulated = payload["source_summaries"][source]["mean_character_counts"]
     theoretical = _theoretical_values(payload, source, "character_counts")
     six_mean = payload["source_summaries"][source]["mean_rarity_counts"]["6"]

@@ -5,4 +5,4 @@ Requires=docker.service
 [Service]
 Type=oneshot
 WorkingDirectory=/opt/lottery-simulator
-ExecStart=/bin/sh -c '/usr/bin/docker compose exec -T app python3 scripts/backup_db.py /app/data/lottery_v2.sqlite3 /app/backups/lottery-v2-$(date +%%F).sqlite3'
+ExecStart=/bin/sh -c '/usr/bin/docker compose exec -T app python3 scripts/backup_db.py /app/data/lottery_v3.sqlite3 /app/backups/lottery-v3-$(date +%%F).sqlite3'

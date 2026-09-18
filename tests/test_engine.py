@@ -5,13 +5,14 @@ from unittest.mock import patch
 from lottery_simulator.engine import (
     DrawOutcome,
     DrawRecord,
+    DrawResult,
     SimulationCancelled,
     SimulationResult,
     draw_once,
     simulate,
 )
 from lottery_simulator.rules.base import BonusEvent, DrawState, RarityProbabilities
-from lottery_simulator.rules.pool_config import RewardRule
+from lottery_simulator.rules.pool_config import PoolConfig, RewardRule, WeightedCharacter
 from lottery_simulator.rules.rule_1 import Rule1
 
 
@@ -50,23 +51,132 @@ class EngineTest(unittest.TestCase):
     def setUp(self):
         self.rule = Rule1()
 
+    def test_four_star_name_uses_common_result(self):
+        raw = self.rule.config.to_dict()
+        raw["four_star_characters"] = [
+            {"name": "四星A", "weight": 1}, {"name": "四星B", "weight": 3}
+        ]
+        result = draw_once(Rule1(PoolConfig.from_dict(raw)), DrawState(),
+                           SequenceRandom((0.9, 0.2)))
+        self.assertIsInstance(result, DrawResult)
+        self.assertEqual(result.outcome.rarity, 4)
+        self.assertEqual(result.outcome.character_name, "四星A")
+        self.assertEqual(result.state_before, DrawState())
+        self.assertEqual(result.state_after, DrawState(1, 1))
+
+    def test_five_star_named_weight_boundary_rewards_and_flags(self):
+        config = replace(self.rule.config, five_star_characters=(
+            WeightedCharacter("五星A", 1), WeightedCharacter("五星B", 3)))
+        result = draw_once(Rule1(config), DrawState(2, 9), SequenceRandom((0.9, 0.25)))
+        self.assertTrue(hasattr(result, "outcome"))
+        self.assertEqual(result.outcome, DrawOutcome(
+            5, "五星B", False, False, {"奖励A": 5.0, "奖励B": 2.0}, True, False))
+        self.assertEqual(result.state_before, DrawState(2, 9))
+        self.assertEqual(result.state_after, DrawState(3, 0))
+
+    def test_role_roll_consumption_for_empty_singleton_and_weighted_lists(self):
+        for rarity_roll, field, rarity in ((0.9, "four_star_characters", 4),
+                                         (0.05, "five_star_characters", 5)):
+            for characters in ((), (WeightedCharacter("A"),),
+                               (WeightedCharacter("A"), WeightedCharacter("B"))):
+                with self.subTest(rarity=rarity, characters=characters):
+                    config = replace(self.rule.config, **{field: characters})
+                    rng = SequenceRandom((rarity_roll, 0.2, 0.7))
+                    result = draw_once(Rule1(config), DrawState(), rng)
+                    self.assertEqual(rng.random(), 0.7 if characters else 0.2)
+                    self.assertTrue(hasattr(result, "outcome"))
+                    self.assertEqual(result.outcome.rarity, rarity)
+                    self.assertEqual(result.outcome.character_name, "A" if characters else None)
+
+    def test_six_star_empty_character_distribution_is_rejected(self):
+        class EmptyCharactersRule(AlwaysSixRule):
+            def character_probabilities(self, rarity, state):
+                return {}
+        with self.assertRaises(ValueError):
+            draw_once(EmptyCharactersRule(), DrawState(), SequenceRandom((0.0, 0.0)))
+
+    def test_six_star_hard_pity_uses_rule_interface_not_counter(self):
+        class NoHardPityFlagRule(Rule1):
+            def six_star_hard_pity_active(self, state):
+                return False
+        result = draw_once(NoHardPityFlagRule(), DrawState(79), SequenceRandom((0.9, 0.0)))
+        self.assertTrue(hasattr(result, "outcome"))
+        self.assertFalse(result.outcome.six_star_hard_pity_triggered)
+        bonus = Rule1(fixed_six_star_probability=0.008, subrules=())
+        result = draw_once(bonus, DrawState(79), SequenceRandom((0.9,)))
+        self.assertFalse(result.outcome.six_star_hard_pity_triggered)
+        self.assertEqual(result.state_after, DrawState(80, 1))
+
+    def test_trace_defaults_off_and_rejects_none_or_multiple_trials(self):
+        self.assertEqual(simulate(self.rule, 1, seed=42).records, ())
+        for value in (None, 0, "yes"):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                simulate(self.rule, 1, seed=42, collect_records=value)
+        with self.assertRaises(ValueError):
+            simulate(self.rule, 1, trials=2, seed=42, collect_records=True)
+
+    def test_trace_does_not_change_outcome(self):
+        config = replace(self.rule.config,
+                         four_star_characters=(WeightedCharacter("UP-A"),),
+                         five_star_characters=(WeightedCharacter("五星A"),))
+        rule = Rule1(config)
+        without = simulate(rule, 30, trials=1, seed=42, collect_records=False)
+        with_trace = simulate(rule, 30, trials=1, seed=42, collect_records=True)
+        self.assertEqual(without, replace(with_trace, records=()))
+
+    def test_disabled_trace_never_constructs_main_or_bonus_records(self):
+        with patch("lottery_simulator.engine.DrawRecord", side_effect=AssertionError):
+            result = simulate(self.rule, 1, initial_pity=29, seed=42, collect_records=False)
+            self.assertEqual(result.bonus_draws, 10)
+            self.assertEqual(result.records, ())
+            with self.assertRaises(AssertionError):
+                simulate(self.rule, 1, initial_pity=29, seed=42, collect_records=True)
+
+    def test_named_lower_stars_do_not_pollute_six_star_statistics(self):
+        config = replace(self.rule.config,
+                         four_star_characters=(WeightedCharacter("UP-A"),),
+                         five_star_characters=(WeightedCharacter("独立五星"),))
+        with patch("lottery_simulator.engine.random.Random",
+                   return_value=SequenceRandom((0.9, 0.0, 0.05, 0.0))):
+            result = simulate(Rule1(config, subrules=()), 2, seed=42, collect_records=True)
+        self.assertTrue(hasattr(result.records[0], "draw_result"))
+        self.assertEqual([r.draw_result.outcome.character_name for r in result.records],
+                         ["UP-A", "独立五星"])
+        for source in ("main", "total"):
+            summary = result.source_summaries[source]
+            self.assertEqual(sum(summary["mean_character_counts"].values()), 0)
+            self.assertEqual(sum(summary["mean_six_star_categories"].values()), 0)
+
     def test_fixed_seed_is_reproducible(self):
         first = simulate(self.rule, draws=100, trials=1, seed=42)
         second = simulate(self.rule, draws=100, trials=1, seed=42)
         self.assertEqual(first, second)
 
     def test_draw_once_returns_rarity_character_rewards_and_state(self):
-        outcome, state_after, probabilities = draw_once(
+        result = draw_once(
             Rule1(), DrawState(9, 9), SequenceRandom((0.0, 0.0))
         )
+        outcome, state_after, probabilities = result.outcome, result.state_after, result.probabilities
         self.assertEqual(outcome.rarity, 6)
-        self.assertEqual(outcome.six_star_character, "UP-A")
+        self.assertEqual(outcome.character_name, "UP-A")
         self.assertTrue(outcome.is_up)
         self.assertTrue(outcome.is_limited)
         self.assertTrue(outcome.five_star_pity_triggered)
         self.assertEqual(outcome.rewards, {"奖励A": 25.0, "奖励B": 10.0})
         self.assertAlmostEqual(sum(astuple(probabilities)), 1.0)
         self.assertEqual(state_after, DrawState(0, 0))
+
+    def test_six_star_metadata_boundaries_and_role_roll(self):
+        for roll, name, up, limited in ((0.0, "UP-A", True, True),
+                                         (0.5, "限定-B", False, True),
+                                         (0.625, "常驻-D", False, False)):
+            with self.subTest(name=name):
+                rng = SequenceRandom((0.0, roll, 0.9))
+                result = draw_once(self.rule, DrawState(), rng)
+                self.assertEqual(result.outcome.character_name, name)
+                self.assertEqual(result.outcome.is_up, up)
+                self.assertEqual(result.outcome.is_limited, limited)
+                self.assertEqual(rng.random(), 0.9)
 
     def test_draw_once_returns_four_and_five_star_outcomes(self):
         cases = (
@@ -83,26 +193,27 @@ class EngineTest(unittest.TestCase):
         )
         for roll, expected_outcome, expected_state in cases:
             with self.subTest(rarity=expected_outcome.rarity):
-                outcome, state_after, probabilities = draw_once(
+                result = draw_once(
                     Rule1(), DrawState(), SequenceRandom((roll,))
                 )
+                outcome, state_after, probabilities = result.outcome, result.state_after, result.probabilities
                 self.assertEqual(outcome, expected_outcome)
                 self.assertEqual(state_after, expected_state)
                 self.assertAlmostEqual(sum(astuple(probabilities)), 1.0)
 
     def test_draw_once_marks_six_star_hard_pity(self):
-        outcome, state_after, _ = draw_once(
+        result = draw_once(
             Rule1(), DrawState(79, 0), SequenceRandom((0.99, 0.0))
         )
-
+        outcome, state_after = result.outcome, result.state_after
         self.assertEqual(outcome.rarity, 6)
         self.assertTrue(outcome.six_star_hard_pity_triggered)
         self.assertEqual(state_after, DrawState(0, 0))
 
-    def test_single_trial_keeps_trace(self):
-        result = simulate(self.rule, draws=3, trials=1, seed=42)
+    def test_single_trial_explicitly_keeps_trace(self):
+        result = simulate(self.rule, draws=3, trials=1, seed=42, collect_records=True)
         self.assertEqual(len(result.records), 3)
-        self.assertEqual(result.records[0].pity_position, 1)
+        self.assertEqual(result.records[0].draw_result.state_before, DrawState())
         self.assertEqual(sum(result.count_distribution.values()), 1)
 
     def test_large_single_trial_can_explicitly_skip_record_collection(self):
@@ -325,6 +436,7 @@ class EngineTest(unittest.TestCase):
         self.assertEqual(
             result.pool_config,
             {
+                "format_version": 1,
                 "up_share": 0.5,
                 "five_star": {
                     "base_probability": 0.08,
@@ -342,6 +454,8 @@ class EngineTest(unittest.TestCase):
                     {"name": "常驻-H", "is_up": False, "is_limited": False, "up_weight": None},
                     {"name": "常驻-I", "is_up": False, "is_limited": False, "up_weight": None},
                 ],
+                "four_star_characters": [],
+                "five_star_characters": [],
                 "rewards": [
                     {"name": "奖励A", "four_star": 1.0, "five_star": 5.0, "six_star": 25.0},
                     {"name": "奖励B", "four_star": 0.0, "five_star": 2.0, "six_star": 10.0},
@@ -362,8 +476,8 @@ class EngineTest(unittest.TestCase):
             result = simulate(rule, draws=3, trials=2, seed=42, collect_records=False)
         for trial_rolls, expected in ((rolls[:4], [4, 5, 6]), (rolls[4:], [6, 5, 4])):
             with patch("lottery_simulator.engine.random.Random", return_value=SequenceRandom(trial_rolls)):
-                trace = simulate(rule, draws=3, trials=1, seed=42)
-            self.assertEqual([record.rarity for record in trace.records], expected)
+                trace = simulate(rule, draws=3, trials=1, seed=42, collect_records=True)
+            self.assertEqual([record.draw_result.outcome.rarity for record in trace.records], expected)
 
         for source in ("main", "total"):
             distribution = result.source_distributions[source]
@@ -377,27 +491,33 @@ class EngineTest(unittest.TestCase):
             self.assertAlmostEqual(float(next(iter(reward_buckets))), 0.6)
 
     def test_trace_inserts_structured_bonus_records_after_main_draw_thirty(self):
-        result = simulate(Rule1(), draws=30, trials=1, seed=42)
+        result = simulate(Rule1(), draws=30, trials=1, seed=42, collect_records=True)
 
         self.assertEqual(
             [record.source for record in result.records[29:]],
             ["main"] + ["bonus"] * 10,
         )
-        main_state_at_thirty = result.records[29].state_after
+        main_state_at_thirty = result.records[29].main_state_after
         for record in result.records:
-            self.assertIn(record.rarity, (4, 5, 6))
-            self.assertEqual(record.is_six_star, record.rarity == 6)
-            self.assertEqual(record.six_star_character is not None, record.rarity == 6)
-            self.assertIsInstance(record.is_up, bool)
-            self.assertIsInstance(record.is_limited, bool)
-            self.assertEqual(set(record.rewards), {"奖励A", "奖励B"})
-            self.assertAlmostEqual(sum(astuple(record.rarity_probabilities)), 1.0)
-            self.assertIsInstance(record.five_star_pity_triggered, bool)
-            self.assertIsInstance(record.six_star_hard_pity_triggered, bool)
+            outcome = record.draw_result.outcome
+            self.assertIn(outcome.rarity, (4, 5, 6))
+            self.assertEqual(outcome.character_name is not None, outcome.rarity == 6)
+            self.assertIsInstance(outcome.is_up, bool)
+            self.assertIsInstance(outcome.is_limited, bool)
+            self.assertEqual(set(outcome.rewards), {"奖励A", "奖励B"})
+            self.assertAlmostEqual(sum(astuple(record.draw_result.probabilities)), 1.0)
+            self.assertIsInstance(outcome.five_star_pity_triggered, bool)
+            self.assertIsInstance(outcome.six_star_hard_pity_triggered, bool)
+            self.assertEqual(record.record_format_version, 1)
+            self.assertFalse(hasattr(record, "trial_index"))
+            if record.source == "main":
+                self.assertEqual(record.draw_result.state_before, record.main_state_before)
+                self.assertEqual(record.draw_result.state_after, record.main_state_after)
         for record in result.records[30:]:
-            self.assertEqual(record.state_after, main_state_at_thirty)
-            self.assertIsNotNone(record.source_state_before)
-            self.assertIsNotNone(record.source_state_after)
+            self.assertEqual(record.main_state_before, main_state_at_thirty)
+            self.assertEqual(record.main_state_after, main_state_at_thirty)
+            self.assertIsNotNone(record.draw_result.state_before)
+            self.assertIsNotNone(record.draw_result.state_after)
 
     def test_multiple_trials_only_keep_aggregates(self):
         result = simulate(self.rule, draws=100, trials=50, seed=42)
@@ -406,15 +526,15 @@ class EngineTest(unittest.TestCase):
         self.assertEqual(result.theoretical_expected_count > 0, True)
 
     def test_initial_pity_is_applied(self):
-        result = simulate(self.rule, draws=1, trials=1, seed=1, initial_pity=79)
-        self.assertTrue(result.records[0].is_six_star)
-        self.assertEqual(result.records[0].rarity, 6)
-        self.assertEqual(result.records[0].probability, 1.0)
-        self.assertTrue(result.records[0].six_star_hard_pity_triggered)
-        self.assertEqual(result.records[0].state_after.misses_since_six_star, 0)
+        result = simulate(self.rule, draws=1, trials=1, seed=1, initial_pity=79, collect_records=True)
+        single = result.records[0].draw_result
+        self.assertEqual(single.outcome.rarity, 6)
+        self.assertEqual(single.probabilities.six_star, 1.0)
+        self.assertTrue(single.outcome.six_star_hard_pity_triggered)
+        self.assertEqual(single.state_after.misses_since_six_star, 0)
 
     def test_bonus_records_are_inserted_without_changing_main_pity(self):
-        result = simulate(NoEarlySixRule(), draws=31, trials=1, seed=42)
+        result = simulate(NoEarlySixRule(), draws=31, trials=1, seed=42, collect_records=True)
 
         bonus_records = [record for record in result.records if record.source == "bonus"]
         main_records = [record for record in result.records if record.source == "main"]
@@ -428,13 +548,13 @@ class EngineTest(unittest.TestCase):
             {"first_thirty_bonus"},
         )
         self.assertEqual(
-            {record.state_after.misses_since_six_star for record in bonus_records},
+            {record.main_state_after.misses_since_six_star for record in bonus_records},
             {30},
         )
-        self.assertEqual(main_records[-1].pity_position, 31)
+        self.assertEqual(main_records[-1].draw_result.state_before.misses_since_six_star + 1, 31)
 
     def test_initial_pity_thirty_means_bonus_was_already_claimed(self):
-        result = simulate(self.rule, draws=1, trials=1, seed=42, initial_pity=30)
+        result = simulate(self.rule, draws=1, trials=1, seed=42, initial_pity=30, collect_records=True)
 
         self.assertEqual(result.bonus_draws, 0)
         self.assertEqual(result.total_draws, 1)
@@ -458,16 +578,16 @@ class EngineTest(unittest.TestCase):
         self.assertEqual(result.count_distribution, {2: 3})
 
     def test_bonus_six_star_does_not_reset_main_pity(self):
-        result = simulate(GuaranteedBonusRule(), draws=2, trials=1, seed=42)
+        result = simulate(GuaranteedBonusRule(), draws=2, trials=1, seed=42, collect_records=True)
 
         bonus_records = [record for record in result.records if record.source == "bonus"]
         main_records = [record for record in result.records if record.source == "main"]
-        self.assertTrue(all(record.is_six_star for record in bonus_records))
+        self.assertTrue(all(record.draw_result.outcome.rarity == 6 for record in bonus_records))
         self.assertEqual(
-            {record.state_after.misses_since_six_star for record in bonus_records},
+            {record.main_state_after.misses_since_six_star for record in bonus_records},
             {1},
         )
-        self.assertEqual(main_records[1].pity_position, 2)
+        self.assertEqual(main_records[1].draw_result.state_before.misses_since_six_star + 1, 2)
 
     def test_bonus_records_do_not_change_main_double_pity(self):
         result = simulate(
@@ -479,16 +599,16 @@ class EngineTest(unittest.TestCase):
 
         self.assertEqual(len(bonus), 10)
         self.assertEqual(result.initial_five_star_pity, 8)
-        self.assertEqual(len({record.state_after for record in bonus}), 1)
-        self.assertEqual(bonus[0].source_state_before, DrawState())
+        self.assertEqual(len({record.main_state_after for record in bonus}), 1)
+        self.assertEqual(bonus[0].draw_result.state_before, DrawState())
         self.assertTrue(any(
-            record.source_state_after.misses_since_five_or_higher == 0
+            record.draw_result.state_after.misses_since_five_or_higher == 0
             for record in bonus
         ))
 
     def test_main_draw_counter_advances_only_for_main_draws(self):
         result = simulate(
-            NoEarlySixRule(), draws=2, trials=1, seed=42, initial_pity=29
+            NoEarlySixRule(), draws=2, trials=1, seed=42, initial_pity=29, collect_records=True
         )
 
         self.assertEqual(result.initial_main_draws, 29)
@@ -508,9 +628,10 @@ class EngineTest(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     simulate(self.rule, draws=draws, trials=trials)
 
-    def test_existing_positional_result_constructors_remain_compatible(self):
+    def test_new_record_constructor_nests_draw_and_main_state(self):
+        single = draw_once(self.rule, DrawState(), SequenceRandom((0.9,)))
         record = DrawRecord(
-            1, "main", 1, None, 1, 0.008, False, DrawState(1)
+            1, 1, "main", 1, None, 1, single, DrawState(), DrawState(1, 1)
         )
         result = SimulationResult(
             "rule1", 3, 1, 42, 2, 0, 3, {0: 1}, 0.0, 0.0, 0.0,
@@ -520,9 +641,11 @@ class EngineTest(unittest.TestCase):
         self.assertEqual(record.source, "main")
         self.assertEqual(record.source_index, 1)
         self.assertEqual(record.main_draws_completed, 1)
-        self.assertEqual(record.pity_position, 1)
-        self.assertEqual(record.probability, 0.008)
-        self.assertEqual(record.state_after, DrawState(1))
+        self.assertIs(record.draw_result, single)
+        self.assertEqual(record.draw_result.probabilities.six_star, 0.008)
+        self.assertEqual(record.draw_result.state_after, DrawState(1, 1))
+        self.assertEqual(record.main_state_before, DrawState())
+        self.assertEqual(record.main_state_after, DrawState(1, 1))
         self.assertEqual(result.bonus_draws, 0)
         self.assertEqual(result.total_draws, 3)
         self.assertEqual(result.count_distribution, {0: 1})

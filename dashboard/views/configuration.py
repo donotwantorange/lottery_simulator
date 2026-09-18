@@ -1,10 +1,16 @@
 """Pool configuration editing helpers for the Streamlit dashboard."""
 
 import json
+from collections.abc import Sequence
 
 import pandas as pd
 
-from lottery_simulator.rules.pool_config import PoolConfig, load_pool_config
+from lottery_simulator.rules.pool_config import (
+    PoolConfig,
+    WeightedCharacter,
+    load_pool_config,
+)
+from lottery_simulator.formats import CONFIG_FORMAT_VERSION
 
 
 _REWARD_COLUMNS = ("奖励名称", "四星", "五星", "六星")
@@ -40,8 +46,11 @@ def editor_rows_to_config(
     five_star_hard_pity,
     character_rows,
     reward_rows,
+    four_star_characters: Sequence[WeightedCharacter] = (),
+    five_star_characters: Sequence[WeightedCharacter] = (),
 ):
     return PoolConfig.from_dict({
+        "format_version": CONFIG_FORMAT_VERSION,
         "up_share": up_share,
         "five_star": {
             "base_probability": five_star_probability,
@@ -56,6 +65,14 @@ def editor_rows_to_config(
                 "up_weight": row["UP权重"] if row["是否UP"] else None,
             }
             for row in character_rows
+        ],
+        "four_star_characters": [
+            {"name": character.name, "weight": character.weight}
+            for character in four_star_characters
+        ],
+        "five_star_characters": [
+            {"name": character.name, "weight": character.weight}
+            for character in five_star_characters
         ],
         "rewards": [
             {
@@ -89,6 +106,8 @@ def set_pool_config_editor_state(st, config: PoolConfig) -> None:
         pool_five_star_pity_enabled=config.five_star.pity_enabled,
         pool_five_star_hard_pity=config.five_star.hard_pity,
         pool_character_rows=characters,
+        pool_four_star_characters=config.four_star_characters,
+        pool_five_star_characters=config.five_star_characters,
         pool_reward_rows=rewards,
     )
     st.session_state.pop("pool_character_editor", None)
@@ -129,6 +148,12 @@ def render_pool_config_editor(st) -> PoolConfig:
         five_star_hard_pity = st.number_input(
             "五星硬保底", min_value=1, step=1, key="pool_five_star_hard_pity"
         )
+        st.caption(
+            "四星名单：{}人；五星名单：{}人（通过JSON编辑）".format(
+                len(st.session_state["pool_four_star_characters"]),
+                len(st.session_state["pool_five_star_characters"]),
+            )
+        )
         character_rows = st.data_editor(
             st.session_state["pool_character_rows"], num_rows="dynamic",
             key="pool_character_editor",
@@ -166,6 +191,8 @@ def render_pool_config_editor(st) -> PoolConfig:
                 five_star_hard_pity=five_star_hard_pity,
                 character_rows=character_rows,
                 reward_rows=reward_rows,
+                four_star_characters=st.session_state["pool_four_star_characters"],
+                five_star_characters=st.session_state["pool_five_star_characters"],
             )
         except (KeyError, TypeError, ValueError):
             raise ValueError("奖池配置无效：请检查概率、角色、权重、奖励和保底设置") from None

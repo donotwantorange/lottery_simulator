@@ -81,6 +81,10 @@ def render_history(st, repository):
     selected = st.multiselect("选择历史运行", ids, key="selected_history_ids",
                               on_change=limit_selection)
     pending_delete = st.session_state.get("pending_delete_id")
+    if pending_delete and repository.get_run(pending_delete) is None:
+        st.session_state.pop("pending_delete_id", None)
+        st.warning("待删除的历史记录已不存在")
+        pending_delete = None
     if pending_delete:
         st.warning(f"确认删除历史 {pending_delete}？逐抽记录也会删除，无法撤销。")
         if st.button("确认删除"):

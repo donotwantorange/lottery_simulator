@@ -52,6 +52,7 @@ class ChartDataTest(unittest.TestCase):
         self.payload = {
             "trials": 10,
             "pool_config": {
+                "format_version": 1,
                 "up_share": 0.5,
                 "five_star": {
                     "base_probability": 0.08,
@@ -59,6 +60,8 @@ class ChartDataTest(unittest.TestCase):
                     "hard_pity": 10,
                 },
                 "six_star_characters": characters,
+                "four_star_characters": [],
+                "five_star_characters": [],
                 "rewards": [
                     {"name": "奖励A", "four_star": 1.0, "five_star": 5.0,
                      "six_star": 25.0},

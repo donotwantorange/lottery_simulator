@@ -2,6 +2,8 @@
 
 本文只覆盖本机开发和使用。服务器 Docker/Caddy/OIDC、域名、证书和公网验收请看[部署与运维手册](deployment.md)，两套流程不要混用。
 
+想逐项了解侧栏参数、六个结果标签页、图表和历史记录，请看[网页页面详细说明](dashboard-guide.md)。本文负责安装、启动及数据管理；页面说明负责界面操作和统计口径。
+
 ## 1. 唯一主目录与虚拟环境
 
 本项目本地使用的唯一入口是：
@@ -78,10 +80,11 @@ APP_ENVIRONMENT=development APP_AUTH_MODE=disabled STREAMLIT_SERVER_ADDRESS=127.
 
 多个 UP 按权重归一化。例如权重 1 和 3、`up_share: 0.5` 时，两名 UP 在全部六星中的占比分别是 12.5% 和 37.5%；非 UP 角色平分剩余 50%。`up_share` 是概率值，不能填写 `50` 表示 50%。
 
-下面是可直接复制的完整小配置（2 个 UP、1 个非 UP、2 个奖励）：
+下面是可直接复制的完整小配置（配置格式 `1`；四星名单权重 `1:3`，五星名单仅 1 人；六星含 1 个 UP 和 2 个非 UP）。它包含 `PoolConfig.from_dict` 所需的全部字段：
 
 ```json
 {
+  "format_version": 1,
   "up_share": 0.5,
   "five_star": {
     "base_probability": 0.08,
@@ -89,9 +92,16 @@ APP_ENVIRONMENT=development APP_AUTH_MODE=disabled STREAMLIT_SERVER_ADDRESS=127.
     "hard_pity": 10
   },
   "six_star_characters": [
-    {"name": "UP角色A", "is_up": true, "is_limited": true, "up_weight": 1},
-    {"name": "UP角色B", "is_up": true, "is_limited": true, "up_weight": 3},
-    {"name": "非UP角色", "is_up": false, "is_limited": false, "up_weight": null}
+    {"name": "UP角色", "is_up": true, "is_limited": true, "up_weight": 1},
+    {"name": "限定角色", "is_up": false, "is_limited": true, "up_weight": null},
+    {"name": "常驻角色", "is_up": false, "is_limited": false, "up_weight": null}
+  ],
+  "four_star_characters": [
+    {"name": "四星角色A", "weight": 1},
+    {"name": "四星角色B", "weight": 3}
+  ],
+  "five_star_characters": [
+    {"name": "五星角色", "weight": 1}
   ],
   "rewards": [
     {"name": "奖励A", "four_star": 1, "five_star": 5, "six_star": 25},
@@ -100,10 +110,11 @@ APP_ENVIRONMENT=development APP_AUTH_MODE=disabled STREAMLIT_SERVER_ADDRESS=127.
 }
 ```
 
-建议复制默认文件到新文件后用文本编辑器修改，不要直接改默认配置。以下复制命令仅在 `configs/my-pool.json` 不存在时使用，已有文件应另选名字，避免覆盖：
+用文本编辑器修改 JSON 后，先用下面的绝对解释器验证格式和名单，再运行模拟；不要把模拟 JSON 输出重定向回同一个配置文件。建议复制默认文件到新文件后修改，不要直接改默认配置。以下复制命令仅在 `configs/my-pool.json` 不存在时使用，已有文件应另选名字，避免覆盖：
 
 ```bash
 cp configs/rule1_default.json configs/my-pool.json
+/home/qykj/202607/test/lottery_simulator/.venv/bin/python -c 'import json; from lottery_simulator.rules.pool_config import PoolConfig; PoolConfig.from_dict(json.load(open("configs/my-pool.json", encoding="utf-8")))'
 .venv/bin/python -m lottery_simulator simulate --draws 30 --trials 1000 --seed 42 --pool-config configs/my-pool.json
 ```
 
@@ -150,9 +161,22 @@ cp configs/rule1_default.json configs/my-pool.json
 
 `--format text|json` 只改变输出形式，不改变概率或随机过程，默认 `text`。使用 `>` 重定向 JSON 前要确认目标文件名；Shell 会先覆盖目标，尤其不要把 `--pool-config my-pool.json > my-pool.json` 写成同名，否则配置会先被清空。
 
-`--trace` 只允许 `--trials 1`。CLI 不会自动写网页历史库；CLI 的非 Trace JSON 不含 `records`，只有网页 Trace 运行才保存逐抽记录。网页的其他运行保存汇总和参数快照，Trace 还保存逐抽记录。固定种子、相同配置和相同规则版本可复现结果；改动任一项都不要把输出当作同一实验。
+`--trace` 默认关闭且只允许 `--trials 1`。CLI 不会自动写网页历史库；CLI 的非 Trace JSON 不含 `records`，网页 Trace 运行才保存逐抽记录。固定随机种子、相同规则/配置/参数、相同 `sampling_version`、Python 实现及版本才是可复现条件；改动任一项都不要把输出当作同一实验。网页 Trace 的主池抽数上限为 100,000，CLI 和核心不增加该上限。
 
-网页结果有六个区域：“总览”“六星构成”“具体角色”“附赠奖励”“保底统计”“Trace”，并可在“主池”（`main`）、“赠送”（`bonus`）、“总计”（`total`）间切换。结果中：
+网页结果有六个区域：“总览”“六星构成”“具体角色”“附赠奖励”“保底统计”“Trace”，并可在“主池”（`main`）、“赠送”（`bonus`）、“总计”（`total`）间切换。批量角色图和角色统计只包含六星；四星、五星名单只在单抽结果和 Trace 中显示。结果中：
+
+Trace JSON 的唯一单抽结构是 `draw_result` 嵌套对象：`draw_result.outcome` 保存星级、角色、UP/限定、奖励和保底触发，`draw_result.probabilities` 保存四/五/六星概率，`draw_result.state_before`/`state_after` 保存来源池双保底状态；记录本身的 `main_state_before`/`main_state_after` 独立保存主池状态。网页将其只读展开为中文列：
+
+| 中文列 | JSON 路径 |
+|---|---|
+| 总体抽取序号、来源、来源内序号、主池累计抽数、赠送事件 | `draw_index`、`source`、`source_index`、`main_draws_completed`、`bonus_event` |
+| 星级、角色、是否UP、是否限定 | `draw_result.outcome.rarity`、`character_name`、`is_up`、`is_limited` |
+| 四星概率、五星概率、六星概率 | `draw_result.probabilities.four_star/five_star/six_star` |
+| 来源池抽前/后未出六星、未出五星及以上 | `draw_result.state_before/state_after.*` |
+| 主池抽前/后未出六星、未出五星及以上 | `main_state_before/main_state_after.*` |
+| 五星保底触发、六星硬保底触发、各奖励数量 | `draw_result.outcome.*` |
+
+概率在原始 JSON 中保持 `0..1`，网页表格按百分比显示；没有角色名单时显示“未配置角色名单”，不会伪装成未出六星。Trace 仍只支持单轮，默认 `False`；历史和下载保留上述嵌套 JSON，不用展开后的中文表格替代原始记录。
 
 - “每轮均值”是每轮平均数量，不是 1000 轮的总数量；总计等于主池和赠送合并后的来源。
 - 理论期望按有限保底状态动态规划计算；完整周期理论平均间隔是长期周期量，可能与有限模拟中已完成周期的平均间隔不同。
@@ -173,14 +197,14 @@ cp configs/rule1_default.json configs/my-pool.json
 未设置环境变量时，数据位于主目录：
 
 ```text
-data/history_v2.sqlite3
-data/jobs/
+data/history_v3.sqlite3
+data/jobs_v3/
 ```
 
-可用绝对路径自定义：`LOTTERY_DATA_DIR` 控制数据目录（数据库默认是其中的 `history_v2.sqlite3` 和 `jobs/`），`LOTTERY_DB_PATH` 单独覆盖数据库路径。例如：
+可用绝对路径自定义：`LOTTERY_DATA_DIR` 控制数据目录（数据库默认是其中的 `history_v3.sqlite3` 和 `jobs_v3/`），`LOTTERY_DB_PATH` 单独覆盖数据库路径。例如：
 
 ```bash
-LOTTERY_DATA_DIR=/srv/lottery-data LOTTERY_DB_PATH=/srv/lottery-data/history_v2.sqlite3 \
+LOTTERY_DATA_DIR=/srv/lottery-data LOTTERY_DB_PATH=/srv/lottery-data/history_v3.sqlite3 \
 APP_ENVIRONMENT=development APP_AUTH_MODE=disabled STREAMLIT_SERVER_ADDRESS=127.0.0.1 \
 .venv/bin/python -m streamlit run dashboard/app.py --server.address=127.0.0.1
 ```
@@ -191,10 +215,10 @@ SQLite 在线备份使用项目已有脚本，源库必须存在：
 
 ```bash
 mkdir -p backups
-.venv/bin/python scripts/backup_db.py data/history_v2.sqlite3 backups/history-v2-$(date +%F-%H%M%S).sqlite3
+.venv/bin/python scripts/backup_db.py data/history_v3.sqlite3 backups/history-v3-$(date +%F-%H%M%S).sqlite3
 ```
 
-看到 `Backup integrity_check: ok` 且命令退出码为 0 才算成功。脚本从只读源库执行 SQLite online backup，并检查目标完整性；不要在网页或 worker 运行时直接复制、删除或盲删数据库，也不要用备份脚本把源和目标写成同一路径。备份只包含 SQLite 历史，不包含 `data/jobs/`、OIDC secrets 或证书；重要备份还应复制到受控的其他存储。
+看到 `Backup integrity_check: ok` 且命令退出码为 0 才算成功。脚本从只读源库执行 SQLite online backup，并检查目标完整性；不要在网页或 worker 运行时直接复制、删除或盲删数据库，也不要用备份脚本把源和目标写成同一路径。备份只包含 SQLite 历史，不包含 `data/jobs_v3/`、OIDC secrets 或证书；重要备份还应复制到受控的其他存储。
 
 ### 本地恢复历史
 
@@ -203,9 +227,9 @@ mkdir -p backups
 先保护当前库，再恢复选定备份（下面备份日期仅为示例，必须替换成实际文件名；每一步失败即停止）：
 
 ```bash
-.venv/bin/python scripts/backup_db.py data/history_v2.sqlite3 backups/pre-restore-$(date +%F-%H%M%S).sqlite3
-.venv/bin/python scripts/backup_db.py backups/history-v2-2026-09-16-120000.sqlite3 data/history_v2.sqlite3
-.venv/bin/python -c "import sqlite3; c=sqlite3.connect('file:data/history_v2.sqlite3?mode=ro', uri=True); print(c.execute('PRAGMA integrity_check').fetchall()); c.close()"
+.venv/bin/python scripts/backup_db.py data/history_v3.sqlite3 backups/pre-restore-v3-$(date +%F-%H%M%S).sqlite3
+.venv/bin/python scripts/backup_db.py backups/history-v3-2026-09-16-120000.sqlite3 data/history_v3.sqlite3
+.venv/bin/python -c "import sqlite3; c=sqlite3.connect('file:data/history_v3.sqlite3?mode=ro', uri=True); print(c.execute('PRAGMA integrity_check').fetchall()); c.close()"
 ```
 
 备份/恢复须退出码 0、输出完整性检查成功；最后查询须为 `[('ok',)]`，才重新按第 2 节启动。检查历史并运行一次小模拟确认可写。当前库不存在时可以跳过第一步，不能跳过现有库的保护备份。使用自定义数据路径时，替换全部源/目标路径。恢复仅恢复备份时的数据库历史，不恢复未完成任务；结果 JSON 不是 SQLite 备份，不能拿来替换数据库。

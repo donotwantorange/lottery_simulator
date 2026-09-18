@@ -4,6 +4,8 @@ import random
 import secrets
 
 from lottery_simulator.analysis import expected_simulation_results
+from lottery_simulator.formats import RECORD_FORMAT_VERSION
+from lottery_simulator.probability import sample_distribution
 from lottery_simulator.rules.base import (
     DrawState,
     LotteryRule,
@@ -15,7 +17,7 @@ from lottery_simulator.rules.base import (
 @dataclass(frozen=True, slots=True)
 class DrawOutcome:
     rarity: int
-    six_star_character: str | None
+    character_name: str | None
     is_up: bool
     is_limited: bool
     rewards: dict[str, float]
@@ -24,30 +26,24 @@ class DrawOutcome:
 
 
 @dataclass(frozen=True, slots=True)
+class DrawResult:
+    outcome: DrawOutcome
+    probabilities: RarityProbabilities
+    state_before: DrawState
+    state_after: DrawState
+
+
+@dataclass(frozen=True, slots=True)
 class DrawRecord:
+    record_format_version: int
     draw_index: int
     source: str
     source_index: int
     bonus_event: str | None
-    pity_position: int
-    probability: float
-    is_six_star: bool
-    state_after: DrawState
-    main_draws_completed: int | None = None
-    source_state_before: DrawState | None = None
-    source_state_after: DrawState | None = None
-    rarity: int | None = None
-    six_star_character: str | None = None
-    is_up: bool = False
-    is_limited: bool = False
-    rewards: dict[str, float] = field(default_factory=dict)
-    rarity_probabilities: RarityProbabilities | None = None
-    five_star_pity_triggered: bool = False
-    six_star_hard_pity_triggered: bool = False
-
-    def __post_init__(self) -> None:
-        if self.main_draws_completed is None:
-            object.__setattr__(self, "main_draws_completed", self.pity_position)
+    main_draws_completed: int
+    draw_result: DrawResult
+    main_state_before: DrawState
+    main_state_after: DrawState
 
 
 @dataclass(frozen=True, slots=True)
@@ -108,7 +104,7 @@ def _empty_counts(config):
 
 def _add_outcome(counts: dict, outcome: DrawOutcome) -> None:
     counts["rarities"][str(outcome.rarity)] += 1
-    if outcome.six_star_character is not None:
+    if outcome.rarity == 6:
         category = (
             "up"
             if outcome.is_up
@@ -117,7 +113,7 @@ def _add_outcome(counts: dict, outcome: DrawOutcome) -> None:
             else "standard"
         )
         counts["categories"][category] += 1
-        counts["characters"][outcome.six_star_character] += 1
+        counts["characters"][outcome.character_name] += 1
     counts["pity_triggers"]["five_star"] += int(
         outcome.five_star_pity_triggered
     )
@@ -136,29 +132,31 @@ def draw_once(
     rule: LotteryRule,
     state: DrawState,
     rng: random.Random,
-) -> tuple[DrawOutcome, DrawState, RarityProbabilities]:
+) -> DrawResult:
     probabilities = rule.rarity_probabilities(state)
-    roll = rng.random()
-    rarity = (
-        6
-        if roll < probabilities.six_star
-        else 5
-        if roll < probabilities.six_star + probabilities.five_star
-        else 4
+    rarity = sample_distribution(
+        ((6, probabilities.six_star), (5, probabilities.five_star),
+         (4, probabilities.four_star)),
+        rng.random(),
     )
-    character = rule.pick_six_star(rng.random()) if rarity == 6 else None
+    characters = rule.character_probabilities(rarity, state)
+    if rarity == 6 and not characters:
+        raise ValueError("six-star character distribution must not be empty")
+    name = sample_distribution(tuple(characters.items()), rng.random()) if characters else None
+    character = (
+        next(c for c in rule.config.six_star_characters if c.name == name)
+        if rarity == 6 else None
+    )
     outcome = DrawOutcome(
         rarity=rarity,
-        six_star_character=character.name if character else None,
+        character_name=name,
         is_up=bool(character and character.is_up),
         is_limited=bool(character and character.is_limited),
         rewards=rule.config.rewards_for(rarity),
         five_star_pity_triggered=rule.five_star_pity_active(state),
-        six_star_hard_pity_triggered=(
-            state.misses_since_six_star == rule.max_pity - 1
-        ),
+        six_star_hard_pity_triggered=rule.six_star_hard_pity_active(state),
     )
-    return outcome, rule.advance_rarity(state, rarity), probabilities
+    return DrawResult(outcome, probabilities, state, rule.advance_rarity(state, rarity))
 
 
 def _positive_integer(value: int, name: str) -> None:
@@ -175,16 +173,14 @@ def simulate(
     progress_callback: ProgressCallback | None = None,
     cancel_check: CancelCheck | None = None,
     progress_interval: int = 1000,
-    collect_records: bool | None = None,
+    collect_records: bool = False,
     initial_five_star_pity: int = 0,
 ) -> SimulationResult:
     _positive_integer(draws, "draws")
     _positive_integer(trials, "trials")
     _positive_integer(progress_interval, "progress_interval")
-    if collect_records is None:
-        collect_records = trials == 1
-    elif not isinstance(collect_records, bool):
-        raise ValueError("collect_records must be a boolean or None")
+    if not isinstance(collect_records, bool):
+        raise ValueError("collect_records must be a boolean")
     elif collect_records and trials != 1:
         raise ValueError("collect_records requires trials=1")
     initial_state = DrawState(initial_pity, initial_five_star_pity)
@@ -230,11 +226,9 @@ def simulate(
             if cancel_check is not None and cancel_check():
                 raise SimulationCancelled("simulation cancelled")
             actual_draw_index += 1
-            source_state_before = state
-            outcome, state_after, probabilities = draw_once(rule, state, rng)
-            probability = probabilities.six_star
-            if not 0.0 <= probability <= 1.0:
-                raise ValueError("rule returned a probability outside [0, 1]")
+            draw_result = draw_once(rule, state, rng)
+            outcome = draw_result.outcome
+            state_after = draw_result.state_after
             pity_position = state.misses_since_six_star + 1
             is_six_star = outcome.rarity == 6
             _add_outcome(trial_counts["main"], outcome)
@@ -245,27 +239,15 @@ def simulate(
             if collect_records:
                 records.append(
                     DrawRecord(
+                        record_format_version=RECORD_FORMAT_VERSION,
                         draw_index=actual_draw_index,
-                        pity_position=pity_position,
-                        probability=probability,
-                        is_six_star=is_six_star,
-                        state_after=state_after,
                         source="main",
                         source_index=main_draw_index,
                         bonus_event=None,
                         main_draws_completed=main_draws_completed + 1,
-                        source_state_before=source_state_before,
-                        source_state_after=state_after,
-                        rarity=outcome.rarity,
-                        six_star_character=outcome.six_star_character,
-                        is_up=outcome.is_up,
-                        is_limited=outcome.is_limited,
-                        rewards=outcome.rewards,
-                        rarity_probabilities=probabilities,
-                        five_star_pity_triggered=outcome.five_star_pity_triggered,
-                        six_star_hard_pity_triggered=(
-                            outcome.six_star_hard_pity_triggered
-                        ),
+                        draw_result=draw_result,
+                        main_state_before=state,
+                        main_state_after=state_after,
                     )
                 )
             state = state_after
@@ -282,39 +264,25 @@ def simulate(
                 for bonus_draw_index in range(1, event.draws + 1):
                     actual_draw_index += 1
                     trial_bonus_draws += 1
-                    source_state_before = temporary_state
-                    outcome, temporary_state, probabilities = draw_once(
+                    draw_result = draw_once(
                         temporary_rule, temporary_state, rng
                     )
-                    bonus_is_six_star = outcome.rarity == 6
+                    outcome = draw_result.outcome
+                    temporary_state = draw_result.state_after
                     _add_outcome(trial_counts["bonus"], outcome)
                     _add_outcome(trial_counts["total"], outcome)
                     if collect_records:
                         records.append(
                             DrawRecord(
+                                record_format_version=RECORD_FORMAT_VERSION,
                                 draw_index=actual_draw_index,
-                                pity_position=state.misses_since_six_star,
-                                probability=probabilities.six_star,
-                                is_six_star=bonus_is_six_star,
-                                state_after=state,
                                 source="bonus",
                                 source_index=bonus_draw_index,
                                 bonus_event=event.name,
                                 main_draws_completed=main_draws_completed,
-                                source_state_before=source_state_before,
-                                source_state_after=temporary_state,
-                                rarity=outcome.rarity,
-                                six_star_character=outcome.six_star_character,
-                                is_up=outcome.is_up,
-                                is_limited=outcome.is_limited,
-                                rewards=outcome.rewards,
-                                rarity_probabilities=probabilities,
-                                five_star_pity_triggered=(
-                                    outcome.five_star_pity_triggered
-                                ),
-                                six_star_hard_pity_triggered=(
-                                    outcome.six_star_hard_pity_triggered
-                                ),
+                                draw_result=draw_result,
+                                main_state_before=state,
+                                main_state_after=state,
                             )
                         )
         if trial == 0:

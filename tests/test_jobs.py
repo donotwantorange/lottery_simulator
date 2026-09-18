@@ -1,5 +1,6 @@
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing
+from copy import deepcopy
 from dataclasses import replace
 import fcntl
 import json
@@ -19,9 +20,11 @@ from uuid import uuid4
 from dashboard.jobs import JobAlreadyRunning, JobManager, validate_parameters_for_active_rule
 from dashboard.models import JobState, RunParameters, read_json, result_payload, write_json
 from dashboard.repository import HistoryRepository
+from dashboard.views.configuration import render_pool_config_editor, set_pool_config_editor_state
 from lottery_simulator.engine import simulate
-from lottery_simulator.rules.pool_config import load_pool_config
+from lottery_simulator.rules.pool_config import PoolConfig, load_pool_config
 from lottery_simulator.rules.rule_1 import Rule1
+from tests.test_configuration_view import EditorBoundary
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -141,6 +144,147 @@ class JobManagerTest(unittest.TestCase):
         self.assertEqual(self.manager.cancel(state.job_id).status, "completed")
         self.assertEqual(self.counts(), (1, 12))
 
+    def test_edited_optional_rosters_bonus_trace_and_v3_history_round_trip(self):
+        raw = load_pool_config().to_dict()
+        raw["four_star_characters"] = [
+            {"name": "四星甲", "weight": 1},
+            {"name": "四星乙", "weight": 3},
+        ]
+        raw["five_star_characters"] = [{"name": "五星甲"}]
+        imported = PoolConfig.from_dict(raw)
+        editor = EditorBoundary()
+        set_pool_config_editor_state(editor, imported)
+        characters = deepcopy(editor.session_state["pool_character_rows"])
+        rewards = deepcopy(editor.session_state["pool_reward_rows"])
+        editor.session_state["pool_up_share"] = 0.6
+        characters[0].update({"角色名称": "集成UP", "UP权重": 2})
+        rewards[0]["六星"] = 30
+        editor.edited_rows = {
+            "pool_character_editor": characters,
+            "pool_reward_editor": rewards,
+        }
+
+        edited = render_pool_config_editor(editor)
+        self.assertEqual(edited.four_star_characters, imported.four_star_characters)
+        self.assertEqual(edited.five_star_characters, imported.five_star_characters)
+        self.assertEqual(edited.up_share, 0.6)
+        self.assertEqual(edited.six_star_characters[0].name, "集成UP")
+        self.assertEqual(edited.rewards[0].six_star, 30)
+
+        parameters = RunParameters(
+            "rule1", 1, 1, 29, 42, True, pool_config=edited.to_dict()
+        )
+        first_state = self.manager.start(parameters, synchronous=True)
+        first = self.manager.get_result(first_state.job_id)
+        records = first["records"]
+
+        self.assertEqual(first_state.status, "completed")
+        self.assertEqual(first["seed"], 42)
+        self.assertEqual((first["initial_main_draws"], first["final_main_draws"]), (29, 30))
+        self.assertEqual(
+            (first["pool_config"]["format_version"], first["result_format_version"],
+             first["sampling_version"]),
+            (1, 1, 1),
+        )
+        self.assertEqual(first["pool_config"], edited.to_dict())
+        self.assertEqual(len(records), 11)
+        self.assertEqual([record["source"] for record in records], ["main"] + ["bonus"] * 10)
+        self.assertEqual({record["main_draws_completed"] for record in records}, {30})
+        self.assertEqual({record["record_format_version"] for record in records}, {1})
+        main_state = records[0]["main_state_after"]
+        for record in records[1:]:
+            self.assertEqual(record["main_state_before"], main_state)
+            self.assertEqual(record["main_state_after"], main_state)
+
+        names_by_rarity = {
+            4: {character.name for character in edited.four_star_characters},
+            5: {character.name for character in edited.five_star_characters},
+            6: {character.name for character in edited.six_star_characters},
+        }
+        for record in records:
+            outcome = record["draw_result"]["outcome"]
+            self.assertIn(outcome["character_name"], names_by_rarity[outcome["rarity"]])
+
+        runs = self.repository.list_runs({}, 10, 0)
+        self.assertEqual(len(runs), 1)
+        first_run_id = runs[0]["id"]
+        stored = self.repository.get_run(first_run_id, include_records=True)
+        self.assertEqual(stored["schema_version"], 3)
+        self.assertEqual(stored["pool_config"], edited.to_dict())
+        self.assertEqual(stored["records"], records)
+        with closing(sqlite3.connect(self.database)) as connection:
+            self.assertEqual(connection.execute("PRAGMA user_version").fetchone()[0], 3)
+
+        second_state = self.manager.start(parameters, synchronous=True)
+        second = self.manager.get_result(second_state.job_id)
+        self.assertEqual(second_state.status, "completed")
+        self.assertIsNone(second_state.persistence_error)
+        self.assertEqual(second["records"], records)
+        runs = self.repository.list_runs({}, 10, 0)
+        self.assertEqual(len(runs), 2)
+        second_run_ids = {run["id"] for run in runs} - {first_run_id}
+        self.assertEqual(len(second_run_ids), 1)
+        second_stored = self.repository.get_run(second_run_ids.pop(), include_records=True)
+        self.assertEqual(second_stored["records"], records)
+
+    def test_get_result_rejects_missing_or_mismatched_versions(self):
+        state = self.manager.start(self.parameters, synchronous=True)
+        job_dir = self.root / state.job_id
+        original = read_json(job_dir / "result.json")
+        self.assertIsNotNone(self.manager.get_result(state.job_id))
+
+        for field, value in (("result_format_version", None), ("sampling_version", 2)):
+            with self.subTest(field=field):
+                invalid = dict(original)
+                if value is None:
+                    invalid.pop(field)
+                else:
+                    invalid[field] = value
+                write_json(job_dir / "result.json", invalid)
+                self.assertIsNone(self.manager.get_result(state.job_id))
+
+    def test_invalid_state_version_is_skipped_and_cannot_drive_kill(self):
+        state, job_dir = self.prepare_job("running", os.getpid())
+        raw = read_json(job_dir / "state.json")
+        raw.pop("job_format_version", None)
+        write_json(job_dir / "state.json", raw)
+
+        with (patch("dashboard.jobs.os.kill", side_effect=AssertionError("unsafe signal")),
+              self.assertLogs("dashboard.jobs", level="WARNING")):
+            self.manager.reconcile_after_restart()
+
+        self.assertIsNone(self.manager.get(state.job_id))
+        self.assertFalse((job_dir / "cancel.request").exists())
+        following = self.manager.start(self.parameters, synchronous=True)
+        self.assertEqual(following.status, "completed")
+
+    def test_worker_rejects_unversioned_parameters_before_running(self):
+        state, job_dir = self.prepare_job()
+        raw = read_json(job_dir / "parameters.json")
+        raw.pop("job_format_version", None)
+        write_json(job_dir / "parameters.json", raw)
+        written_statuses = []
+
+        def record_write(path, value):
+            if Path(path).name == "state.json":
+                written_statuses.append(value.get("status"))
+            write_json(path, value)
+
+        with (patch("dashboard.worker.write_json", side_effect=record_write),
+              patch("dashboard.worker.simulate") as simulate_mock,
+              self.assertLogs("dashboard.worker", level="ERROR")):
+            from dashboard.worker import run
+            run(job_dir, self.database)
+
+        simulate_mock.assert_not_called()
+        self.assertEqual(written_statuses, ["failed"])
+        self.assertNotIn("running", written_statuses)
+        failed = self.manager.get(state.job_id)
+        self.assertEqual(failed.status, "failed")
+        self.assertIsNone(failed.result_path)
+        self.assertFalse((job_dir / "result.json").exists())
+        self.assertEqual(self.counts(), (0, 0))
+
     def test_progress_and_cancel_leave_no_result_or_history(self):
         parameters = replace(self.parameters, draws=10_000, trials=10_000, trace=False)
         state = self.manager.start(parameters)
@@ -179,6 +323,11 @@ class JobManagerTest(unittest.TestCase):
     def test_synchronous_start_rejects_invalid_and_already_active_jobs(self):
         with self.assertRaises(ValueError):
             self.manager.start(replace(self.parameters, draws=0), synchronous=True)
+        for field in ("job_format_version", "sampling_version"):
+            with self.subTest(field=field), self.assertRaisesRegex(ValueError, "版本不支持"):
+                self.manager.start(
+                    replace(self.parameters, **{field: 2}), synchronous=True
+                )
         self.assertEqual(list(self.root.glob("*/state.json")), [])
         state, _ = self.prepare_job()
         with self.assertRaises(JobAlreadyRunning):
@@ -434,7 +583,10 @@ assert result.pool_config == config.to_dict()
         self.assertFalse(self.root.exists())
 
     def test_restart_crash_window_keeps_committed_history_once_when_state_is_active(self):
-        payload = result_payload(simulate(Rule1(), 2, seed=42, initial_pity=29), Rule1(), 0.1)
+        payload = result_payload(
+            simulate(Rule1(), 2, seed=42, initial_pity=29, collect_records=True),
+            Rule1(), 0.1,
+        )
         run_id = self.repository.save_run(payload, trace_enabled=True)
         state, _ = self.prepare_job("running")
 

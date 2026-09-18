@@ -1,5 +1,8 @@
 import json
 import unittest
+from copy import deepcopy
+
+import streamlit
 
 from dashboard.models import result_payload
 from dashboard.views.simulation import render_result
@@ -8,11 +11,26 @@ from lottery_simulator.rules.rule_1 import Rule1
 
 
 class _Context:
+    def __init__(self, owner=None, label=None):
+        self.owner = owner
+        self.label = label
+
     def __enter__(self):
+        if self.owner is not None:
+            self.previous_label = self.owner.active_expander
+            self.owner.active_expander = self.label
         return self
 
     def __exit__(self, *unused):
+        if self.owner is not None:
+            self.owner.active_expander = self.previous_label
         return False
+
+
+class _ColumnConfig:
+    @staticmethod
+    def NumberColumn(**kwargs):
+        return kwargs
 
 
 class RecordingStreamlit:
@@ -21,11 +39,15 @@ class RecordingStreamlit:
         self.metrics = []
         self.charts = []
         self.dataframes = []
+        self.dataframe_kwargs = []
         self.labels = []
         self.downloads = []
         self.writes = []
+        self.write_contexts = []
+        self.active_expander = None
         self.source = source
         self.reward_name = reward_name
+        self.column_config = _ColumnConfig
 
     def columns(self, count):
         return [self] * count
@@ -49,11 +71,12 @@ class RecordingStreamlit:
     def expander(self, label):
         self.labels.append(label)
         self.events.append(("expander", label))
-        return _Context()
+        return _Context(self, label)
 
     def dataframe(self, data, **kwargs):
         self.events.append(("dataframe", None))
         self.dataframes.append(data)
+        self.dataframe_kwargs.append(kwargs)
 
     def tabs(self, labels):
         self.labels.extend(labels)
@@ -72,6 +95,7 @@ class RecordingStreamlit:
 
     def write(self, value):
         self.writes.append(value)
+        self.write_contexts.append((self.active_expander, value))
 
     def info(self, label):
         self.labels.append(label)
@@ -86,7 +110,7 @@ class SimulationResultViewTest(unittest.TestCase):
     def setUp(self):
         rule = Rule1()
         self.payload = result_payload(
-            simulate(rule, 2, seed=42, initial_pity=29), rule, 0.25
+            simulate(rule, 2, seed=42, initial_pity=29, collect_records=True), rule, 0.25
         )
         self.payload["备注"] = "六星"
 
@@ -146,13 +170,20 @@ class SimulationResultViewTest(unittest.TestCase):
             ["五星保底", "六星硬保底"],
         )
 
-        trace_table = next(table for table in st.dataframes if table is self.payload["records"])
-        self.assertEqual(trace_table, self.payload["records"])
-        self.assertTrue({
-            "rarity", "six_star_character", "rewards", "source_state_before",
-            "source_state_after", "five_star_pity_triggered",
-            "six_star_hard_pity_triggered",
-        }.issubset(trace_table[0]))
+        trace_table = next(table for table in st.dataframes if table and "总体抽取序号" in table[0])
+        self.assertEqual(trace_table[0]["总体抽取序号"], 1)
+        self.assertEqual(trace_table[0]["来源"], "主池")
+        self.assertEqual(trace_table[0]["星级"], 4)
+        self.assertEqual(trace_table[0]["角色"], "未配置角色名单")
+        self.assertEqual(trace_table[0]["六星概率"], 0.008)
+        trace_kwargs = next(
+            kwargs for table, kwargs in zip(st.dataframes, st.dataframe_kwargs)
+            if table is trace_table
+        )
+        self.assertEqual(
+            trace_kwargs["column_config"]["六星概率"],
+            {"format": "percent"},
+        )
         label, download = st.downloads[0]
         self.assertEqual(label, "下载结果 JSON")
         self.assertEqual(download["file_name"], "simulation-result.json")
@@ -278,6 +309,54 @@ class SimulationResultViewTest(unittest.TestCase):
 
         self.assertNotIn(self.payload["records"], st.dataframes)
         self.assertIn("本次运行未保存逐抽记录", st.labels)
+
+    def test_current_and_saved_results_share_trace_and_folded_run_metadata(self):
+        self.payload.update(
+            id=9, sampling_version=1, rng_algorithm="python.random.Random",
+            python_implementation="CPython", python_version="3.12.3",
+        )
+        before = deepcopy(self.payload)
+        trace_tables = []
+        for saved in (False, True):
+            with self.subTest(saved_snapshot=saved):
+                st = RecordingStreamlit()
+                render_result(st, self.payload, trace_enabled=True, saved_snapshot=saved)
+                trace_tables.append(self.table_with_column(st, "总体抽取序号"))
+                self.assertIn(("运行信息", {
+                    "sampling_version": 1, "rng_algorithm": "python.random.Random",
+                    "python_implementation": "CPython", "python_version": "3.12.3",
+                }), st.write_contexts)
+                downloaded = json.loads(st.downloads[0][1]["data"].decode("utf-8"))
+                self.assertEqual(downloaded, before)
+                self.assertIn("draw_result", downloaded["records"][0])
+                self.assertEqual(self.payload, before)
+        self.assertEqual(trace_tables[0], trace_tables[1])
+        self.assertEqual(trace_tables[1][0]["六星概率"], 0.008)
+
+    def test_renderer_uses_real_number_column_percent_for_raw_probability_boundaries(self):
+        records = []
+        for index, probability in enumerate((0.0, 0.008, 1.0), start=1):
+            record = deepcopy(self.payload["records"][0])
+            record["draw_index"] = index
+            record["draw_result"]["probabilities"] = {
+                "four_star": 1.0 - probability, "five_star": 0.0, "six_star": probability,
+            }
+            records.append(record)
+        self.payload["records"] = records
+        before = deepcopy(self.payload)
+        st = RecordingStreamlit()
+        st.column_config = streamlit.column_config
+
+        render_result(st, self.payload, trace_enabled=True)
+
+        table = self.table_with_column(st, "总体抽取序号")
+        self.assertEqual([row["六星概率"] for row in table], [0.0, 0.008, 1.0])
+        kwargs = next(kwargs for data, kwargs in zip(st.dataframes, st.dataframe_kwargs)
+                      if data is table)
+        for name in ("四星概率", "五星概率", "六星概率"):
+            self.assertEqual(kwargs["column_config"][name]["type_config"]["format"], "percent")
+        self.assertEqual(self.payload, before)
+        self.assertEqual(json.loads(st.downloads[0][1]["data"].decode("utf-8")), before)
 
 
 if __name__ == "__main__":

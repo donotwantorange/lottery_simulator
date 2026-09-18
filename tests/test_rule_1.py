@@ -2,7 +2,7 @@ from dataclasses import replace
 import unittest
 
 from lottery_simulator.rules.base import DrawState, RarityProbabilities
-from lottery_simulator.rules.pool_config import load_pool_config
+from lottery_simulator.rules.pool_config import WeightedCharacter, load_pool_config
 from lottery_simulator.rules.rule_1 import Rule1
 
 
@@ -27,12 +27,12 @@ class Rule1Test(unittest.TestCase):
 
     def test_six_star_resets_state(self):
         self.assertEqual(
-            self.rule.advance(DrawState(64), True), DrawState(0)
+            self.rule.advance_rarity(DrawState(64, 8), 6), DrawState(0, 0)
         )
 
-    def test_miss_advances_state(self):
+    def test_four_star_advances_both_counters(self):
         self.assertEqual(
-            self.rule.advance(DrawState(63), False), DrawState(64)
+            self.rule.advance_rarity(DrawState(63, 8), 4), DrawState(64, 9)
         )
 
     def test_invalid_states_are_rejected(self):
@@ -43,7 +43,7 @@ class Rule1Test(unittest.TestCase):
 
     def test_missing_guaranteed_pull_is_rejected(self):
         with self.assertRaises(ValueError):
-            self.rule.advance(DrawState(79), False)
+            self.rule.advance_rarity(DrawState(79), 4)
 
     def test_rule_version_identifies_current_behavior(self):
         self.assertEqual(self.rule.version, "2.0")
@@ -68,6 +68,95 @@ class Rule1Test(unittest.TestCase):
         self.assertEqual(rule.advance_rarity(DrawState(4, 3), 4), DrawState(5, 4))
         self.assertEqual(rule.advance_rarity(DrawState(4, 3), 5), DrawState(5, 0))
         self.assertEqual(rule.advance_rarity(DrawState(4, 3), 6), DrawState(0, 0))
+
+    def test_five_star_pity_cannot_return_four_star(self):
+        with self.assertRaises(ValueError):
+            self.rule.advance_rarity(DrawState(0, 9), 4)
+
+    def test_six_star_hard_pity_cannot_return_lower_rarities(self):
+        for rarity in (4, 5):
+            with self.subTest(rarity=rarity):
+                with self.assertRaises(ValueError):
+                    self.rule.advance_rarity(DrawState(79, 0), rarity)
+        self.assertEqual(self.rule.advance_rarity(DrawState(79, 9), 6), DrawState())
+
+    def test_advance_rarity_rejects_invalid_rarities(self):
+        for rarity in (True, False, 3, 7, 4.0, "6", None):
+            with self.subTest(rarity=rarity):
+                with self.assertRaises(ValueError):
+                    self.rule.advance_rarity(DrawState(), rarity)
+
+    def test_advance_rarity_rejects_zero_probability_outside_pity(self):
+        config = self.rule.config
+        no_fives = Rule1(replace(
+            config, five_star=replace(config.five_star, base_probability=0.0),
+        ), subrules=())
+        no_sixes = Rule1(fixed_six_star_probability=0.0, subrules=())
+        for rule, rarity in ((no_fives, 5), (no_sixes, 6)):
+            with self.subTest(rarity=rarity):
+                with self.assertRaises(ValueError):
+                    rule.advance_rarity(DrawState(), rarity)
+
+    def test_explicit_six_star_hard_pity_uses_pool_kind_not_probability(self):
+        fixed = Rule1(fixed_six_star_probability=1.0, subrules=())
+        for misses in (0, 78, 79):
+            with self.subTest(misses=misses):
+                self.assertEqual(
+                    self.rule.six_star_hard_pity_active(DrawState(misses)),
+                    misses == 79,
+                )
+                self.assertFalse(fixed.six_star_hard_pity_active(DrawState(misses)))
+
+    def test_character_probabilities_preserve_config_order_and_weights(self):
+        config = replace(
+            self.rule.config,
+            four_star_characters=(WeightedCharacter("B", 3), WeightedCharacter("A")),
+            five_star_characters=(WeightedCharacter("A"),),
+        )
+        rule = Rule1(config)
+        for state in (DrawState(), DrawState(79, 9)):
+            with self.subTest(state=state):
+                fours = rule.character_probabilities(4, state)
+                self.assertEqual(list(fours.items()), [("B", 0.75), ("A", 0.25)])
+                self.assertEqual(rule.character_probabilities(5, state), {"A": 1.0})
+                self.assertAlmostEqual(rule.character_probabilities(6, state)["UP-A"], 0.5)
+        for rarity in (4, 5):
+            self.assertEqual(self.rule.character_probabilities(rarity, DrawState()), {})
+        with self.assertRaises(ValueError):
+            rule.character_probabilities(3, DrawState())
+
+    def test_all_state_interfaces_reject_invalid_counts(self):
+        calls = (
+            self.rule.probability, self.rule.rarity_probabilities,
+            self.rule.five_star_pity_active, self.rule.six_star_hard_pity_active,
+            lambda state: self.rule.character_probabilities(4, state),
+            lambda state: self.rule.advance_rarity(state, 6),
+        )
+        for state in (DrawState(True, 0), DrawState(0, False),
+                      DrawState(0.5, 0), DrawState(0, 1.0)):
+            for call in calls:
+                with self.subTest(state=state, call=call):
+                    with self.assertRaises(TypeError):
+                        call(state)
+        for state in (DrawState(-1, 0), DrawState(80, 0),
+                      DrawState(0, -1), DrawState(0, 10)):
+            for call in calls:
+                with self.subTest(state=state, call=call):
+                    with self.assertRaises(ValueError):
+                        call(state)
+
+    def test_four_star_remainder_only_clamps_rounding_error(self):
+        class ControlledSixRate(Rule1):
+            def probability(self, state):
+                self._validate(state)
+                return self.six_rate
+
+        rule = ControlledSixRate(subrules=())
+        rule.six_rate = 0.92 + 5e-13
+        self.assertEqual(rule.rarity_probabilities(DrawState()).four_star, 0.0)
+        rule.six_rate = 0.92 + 2e-12
+        with self.assertRaises(ValueError):
+            rule.rarity_probabilities(DrawState())
 
     def test_disabled_five_star_pity_requires_zero_state_and_keeps_base_rate(self):
         config = load_pool_config()

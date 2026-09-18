@@ -3,11 +3,18 @@ from __future__ import annotations
 from contextlib import closing
 from datetime import datetime, timezone
 import json
+import math
 from pathlib import Path
 import shutil
 import sqlite3
 from tempfile import TemporaryDirectory, mkdtemp
 from uuid import uuid4
+
+from lottery_simulator.formats import (
+    CONFIG_FORMAT_VERSION, DATABASE_SCHEMA_VERSION, RECORD_FORMAT_VERSION,
+    RESULT_FORMAT_VERSION, SAMPLING_VERSION, require_version,
+)
+from lottery_simulator.rules.pool_config import PoolConfig
 
 
 _SCHEMA = """
@@ -24,7 +31,7 @@ CREATE TABLE simulation_runs (
     trace_enabled INTEGER NOT NULL CHECK (trace_enabled IN (0, 1)),
     pool_config_json TEXT NOT NULL,
     result_json TEXT NOT NULL,
-    schema_version INTEGER NOT NULL CHECK (schema_version = 2)
+    schema_version INTEGER NOT NULL CHECK (schema_version = 3)
 );
 CREATE TABLE draw_records (
     run_id TEXT NOT NULL REFERENCES simulation_runs(id) ON DELETE CASCADE,
@@ -32,7 +39,7 @@ CREATE TABLE draw_records (
     record_json TEXT NOT NULL,
     PRIMARY KEY (run_id, draw_index)
 );
-PRAGMA user_version = 2;
+PRAGMA user_version = 3;
 """
 
 _FILTERS = {
@@ -43,6 +50,79 @@ _FILTERS = {
 }
 
 _COMPONENT_SUFFIXES = ("", "-journal", "-wal", "-shm")
+
+
+def _integer(value, label, minimum=0):
+    if type(value) is not int or value < minimum:
+        raise ValueError(f"{label} must be an integer >= {minimum}")
+
+
+def _object(value, label):
+    if not isinstance(value, dict):
+        raise ValueError(f"{label} must be an object")
+    return value
+
+
+def _state(value):
+    state = _object(value, "state")
+    for key in ("misses_since_six_star", "misses_since_five_or_higher"):
+        _integer(state.get(key), key)
+
+
+def _number(value, label):
+    try:
+        valid = (not isinstance(value, bool) and isinstance(value, (int, float))
+                 and math.isfinite(value) and value >= 0)
+    except OverflowError:
+        valid = False
+    if not valid:
+        raise ValueError(f"{label} must be a finite non-negative number")
+
+
+def _validate_record(value):
+    record = _object(value, "record")
+    require_version(record.get("record_format_version"), RECORD_FORMAT_VERSION, "记录")
+    for key in ("draw_index", "source_index"):
+        _integer(record.get(key), key, 1)
+    _integer(record.get("main_draws_completed"), "main_draws_completed")
+    if record.get("source") not in ("main", "bonus"):
+        raise ValueError("source must be main or bonus")
+    if "bonus_event" not in record or (record["bonus_event"] is not None
+                                        and not isinstance(record["bonus_event"], str)):
+        raise ValueError("bonus_event must be a string or None")
+    for key in ("main_state_before", "main_state_after"):
+        _state(record.get(key))
+    draw_result = _object(record.get("draw_result"), "draw_result")
+    for key in ("state_before", "state_after"):
+        _state(draw_result.get(key))
+    probabilities = _object(draw_result.get("probabilities"), "probabilities")
+    for key in ("four_star", "five_star", "six_star"):
+        _number(probabilities.get(key), key)
+    outcome = _object(draw_result.get("outcome"), "outcome")
+    if type(outcome.get("rarity")) is not int or outcome["rarity"] not in (4, 5, 6):
+        raise ValueError("rarity must be 4, 5 or 6")
+    if "character_name" not in outcome or (outcome["character_name"] is not None
+                                           and not isinstance(outcome["character_name"], str)):
+        raise ValueError("character_name must be a string or None")
+    for key in ("is_up", "is_limited", "five_star_pity_triggered", "six_star_hard_pity_triggered"):
+        if type(outcome.get(key)) is not bool:
+            raise ValueError(f"{key} must be a boolean")
+    rewards = _object(outcome.get("rewards"), "rewards")
+    for name, amount in rewards.items():
+        if not isinstance(name, str) or not name:
+            raise ValueError("reward names must be non-empty strings")
+        _number(amount, "reward amount")
+
+
+def _validate_payload(value):
+    payload = _object(value, "result")
+    require_version(payload.get("result_format_version"), RESULT_FORMAT_VERSION, "结果")
+    require_version(payload.get("sampling_version"), SAMPLING_VERSION, "抽样")
+    if not isinstance(payload.get("rule_version"), str) or payload["rule_version"] != "2.0":
+        raise ValueError("rule_version must be the supported string 2.0")
+    config = _object(payload.get("pool_config"), "pool_config")
+    require_version(config.get("format_version"), CONFIG_FORMAT_VERSION, "配置")
+    PoolConfig.from_dict(config)
 
 
 class HistoryRepository:
@@ -106,29 +186,29 @@ class HistoryRepository:
             with TemporaryDirectory() as directory:
                 snapshot, components = self._stable_snapshot(directory)
                 version, has_user_schema = self._inspect_schema(snapshot)
-                if version == 2:
+                if version == DATABASE_SCHEMA_VERSION:
                     return
                 if version != 0 or has_user_schema:
                     raise ValueError(
-                        f"历史数据库版本不兼容：当前版本 {version}，需要版本 2"
+                        f"历史数据库版本不兼容：当前版本 {version}，需要版本 3"
                     )
                 confirmation, confirmed_components = self._stable_snapshot(directory)
                 confirmed_version, confirmed_user_schema = self._inspect_schema(confirmation)
-                if confirmed_version == 2:
+                if confirmed_version == DATABASE_SCHEMA_VERSION:
                     return
                 if confirmed_version != 0 or confirmed_user_schema:
                     raise ValueError(
-                        f"历史数据库版本不兼容：当前版本 {confirmed_version}，需要版本 2"
+                        f"历史数据库版本不兼容：当前版本 {confirmed_version}，需要版本 3"
                     )
                 if confirmed_components != components:
                     raise ValueError("历史数据库状态不稳定，无法安全初始化")
         with closing(self._connect()) as connection, connection:
             connection.execute("BEGIN IMMEDIATE")
             version = connection.execute("PRAGMA user_version").fetchone()[0]
-            if version == 2:
+            if version == DATABASE_SCHEMA_VERSION:
                 return
             if version != 0 or self._has_user_schema(connection):
-                raise ValueError(f"历史数据库版本不兼容：当前版本 {version}，需要版本 2")
+                raise ValueError(f"历史数据库版本不兼容：当前版本 {version}，需要版本 3")
             for statement in _SCHEMA.split(";"):
                 if statement.strip():
                     connection.execute(statement)
@@ -136,6 +216,14 @@ class HistoryRepository:
     def save_run(self, payload: dict, trace_enabled: bool) -> str:
         if not isinstance(trace_enabled, bool):
             raise ValueError("trace_enabled must be a boolean")
+        _validate_payload(payload)
+        if trace_enabled:
+            if type(payload.get("trials")) is not int or payload["trials"] != 1:
+                raise ValueError("Trace runs require trials=1")
+            if not isinstance(payload.get("records"), list):
+                raise ValueError("Trace records must be a list")
+            for record in payload["records"]:
+                _validate_record(record)
         seed = payload["seed"]
         if isinstance(seed, bool) or not isinstance(seed, int):
             raise ValueError("seed must be an integer")
@@ -154,7 +242,7 @@ class HistoryRepository:
             "trace_enabled": int(trace_enabled),
             "pool_config_json": json.dumps(payload["pool_config"], sort_keys=True),
             "result_json": json.dumps(summary, sort_keys=True),
-            "schema_version": 2,
+            "schema_version": DATABASE_SCHEMA_VERSION,
         }
         columns = ", ".join(row)
         placeholders = ", ".join("?" for _ in row)
@@ -176,11 +264,14 @@ class HistoryRepository:
     @staticmethod
     def _summary(row):
         result = json.loads(row["result_json"])
+        _validate_payload(result)
+        require_version(row["schema_version"], DATABASE_SCHEMA_VERSION, "数据库记录")
         result.update({key: row[key] for key in row.keys()
                        if key not in ("result_json", "pool_config_json")})
         result["seed"] = int(row["seed"])
         result["trace_enabled"] = bool(row["trace_enabled"])
         result["pool_config"] = json.loads(row["pool_config_json"])
+        _validate_payload(result)
         return result
 
     def get_run(self, id: str, include_records: bool = False) -> dict | None:
@@ -197,6 +288,11 @@ class HistoryRepository:
                         "WHERE run_id = ? ORDER BY draw_index", (id,)
                     )
                 ]
+                if result["trace_enabled"] and (type(result.get("trials")) is not int
+                                                 or result["trials"] != 1):
+                    raise ValueError("Trace runs require trials=1")
+                for record in result["records"]:
+                    _validate_record(record)
             return result
 
     def list_runs(self, filters: dict, limit: int, offset: int) -> list[dict]:
