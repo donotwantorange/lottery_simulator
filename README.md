@@ -78,7 +78,7 @@ docker compose logs --tail=100 app caddy
 
 Compose 固定 production/OIDC；仅 Caddy 发布 80/443，并声明 HSTS。页面、worker 和每日备份统一使用 `LOTTERY_DB_PATH=/app/data/lottery_v4.sqlite3`，任务目录为 `/app/data/jobs_v4/`，备份文件使用 `lottery-v4-` 前缀。备份只包含已提交的 v4 历史数据库，不包含 jobs_v4 暂存任务、secrets 或证书；保存失败时保留的完整暂存 Trace 也不在历史备份中。恢复只接受 v4 数据库，旧库不迁移、不删除。数据、备份和证书在命名卷中，secrets 只读挂载；不要执行 `docker compose down -v` 或宽泛删除 `data/`、`jobs/`。
 
-✅ 本地功能和部署静态合同已验证。⚠️ Docker/Caddy 实际运行、卷权限、自动证书、真实公网 HTTPS/HSTS 与 OIDC 仍是服务器现场未验，不能由本地测试替代。完整操作与边界见[部署与运维手册](docs/deployment.md)、[概率核心重构实施记录](docs/changes/2026-09-17-probability-core.md)及[最新本地合并记录](docs/changes/2026-09-18-probability-core-local-merge.md)。
+✅ 多轮 Trace 与界面重组已本地合并到 `master`；合并后的主目录全套 385 项测试通过。⚠️ 尚未在线推送，也未执行真实浏览器视觉验收、服务器部署、百万记录容量验收或旧数据切换清理。完整操作与边界见[部署与运维手册](docs/deployment.md)、[多轮 Trace 实施记录](docs/changes/2026-09-20-multi-trial-trace-ui.md)及[最新本地合并记录](docs/changes/2026-09-22-multi-trial-trace-ui-local-merge.md)。
 
 ## 测试
 

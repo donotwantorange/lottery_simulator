@@ -1,10 +1,10 @@
 # 多轮 Trace 与界面重组实施记录
 
-验收日期：2026-09-21。关联：[设计](2026-09-18-multi-trial-trace-ui-design.md)、[计划](2026-09-20-multi-trial-trace-ui-plan.md)。
+验收日期：2026-09-21；本地合并日期：2026-09-22。关联：[设计](2026-09-18-multi-trial-trace-ui-design.md)、[计划](2026-09-20-multi-trial-trace-ui-plan.md)、[本地合并记录](2026-09-22-multi-trial-trace-ui-local-merge.md)。
 
 ## 状态与实际功能
 
-✅已验证：最终修复后的全套385项通过（104.670秒、退出0）；独立Luna复审已关闭I1～I7及M1～M2，结论为Approved、无阻断项。初次371项和修复阶段149项记录作为历史证据保留，详见[最终修复报告](../../.superpowers/sdd/2026-09-20-multi-trial-trace-ui-plan/final-fixes-report.md)。工作树为 `/home/qykj/202607/test/lottery_simulator/.worktrees/multi-trial-trace-ui`，未提交、合并或推送；主工作区数据未写入、未删除，真实服务未停止，未清真实 session，未启动真实 v4 生产实验。既有用户文档改动保留。
+✅已验证：最终修复后的全套385项通过（104.670秒、退出0）；独立Luna复审已关闭I1～I7及M1～M2，结论为Approved、无阻断项。初次371项和修复阶段149项记录作为历史证据保留。2026-09-22已本地提交并合并到`master`，合并提交为`b35837c`；合并后的主目录再次运行全套385项（103.172秒、退出0）。未在线推送。旧数据未写入或删除，真实服务未停止，未清真实session，未启动真实v4生产实验；隔离工作树因保留忽略目录中的审查台账而暂未清理。
 
 - ✅ 多轮 Trace 保存 `trial_index`、轮内 `draw_index` 和来源 `source_index`；每轮保底与赠送状态独立，同一次模拟只初始化一次随机数生成器。
 - ✅ 网页 worker 通过 sink 分批写暂存库，完成校验后单事务导入 v4 历史；保存成功清暂存，保存失败保留完整暂存供当前结果读取，删除历史后不会从任务结果复活。
@@ -30,7 +30,7 @@
 ✅ 初次任务12仅增强 `tests/test_trace_lifecycle.py` 的既有端到端验收，并更新记录、计划、设计状态与台账；当时没有生产代码修复。先跑生命周期4项（0.261秒，退出0），再跑一次全套。后续最终审查修复及新验证以上节为准。
 
 ```sh
-cd /home/qykj/202607/test/lottery_simulator/.worktrees/multi-trial-trace-ui
+cd /home/qykj/202607/test/lottery_simulator
 /home/qykj/202607/test/lottery_simulator/.venv/bin/python -m unittest discover -v
 ```
 
