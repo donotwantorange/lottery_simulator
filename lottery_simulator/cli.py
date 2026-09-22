@@ -32,6 +32,19 @@ def build_parser() -> argparse.ArgumentParser:
     simulation.add_argument("--pool-config")
     simulation.add_argument("--trace", action="store_true")
     simulation.add_argument("--format", choices=("text", "json"), default="text")
+    simulation.epilog = "大规模Trace会保存在内存；大结果请使用网页落库后通过export-trace导出。"
+    export = commands.add_parser("export-trace")
+    export.add_argument("--database", required=True)
+    export.add_argument("--run-id", required=True)
+    export.add_argument("--output", required=True)
+    export.add_argument("--trial-from", type=int)
+    export.add_argument("--trial-to", type=int)
+    export.add_argument("--source", choices=("main", "bonus"))
+    export.add_argument("--rarity", type=int, choices=(4, 5, 6))
+    export.add_argument("--character-name")
+    export.add_argument("--unnamed-character", action="store_true")
+    export.add_argument("--source-from", type=int)
+    export.add_argument("--source-to", type=int)
     return parser
 
 
@@ -114,6 +127,8 @@ def _simulation_payload(result: SimulationResult, rule, include_records: bool):
         "bonus_draws": result.bonus_draws,
         "total_draws": result.total_draws,
         "trials": result.trials,
+        "trace_enabled": result.trace_enabled,
+        "record_count": result.record_count,
         "seed": result.seed,
         "initial_pity": result.initial_pity,
         "initial_five_star_pity": result.initial_five_star_pity,
@@ -238,7 +253,7 @@ def _write_text_simulation(payload, output: TextIO, trace: bool) -> None:
             print(f"  {pity_names.get(pity_name, pity_name)}：{count:.6f}", file=output)
     if trace:
         print(
-            "抽次  来源  来源序号  主池累计抽数  "
+            "轮次  抽次  来源  来源序号  主池累计抽数  "
             "星级  角色  奖励  4/5/6星概率  主池前双保底  主池后双保底  来源池前双保底  "
             "来源池后双保底  五星保底触发  六星硬保底触发",
             file=output,
@@ -255,7 +270,7 @@ def _write_text_simulation(payload, output: TextIO, trace: bool) -> None:
                 f"({state['misses_since_six_star']},{state['misses_since_five_or_higher']})"
             )
             print(
-                f"{record['draw_index']}  {source}  {record['source_index']}  "
+                f"{record['trial_index']}  {record['draw_index']}  {source}  {record['source_index']}  "
                 f"{record['main_draws_completed']}  "
                 f"{outcome['rarity']}星  {outcome['character_name'] or '未配置角色名单'}  "
                 f"{rewards}  {probabilities['four_star']:.1%}/"
@@ -274,6 +289,20 @@ def main(argv=None, stdout=None) -> int:
     output = sys.stdout if stdout is None else stdout
     parser = build_parser()
     args = parser.parse_args(argv)
+    if args.command == "export-trace":
+        from dashboard.trace_export import export_trace
+        try:
+            export_trace(
+                args.database, args.run_id, args.output,
+                trial_from=args.trial_from, trial_to=args.trial_to,
+                source=args.source, rarity=args.rarity,
+                character_name=args.character_name,
+                unnamed_character=args.unnamed_character,
+                source_from=args.source_from, source_to=args.source_to,
+            )
+        except (OSError, TypeError, ValueError) as error:
+            parser.error(str(error))
+        return 0
     try:
         config = load_pool_config(args.pool_config)
     except FileNotFoundError:
@@ -296,8 +325,6 @@ def main(argv=None, stdout=None) -> int:
         else:
             _write_text_analysis(payload, output)
         return 0
-    if args.trace and args.trials != 1:
-        parser.error("--trace requires --trials 1")
     try:
         rule.rarity_probabilities(
             DrawState(args.initial_pity, args.initial_five_star_pity)

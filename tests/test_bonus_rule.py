@@ -3,7 +3,11 @@ import unittest
 from unittest.mock import patch
 
 from lottery_simulator.engine import draw_once, simulate
-from lottery_simulator.rules.base import BonusEvent, DrawState
+from lottery_simulator.rules.base import (
+    BonusEvent,
+    DrawState,
+    expected_bonus_draws,
+)
 from lottery_simulator.rules.first_thirty_bonus import FirstThirtyBonusRule
 from lottery_simulator.rules.pool_config import WeightedCharacter, load_pool_config
 from lottery_simulator.rules.rule_1 import Rule1
@@ -18,6 +22,51 @@ class ConstantRandom:
 
 
 class FirstThirtyBonusRuleTest(unittest.TestCase):
+    def test_expected_draws_counts_a_trigger_crossed_by_future_main_draws(self):
+        subrule = FirstThirtyBonusRule()
+
+        self.assertEqual(subrule.expected_draws(29, 1), 10)
+        self.assertEqual(subrule.expected_draws(30, 1), 0)
+        self.assertEqual(subrule.expected_draws(0, 29), 0)
+        self.assertEqual(subrule.expected_draws(0, 30), 10)
+
+    def test_expected_draws_rejects_invalid_initial_position_or_draw_count(self):
+        subrule = FirstThirtyBonusRule()
+
+        for initial_main_draws in (-1, True, 1.5, "0"):
+            with self.subTest(initial_main_draws=initial_main_draws):
+                with self.assertRaises(ValueError):
+                    subrule.expected_draws(initial_main_draws, 1)
+        for draws in (0, -1, True, 1.5, "1"):
+            with self.subTest(draws=draws):
+                with self.assertRaises(ValueError):
+                    subrule.expected_draws(0, draws)
+
+    def test_expected_bonus_draws_sums_subrules_and_allows_no_subrules(self):
+        self.assertEqual(expected_bonus_draws(Rule1(), 29, 1), 10)
+        self.assertEqual(expected_bonus_draws(Rule1(subrules=()), 29, 1), 0)
+
+    def test_expected_bonus_draws_rejects_unknown_subrule_capability(self):
+        class EventsOnlySubRule:
+            def events_after_main_draw(self, completed_main_draws):
+                return ()
+
+        rule = Rule1(subrules=(EventsOnlySubRule(),))
+        with self.assertRaisesRegex(ValueError, "expected_draws"):
+            expected_bonus_draws(rule, 0, 1)
+
+    def test_expected_draws_uses_event_draw_count_from_trigger_logic(self):
+        subrule = FirstThirtyBonusRule()
+        original = subrule.events_after_main_draw
+
+        def custom_events(completed_main_draws):
+            if completed_main_draws == 30:
+                return (BonusEvent("custom", 7, 0.2, 4),)
+            return original(completed_main_draws)
+
+        subrule.events_after_main_draw = custom_events
+        self.assertEqual(subrule.expected_draws(29, 1), 7)
+
     def test_only_main_draw_thirty_emits_the_bonus(self):
         subrule = FirstThirtyBonusRule()
 

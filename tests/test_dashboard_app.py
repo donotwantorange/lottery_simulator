@@ -20,10 +20,14 @@ from streamlit.runtime.secrets import AttrDict
 from dashboard.jobs import JobManager
 from dashboard.models import JobState, RunParameters, read_json, result_payload, write_json
 from dashboard.repository import HistoryRepository
+from dashboard.limits import TraceLimits
+from dashboard.trace_store import TraceFilter, TraceWriter
 from dashboard.worker import run
+from dashboard.views.job_status import render_active_job
 from lottery_simulator.engine import simulate
 from lottery_simulator.rules.pool_config import PoolConfig, load_pool_config
 from lottery_simulator.rules.rule_1 import Rule1
+from lottery_simulator.rules.base import expected_bonus_draws
 
 
 APP = Path(__file__).resolve().parents[1] / "dashboard/app.py"
@@ -39,7 +43,7 @@ def render_fixture():
     from lottery_simulator.rules.rule_1 import Rule1
     rule = Rule1()
     render_result(st, result_payload(simulate(rule, 2, seed=42, initial_pity=29),
-                                    rule, 0.25), True)
+                                    rule, 0.25), None)
 
 
 class ResultRenderingRegressionTest(unittest.TestCase):
@@ -52,24 +56,29 @@ class ResultRenderingRegressionTest(unittest.TestCase):
         app = AppTest.from_function(render_fixture).run()
         self.assertEqual(len(app.exception), 0)
         metrics = {metric.label: metric.value for metric in app.metric}
-        self.assertEqual(metrics["绝对误差"], "0.096000")
+        self.assertEqual(metrics["相对误差"], "100.0000%")
         self.assertEqual(metrics["相对误差"], "100.0000%")
         rule = Rule1()
         payload = result_payload(simulate(rule, 2, seed=42, initial_pity=29), rule, 0.25)
         self.assertAlmostEqual(payload["mean_count_error"], -0.096)
         self.assertEqual(payload["mean_count_relative_error"], -1.0)
 
-    def test_real_renderer_exposes_six_result_regions_and_source_switch(self):
+    def test_real_renderer_exposes_four_views_and_category_source_switch(self):
         app = AppTest.from_function(render_fixture).run()
 
         self.assertEqual(len(app.exception), 0)
-        self.assertEqual(
-            [tab.label for tab in app.tabs],
-            ["总览", "六星构成", "具体角色", "附赠奖励", "保底统计", "Trace"],
-        )
+        view = next(item for item in app.selectbox if item.label == "结果视图")
+        self.assertEqual(view.options, ["实验概览", "分类统计", "按抽次分析", "逐抽明细"])
+        view.set_value("分类统计").run()
+        self.assertEqual(len(app.exception), 0)
         source = next(item for item in app.radio if item.label == "数据来源")
         self.assertEqual(source.options, ["主池", "赠送", "总计"])
         self.assertEqual(source.value, "总计")
+        category = next(item for item in app.selectbox if item.label == "分类统计")
+        self.assertEqual(
+            category.options,
+            ["星级", "六星构成", "六星具体角色", "奖励", "保底"],
+        )
 
 
 class DashboardAppTest(unittest.TestCase):
@@ -99,13 +108,16 @@ class DashboardAppTest(unittest.TestCase):
     def widget(elements, label):
         return next(element for element in elements if element.label == label)
 
+    def go_page(self, app, page):
+        self.widget(app.radio, "导航").set_value(page).run()
+
     def test_confirmed_copy_trace_gate_and_invalid_work_preserve_parameters(self):
         app = self.load()
         self.widget(app.number_input, PITY_LABEL).set_value(29)
         self.widget(app.number_input, "实验轮数").set_value(2).run()
         trace = self.widget(app.toggle, "Trace")
-        self.assertTrue(trace.disabled)
-        self.assertIn("单轮", trace.help)
+        self.assertFalse(trace.disabled)
+        self.assertIn("多轮", trace.help)
         self.widget(app.number_input, "主池抽数").set_value(10_000_000)
         self.widget(app.number_input, "实验轮数").set_value(11)
         self.widget(app.button, "开始模拟").click().run()
@@ -114,7 +126,7 @@ class DashboardAppTest(unittest.TestCase):
         self.assertEqual(self.widget(app.number_input, "主池抽数").value, 10_000_000)
         self.assertEqual(self.widget(app.number_input, PITY_LABEL).value, 29)
         self.assertIsNone(app.session_state.filtered_state.get("current_job_id"))
-        self.assertEqual(list(self.root.glob("jobs_v3/*/state.json")), [])
+        self.assertEqual(list(self.root.glob("jobs_v4/*/state.json")), [])
 
     def test_deployment_database_override_is_used_by_page_and_worker(self):
         database = self.root / "lottery.sqlite3"
@@ -123,7 +135,7 @@ class DashboardAppTest(unittest.TestCase):
             self.widget(app.button, "开始模拟").click().run()
         self.assertEqual(len(app.exception), 0)
         self.assertTrue(database.is_file(), "Deployment database must receive simulations")
-        self.assertFalse((self.root / "history_v3.sqlite3").exists())
+        self.assertFalse((self.root / "history_v4.sqlite3").exists())
         runs = HistoryRepository(database).list_runs({}, 20, 0)
         self.assertEqual(len(runs), 1)
         self.assertEqual(runs[0]["main_draws"], 100)
@@ -146,11 +158,137 @@ class DashboardAppTest(unittest.TestCase):
         self.assertNotIn("synthetic migration detail", " ".join(item.value for item in app.error))
 
     def repository(self):
-        repository = HistoryRepository(self.root / "history_v3.sqlite3")
+        repository = HistoryRepository(self.root / "history_v4.sqlite3")
         repository.initialize()
         return repository
 
-    def test_default_database_is_v3_and_old_databases_are_never_read_or_changed(self):
+    def test_switching_current_jobs_drops_download_owned_by_previous_job(self):
+        app = self.load()
+        manager = JobManager(self.root / "jobs_v4", self.root / "history_v4.sqlite3")
+        first = manager.start(RunParameters("rule1", 2, 3, 29, 42, True), synchronous=True)
+        second = manager.start(RunParameters("rule1", 2, 3, 29, 77, True), synchronous=True)
+        app.session_state["selected_result"] = ("job", first.job_id)
+        self.go_page(app, "实验结果")
+        self.widget(app.selectbox, "结果视图").set_value("逐抽明细").run()
+        self.widget(app.button, "准备下载").click().run()
+        header = json.loads(app.session_state["trace-download"].splitlines()[0])
+        self.assertEqual(header["run"]["seed"], 42)
+
+        app.session_state["selected_result"] = ("job", second.job_id)
+        app.run()
+        self.assertNotIn("trace-download", app.session_state.filtered_state)
+        self.widget(app.selectbox, "结果视图").set_value("逐抽明细").run()
+        self.widget(app.button, "准备下载").click().run()
+        self.assertEqual(len(app.exception), 0)
+        header = json.loads(app.session_state["trace-download"].splitlines()[0])
+        self.assertEqual(header["run"]["seed"], 77)
+        self.assertEqual(app.session_state["trace-filter-signature"][0], ("job", second.job_id))
+
+    def trace_app(self, *, draws=250, trials=3, view="逐抽明细"):
+        app = self.load()
+        manager = JobManager(self.root / "jobs_v4", self.root / "history_v4.sqlite3")
+        state = manager.start(RunParameters("rule1", draws, trials, 30, 42, True), synchronous=True)
+        self.assertEqual(state.status, "completed")
+        app.session_state["selected_result"] = ("job", state.job_id)
+        self.go_page(app, "实验结果")
+        self.widget(app.selectbox, "结果视图").set_value(view).run()
+        return app
+
+    def test_single_result_exposes_snapshot_and_reuses_without_new_job(self):
+        app = self.trace_app(draws=2, trials=3, view="实验概览")
+        self.assertIn("参数与配置快照", [item.label for item in app.expander])
+        snapshot = json.loads(app.json[0].value)
+        self.assertEqual((snapshot["main_draws"], snapshot["trials"], snapshot["seed"]), (2, 3, 42))
+        self.assertEqual(snapshot["pool_config"], load_pool_config().to_dict())
+        before = list(self.root.glob("jobs_v4/*/state.json"))
+        self.widget(app.button, "复用参数").click().run()
+        self.assertEqual(len(app.exception), 0)
+        self.assertEqual(self.widget(app.radio, "导航").value, "新建实验")
+        self.assertEqual(self.widget(app.number_input, "实验轮数").value, 3)
+        self.assertEqual(self.widget(app.number_input, PITY_LABEL).value, 30)
+        self.assertEqual(self.widget(app.text_input, "随机种子（留空自动生成）").value, "42")
+        self.assertTrue(self.widget(app.toggle, "Trace").value)
+        self.assertEqual(list(self.root.glob("jobs_v4/*/state.json")), before)
+
+    def test_saving_phase_remains_active_with_explicit_message(self):
+        app, job_dir = self.prepare("running")
+        state = JobState.from_dict(read_json(job_dir / "state.json"))
+        write_json(job_dir / "state.json", replace(state, phase="saving", completed_units=2).to_dict())
+        app.run()
+        self.assertEqual(len(app.exception), 0)
+        self.assertTrue(any("写入明细/保存历史" in item.value for item in app.info))
+        self.assertTrue(self.widget(app.button, "开始模拟").disabled)
+
+    def test_trace_page_buttons_show_target_page_on_first_click(self):
+        app = self.trace_app()
+        self.assertEqual(app.dataframe[0].value.iloc[0]["轮内总抽次"], 1)
+        self.widget(app.button, "下一页").click().run()
+        self.assertEqual(app.dataframe[0].value.iloc[0]["轮内总抽次"], 101)
+        self.assertTrue(any("第 2/3 页" in item.value for item in app.caption))
+        self.widget(app.button, "上一页").click().run()
+        self.assertEqual(app.dataframe[0].value.iloc[0]["轮内总抽次"], 1)
+        self.assertTrue(any("第 1/3 页" in item.value for item in app.caption))
+
+    def test_trace_can_filter_single_trial_or_range_and_resets_download_and_page(self):
+        app = self.trace_app()
+        modes = self.widget(app.selectbox, "轮次")
+        self.assertIn("指定轮次", modes.options)
+        self.assertIn("轮次范围", modes.options)
+        modes.set_value("指定轮次").run()
+        self.widget(app.number_input, "指定轮次").set_value(2).run()
+        self.assertEqual(set(app.dataframe[0].value["轮次"]), {2})
+        self.widget(app.button, "准备下载").click().run()
+        records = [json.loads(line)["record"] for line in app.session_state["trace-download"].splitlines()[1:]]
+        self.assertEqual(len(records), 250)
+        self.assertEqual({row["trial_index"] for row in records}, {2})
+        self.widget(app.button, "下一页").click().run()
+        self.widget(app.selectbox, "轮次").set_value("轮次范围").run()
+        self.widget(app.number_input, "轮次起").set_value(2).run()
+        self.widget(app.number_input, "轮次止").set_value(3).run()
+        self.assertEqual(app.session_state["trace-page"], 1)
+        self.assertFalse("trace-download" in app.session_state.filtered_state)
+        self.widget(app.button, "准备下载").click().run()
+        records = [json.loads(line)["record"] for line in app.session_state["trace-download"].splitlines()[1:]]
+        self.assertEqual(len(records), 500)
+        self.assertEqual({row["trial_index"] for row in records}, {2, 3})
+
+    def test_position_range_supports_201_and_1001_without_exceeding_width(self):
+        app = self.trace_app(draws=2000, trials=1, view="按抽次分析")
+        self.assertEqual(self.widget(app.number_input, "位置起").value, 1)
+        self.assertEqual(self.widget(app.number_input, "位置止").value, 200)
+        self.widget(app.number_input, "位置起").set_value(201).run()
+        self.assertEqual(len(app.exception), 0)
+        self.assertGreaterEqual(self.widget(app.number_input, "位置止").value, 201)
+        self.widget(app.number_input, "位置起").set_value(1001).run()
+        self.assertEqual(len(app.exception), 0)
+        self.widget(app.number_input, "位置止").set_value(1100).run()
+        self.assertEqual(len(app.exception), 0)
+        rows = app.dataframe[0].value
+        self.assertEqual((rows.iloc[0]["抽次"], rows.iloc[-1]["抽次"]), (1001, 1100))
+        self.widget(app.number_input, "位置起").set_value(1).run()
+        self.assertLessEqual(self.widget(app.number_input, "位置止").max, 1000)
+
+    def save_snapshot(self, repository, run_id, payload, result=None):
+        if not payload["trace_enabled"]:
+            return repository.save_run(run_id, payload)
+        trace_path = self.root / f"trace-{run_id}.sqlite3"
+        writer = TraceWriter(trace_path, limits=TraceLimits())
+        try:
+            for record in result.records:
+                writer.append(record)
+            writer.finish(
+                trials=payload["trials"], draws=payload["main_draws"],
+                initial_main_draws=payload["initial_pity"],
+                bonus_per_trial=payload["bonus_draws"],
+            )
+        finally:
+            writer.close()
+        try:
+            return repository.save_run(run_id, payload, trace_path=trace_path)
+        finally:
+            trace_path.unlink(missing_ok=True)
+
+    def test_default_database_is_v4_and_old_databases_are_never_read_or_changed(self):
         old_databases = [self.root / "history.sqlite3", self.root / "history_v2.sqlite3"]
         for path in old_databases:
             path.write_bytes(b"old database must stay untouched")
@@ -159,7 +297,7 @@ class DashboardAppTest(unittest.TestCase):
         app = self.load()
 
         self.assertEqual(len(app.exception), 0)
-        self.assertTrue((self.root / "history_v3.sqlite3").is_file())
+        self.assertTrue((self.root / "history_v4.sqlite3").is_file())
         for path in old_databases:
             self.assertEqual(path.read_bytes(), before[path])
 
@@ -183,7 +321,7 @@ class DashboardAppTest(unittest.TestCase):
         self.assertNotIn("current_job_id", app.session_state.filtered_state)
         self.assertNotIn("pending_reuse_id", app.session_state.filtered_state)
         self.assertNotIn("pending_delete_id", app.session_state.filtered_state)
-        self.assertTrue((self.root / "jobs_v3").is_dir())
+        self.assertTrue((self.root / "jobs_v4").is_dir())
         self.assertEqual(read_json(old_job_dir / "result.json"), {"private": "old result"})
         self.assertEqual(len(app.metric), 0)
         self.assertTrue(any("失效" in item.value or "不存在" in item.value
@@ -248,7 +386,7 @@ class DashboardAppTest(unittest.TestCase):
         self.assertEqual(len(app.exception), 0)
         self.assertTrue(any("配置 JSON 无效" in item.value for item in app.error))
         self.assertNotIn("private-invalid", " ".join(item.value for item in app.error))
-        self.assertEqual(list(self.root.glob("jobs_v3/*/state.json")), [])
+        self.assertEqual(list(self.root.glob("jobs_v4/*/state.json")), [])
         self.assertEqual(self.repository().list_runs({}, 10, 0), [])
 
     def test_joint_probability_admission_shows_specific_chinese_error_without_job(self):
@@ -267,7 +405,7 @@ class DashboardAppTest(unittest.TestCase):
                 self.assertRegex(errors, "五星.*六星.*不能超过 1")
                 self.assertNotIn("exceed", errors)
                 self.assertNotIn("模拟任务失败", errors)
-                self.assertEqual(list(self.root.glob("jobs_v3/*/state.json")), [])
+                self.assertEqual(list(self.root.glob("jobs_v4/*/state.json")), [])
                 self.assertEqual(self.repository().list_runs({}, 10, 0), [])
 
     def test_uploaded_configuration_and_initial_five_pity_are_saved_as_job_snapshot(self):
@@ -308,13 +446,14 @@ class DashboardAppTest(unittest.TestCase):
         for index in range(3):
             rule = Rule1()
             trace_enabled = index != 1
-            payload = result_payload(simulate(rule, index + 2, trials=2 if index == 1 else 1,
-                                              seed=42 + index,
-                                              initial_pity=29,
-                                              collect_records=trace_enabled), rule, 0.25)
+            result = simulate(rule, index + 2, trials=2 if index == 1 else 1,
+                              seed=42 + index, initial_pity=29,
+                              collect_records=trace_enabled)
+            payload = result_payload(result, rule, 0.25)
             if index == 0:
                 payload["rule_name"] = "retired-rule"
-            ids.append(repository.save_run(payload, trace_enabled=trace_enabled))
+            run_id = str(uuid4())
+            ids.append(self.save_snapshot(repository, run_id, payload, result))
         with closing(sqlite3.connect(repository.path)) as connection, connection:
             for index, run_id in enumerate(ids):
                 connection.execute("UPDATE simulation_runs SET created_at=? WHERE id=?",
@@ -324,6 +463,7 @@ class DashboardAppTest(unittest.TestCase):
     def test_history_workflow(self):
         repository, ids = self.seed_history()
         app = self.load()
+        self.go_page(app, "历史记录")
         self.assertIn("历史规则", [item.label for item in app.selectbox])
         self.assertEqual(app.dataframe[0].value["运行 ID"].tolist(), ids[::-1])
         self.widget(app.selectbox, "历史 Trace").set_value("不含 Trace").run()
@@ -334,15 +474,20 @@ class DashboardAppTest(unittest.TestCase):
         self.widget(app.selectbox, "历史规则").set_value("全部").run()
         self.widget(app.multiselect, "选择历史运行").set_value(ids[1:]).run()
         self.assertEqual(len(app.exception), 0)
-        self.assertEqual(len(app.metric), 30)
+        labels = [metric.label for metric in app.metric]
+        self.assertEqual(labels.count("模拟六星均值"), 2)
         self.assertFalse(any("统计口径不同" in item.value for item in app.warning))
         self.widget(app.multiselect, "选择历史运行").set_value(ids).run()
         self.assertEqual(len(app.exception), 0)
         self.assertTrue(any("最多选择两次运行" in item.value for item in app.error))
         self.assertEqual(app.session_state["selected_history_ids"], ids[:2])
-        self.assertEqual(len(app.metric), 30)
-        self.assertEqual(len(app.get("download_button")), 3)
-        self.assertTrue(any("未保存概率曲线" in item.value for item in app.info))
+        self.assertEqual(
+            [metric.label for metric in app.metric].count("模拟六星均值"), 2
+        )
+        self.assertEqual(len(app.get("download_button")), 2)
+        self.assertEqual(
+            sum(item.label == "分类统计" for item in app.selectbox), 2
+        )
         with (patch("streamlit.elements.lib.policies._shown_default_value_warning", False),
               self.assertNoLogs("streamlit.elements.lib.policies", level="WARNING")):
             self.widget(app.button, "复用参数 " + ids[1]).click().run()
@@ -354,13 +499,16 @@ class DashboardAppTest(unittest.TestCase):
         self.assertEqual(self.widget(app.number_input, "实验轮数").value, 2)
         self.assertEqual(self.widget(app.number_input, PITY_LABEL).value, 29)
         self.assertEqual(self.widget(app.text_input, "随机种子（留空自动生成）").value, "43")
-        self.assertTrue(self.widget(app.toggle, "Trace").disabled)
-        self.assertEqual(list(self.root.glob("jobs_v3/*/state.json")), [])
+        self.assertFalse(self.widget(app.toggle, "Trace").disabled)
+        self.assertEqual(list(self.root.glob("jobs_v4/*/state.json")), [])
         self.assertIsNone(app.session_state.filtered_state.get("current_job_id"))
         self.assertEqual(len(repository.list_runs({}, 20, 0)), 3)
+        self.go_page(app, "历史记录")
         self.widget(app.button, "删除历史 " + ids[0]).click().run()
         self.assertIsNotNone(repository.get_run(ids[0]))
-        self.assertTrue(repository.get_run(ids[0], True)["records"])
+        self.assertTrue(list(repository.get_trace_reader(ids[0]).iter_records(
+            TraceFilter(), batch_size=1000,
+        )))
         self.widget(app.button, "取消删除").click().run()
         self.assertIsNotNone(repository.get_run(ids[0]))
         self.assertNotIn("确认删除", [button.label for button in app.button])
@@ -390,11 +538,9 @@ class DashboardAppTest(unittest.TestCase):
             payload = result_payload(
                 simulate(rule, 1, seed=42, initial_five_star_pity=initial), rule, 0.25,
             )
-            ids.append(repository.save_run(payload, trace_enabled=False))
+            ids.append(self.save_snapshot(repository, str(uuid4()), payload))
         app = self.load()
-        self.widget(app.number_input, "五星硬保底").set_value(20)
-        self.widget(app.number_input, FIVE_STAR_PITY_LABEL).set_value(9)
-        self.widget(app.number_input, "UP占比").set_value(0.9)
+        self.go_page(app, "历史记录")
         self.widget(app.multiselect, "选择历史运行").set_value(ids).run()
 
         self.assertEqual(len(app.exception), 0)
@@ -424,8 +570,11 @@ class DashboardAppTest(unittest.TestCase):
                      collect_records=True), rule, 0.25
         )
         repository = self.repository()
-        run_id = repository.save_run(payload, trace_enabled=True)
+        result = simulate(rule, 2, seed=42, initial_five_star_pity=7, collect_records=True)
+        payload = result_payload(result, rule, 0.25)
+        run_id = self.save_snapshot(repository, str(uuid4()), payload, result)
         app = self.load()
+        self.go_page(app, "历史记录")
         self.widget(app.multiselect, "选择历史运行").set_value([run_id]).run()
 
         self.widget(app.button, "复用参数 " + run_id).click().run()
@@ -439,51 +588,59 @@ class DashboardAppTest(unittest.TestCase):
     def test_history_date_range_and_pagination(self):
         repository, ids = self.seed_history()
         app = self.load()
+        self.go_page(app, "历史记录")
         self.widget(app.date_input, "历史开始日期（UTC）").set_value(date(2026, 9, 11))
         self.widget(app.date_input, "历史结束日期（UTC）").set_value(date(2026, 9, 11)).run()
         self.assertEqual(app.dataframe[0].value["运行 ID"].tolist(), [ids[1]])
         self.widget(app.date_input, "历史结束日期（UTC）").set_value(date(2026, 9, 10)).run()
         self.assertTrue(any("开始日期不能晚于结束日期" in item.value for item in app.error))
-        payload = repository.get_run(ids[2])
-        newest = [repository.save_run(payload, False) for _ in range(19)][::-1]
+        payload = repository.get_run(ids[1])
+        newest = [self.save_snapshot(repository, str(uuid4()), payload) for _ in range(19)][::-1]
         app = self.load()
+        self.go_page(app, "历史记录")
         self.assertEqual(app.dataframe[0].value["运行 ID"].tolist(), newest + [ids[2]])
         self.widget(app.number_input, "历史页码").set_value(2).run()
         self.assertEqual(app.dataframe[0].value["运行 ID"].tolist(), [ids[1], ids[0]])
         self.widget(app.number_input, "历史页码").set_value(3).run()
-        self.assertTrue(any("没有历史记录" in item.value for item in app.info))
+        self.assertEqual(self.widget(app.number_input, "历史页码").value, 2)
+        self.assertEqual(app.dataframe[0].value["运行 ID"].tolist(), [ids[1], ids[0]])
         self.widget(app.number_input, "历史页码").set_value(1).run()
         self.widget(app.multiselect, "选择历史运行").set_value(newest[:2]).run()
         self.assertEqual(len(app.exception), 0)
-        self.assertEqual(len(app.metric), 30)
+        self.assertEqual(
+            [metric.label for metric in app.metric].count("模拟六星均值"), 2
+        )
 
     def test_history_queries_draw_records_only_for_selected_trace_runs(self):
         _, ids = self.seed_history()
         calls = []
         original_get_run = HistoryRepository.get_run
 
-        def track_get_run(repository, run_id, include_records=False):
-            calls.append((run_id, include_records))
-            return original_get_run(repository, run_id, include_records)
+        def track_get_run(repository, run_id):
+            calls.append(run_id)
+            return original_get_run(repository, run_id)
 
         app = self.load()
+        self.go_page(app, "历史记录")
         with patch.object(HistoryRepository, "get_run", new=track_get_run):
             self.widget(app.multiselect, "选择历史运行").set_value([ids[0], ids[1]]).run()
 
-        self.assertEqual(dict(calls), {ids[0]: True, ids[1]: False})
+        self.assertEqual(calls, [ids[0], ids[1]])
         self.assertEqual(len(calls), 2)
 
     def test_retired_rule_reuse_is_safe_and_missing_selection_clears(self):
         repository, ids = self.seed_history()
         app = self.load()
+        self.go_page(app, "历史记录")
         self.widget(app.multiselect, "选择历史运行").set_value([ids[0]]).run()
-        self.assertEqual(len(app.metric), 15)
+        self.assertIn("模拟六星均值", [metric.label for metric in app.metric])
         self.widget(app.button, "复用参数 " + ids[0]).click().run()
         self.assertTrue(any("不支持此历史规则" in item.value for item in app.warning))
+        self.go_page(app, "新建实验")
         self.assertEqual(self.widget(app.number_input, "主池抽数").value, 100)
-        self.assertEqual(list(self.root.glob("jobs_v3/*/state.json")), [])
+        self.assertEqual(list(self.root.glob("jobs_v4/*/state.json")), [])
         repository.delete_run(ids[0])
-        app.run()
+        self.go_page(app, "历史记录")
         self.assertEqual(len(app.exception), 0)
         self.assertEqual(app.session_state["selected_history_ids"], [])
         self.assertEqual(len(app.metric), 0)
@@ -507,7 +664,7 @@ class DashboardAppTest(unittest.TestCase):
         )
         state = JobState(str(uuid4()), status, parameters.to_dict(), 1, 2,
                          duration_seconds=2.0)
-        job_dir = self.root / "jobs_v3" / state.job_id
+        job_dir = self.root / "jobs_v4" / state.job_id
         write_json(job_dir / "parameters.json", parameters.to_dict())
         write_json(job_dir / "state.json", state.to_dict())
         app = self.load()
@@ -527,8 +684,8 @@ class DashboardAppTest(unittest.TestCase):
 
     def test_process_startup_reconciles_only_its_job_root_once(self):
         parameters = RunParameters("rule1", 10_000, 10_000, 29, 42, False)
-        database = self.root / "history_v3.sqlite3"
-        manager = JobManager(self.root / "jobs_v3", database)
+        database = self.root / "history_v4.sqlite3"
+        manager = JobManager(self.root / "jobs_v4", database)
         unrelated = JobManager(self.root / "unrelated-jobs", self.root / "unrelated.sqlite3")
         self.addCleanup(manager.reconcile_after_restart)
         self.addCleanup(unrelated.reconcile_after_restart)
@@ -548,26 +705,25 @@ class DashboardAppTest(unittest.TestCase):
 
     def test_completed_shows_metrics_download_and_saves_once_without_session_payload(self):
         app = self.start_small(self.load())
-        self.assertEqual(len(app.metric), 15)
-        self.assertEqual(len(app.get("download_button")), 2)
+        metric_labels = {metric.label for metric in app.metric}
+        self.assertTrue({"每轮总抽数", "模拟六星均值", "理论六星期望", "相对误差"}
+                        <= metric_labels)
+        self.assertEqual(len(app.get("download_button")), 1)
         self.assertTrue(any("模拟已完成" in item.value for item in app.success))
         rows = self.repository().list_runs({}, 10, 0)
         self.assertEqual(len(rows), 1)
         self.assertEqual((rows[0]["main_draws"], rows[0]["seed"]), (2, 42))
-        self.assertEqual(len(self.repository().get_run(rows[0]["id"], True)["records"]), 12)
+        records = list(self.repository().get_trace_reader(rows[0]["id"]).iter_records(
+            TraceFilter(), batch_size=1000,
+        ))
+        self.assertEqual(len(records), 12)
         self.assertLess(rows[0]["mean_count_error"], 0)
         self.assertLess(rows[0]["mean_count_relative_error"], 0)
         app.run()
         self.assertEqual(len(self.repository().list_runs({}, 10, 0)), 1)
-        self.assertEqual(set(app.session_state.filtered_state), {
-            "current_job_id", "selected_history_ids", "rule_name", "draws", "trials",
-            "initial_pity", "seed_text", "trace", "initial_five_star_pity",
-            "pool_up_share", "pool_five_star_probability",
-            "pool_five_star_pity_enabled", "pool_five_star_hard_pity",
-            "pool_four_star_characters", "pool_five_star_characters",
-            "pool_character_rows", "pool_reward_rows", "pool_character_editor",
-            "pool_reward_editor", "pool_config_upload",
-        })
+        self.assertIn("new_experiment_draft", app.session_state.filtered_state)
+        self.assertNotIn("records", app.session_state.filtered_state)
+        self.go_page(app, "新建实验")
         self.assertFalse(self.widget(app.button, "开始模拟").disabled)
 
     def test_trace_cannot_leak_from_previous_single_trial_toggle(self):
@@ -577,8 +733,8 @@ class DashboardAppTest(unittest.TestCase):
         self.start_small(app)
         rows = self.repository().list_runs({}, 10, 0)
         self.assertEqual(len(rows), 1)
-        self.assertFalse(rows[0]["trace_enabled"])
-        self.assertEqual(self.repository().get_run(rows[0]["id"], True)["records"], [])
+        self.assertTrue(rows[0]["trace_enabled"])
+        self.assertEqual(rows[0]["record_count"], 24)
 
     def test_running_shows_progress_elapsed_and_disables_start(self):
         app, job_dir = self.prepare("running")
@@ -599,7 +755,7 @@ class DashboardAppTest(unittest.TestCase):
                 self.widget(app.button, "停止模拟").click().run()
                 self.assertEqual(len(app.exception), 0)
                 self.assertTrue((job_dir / "cancel.request").exists())
-                manager = JobManager(job_dir.parent, self.root / "history_v3.sqlite3")
+                manager = JobManager(job_dir.parent, self.root / "history_v4.sqlite3")
                 self.assertEqual(manager.get(job_dir.name).status, status)
                 manager.reconcile_after_restart()
 
@@ -608,6 +764,7 @@ class DashboardAppTest(unittest.TestCase):
         previous_id = app.session_state["current_job_id"]
         _, job_dir = self.prepare("running")
         app.run()
+        self.go_page(app, "新建实验")
         self.assertTrue(self.widget(app.button, "开始模拟").disabled)
         self.assertEqual(app.session_state["current_job_id"], job_dir.name)
         self.assertNotEqual(previous_id, job_dir.name)
@@ -621,11 +778,10 @@ class DashboardAppTest(unittest.TestCase):
             return original_start(manager, replace(parameters, draws=0), **kwargs)
 
         app = self.load()
-        with (patch.object(JobManager, "start", new=reject_at_admission),
-              self.assertLogs(level="ERROR")):
+        with patch.object(JobManager, "start", new=reject_at_admission):
             self.start_small(app)
-        self.assertEqual([item.value for item in app.error], ["模拟任务启动失败"])
-        self.assertEqual(list(self.root.glob("jobs_v3/*/state.json")), [])
+        self.assertTrue(any("模拟任务启动失败" in item.value for item in app.error))
+        self.assertEqual(list(self.root.glob("jobs_v4/*/state.json")), [])
         self.assertEqual(len(app.metric), 0)
 
     def test_stop_only_requests_cancel_then_terminal_has_no_history_or_result(self):
@@ -634,17 +790,20 @@ class DashboardAppTest(unittest.TestCase):
         self.widget(app.button, "停止模拟").click().run()
         self.assertEqual(len(app.exception), 0)
         self.assertTrue((job_dir / "cancel.request").exists())
-        manager = JobManager(job_dir.parent, self.root / "history_v3.sqlite3")
+        manager = JobManager(job_dir.parent, self.root / "history_v4.sqlite3")
         self.assertEqual(manager.get(job_dir.name).status, "queued")
         self.assertEqual(self.repository().list_runs({}, 10, 0), [])
-        run(job_dir, self.root / "history_v3.sqlite3")
+        run(job_dir, self.root / "history_v4.sqlite3")
+        app.session_state["selected_result"] = ("job", job_dir.name)
+        self.go_page(app, "实验结果")
         app.run()
         self.assertEqual(len(app.exception), 0)
         self.assertTrue(any("模拟已取消" in item.value for item in app.info))
         self.assertEqual(len(app.metric), 0)
-        self.assertEqual(len(app.get("download_button")), 1)
+        self.assertEqual(len(app.get("download_button")), 0)
         self.assertEqual(self.repository().list_runs({}, 10, 0), [])
         self.assertIsNone(manager.get_result(job_dir.name))
+        self.go_page(app, "新建实验")
         self.assertFalse(self.widget(app.button, "开始模拟").disabled)
 
     def test_initial_pity_is_rejected_before_job_start_and_its_help_explains_both_meanings(self):
@@ -659,27 +818,30 @@ class DashboardAppTest(unittest.TestCase):
         self.assertEqual(len(app.exception), 0)
         self.assertEqual([item.value for item in app.error], ["初始保底必须在 0 到 79 之间"])
         self.assertEqual(self.widget(app.number_input, PITY_LABEL).value, 80)
-        self.assertEqual(list(self.root.glob("jobs_v3/*/state.json")), [])
+        self.assertEqual(list(self.root.glob("jobs_v4/*/state.json")), [])
         self.assertEqual(self.repository().list_runs({}, 10, 0), [])
 
     def test_failed_shows_only_safe_summary_without_history_or_result(self):
-        app, _ = self.prepare("failed")
+        app, job_dir = self.prepare("failed")
+        app.session_state["selected_result"] = ("job", job_dir.name)
+        self.go_page(app, "实验结果")
         self.assertEqual([item.value for item in app.error], ["模拟任务失败"])
         self.assertEqual(len(app.metric), 0)
-        self.assertEqual(len(app.get("download_button")), 1)
+        self.assertEqual(len(app.get("download_button")), 0)
         self.assertEqual(self.repository().list_runs({}, 10, 0), [])
 
     def test_repository_failure_keeps_result_download_and_safe_warning(self):
         self.repository()
-        with closing(sqlite3.connect(self.root / "history_v3.sqlite3")) as connection:
+        with closing(sqlite3.connect(self.root / "history_v4.sqlite3")) as connection:
             connection.executescript("""
                 CREATE TRIGGER fail_save BEFORE INSERT ON simulation_runs
                 BEGIN SELECT RAISE(ABORT, 'private database failure'); END;
             """)
         with self.assertLogs("dashboard.worker", level="ERROR"):
             app = self.start_small(self.load())
-        self.assertEqual(len(app.metric), 15)
-        self.assertEqual(len(app.get("download_button")), 2)
+        metric_labels = {metric.label for metric in app.metric}
+        self.assertIn("模拟六星均值", metric_labels)
+        self.assertEqual(len(app.get("download_button")), 1)
         self.assertEqual([item.value for item in app.warning], ["历史保存失败"])
         self.assertEqual(self.repository().list_runs({}, 10, 0), [])
 
@@ -726,6 +888,8 @@ assert app.title[0].value == '抽奖概率实验室'
 
     def test_fragment_terminal_transition_refreshes_sidebar_and_result(self):
         app, job_dir = self.prepare()
+        app.session_state["selected_result"] = ("job", job_dir.name)
+        self.go_page(app, "实验结果")
         original_get = JobManager.get
         reads = 0
 
@@ -734,13 +898,14 @@ assert app.title[0].value == '抽奖概率实验室'
             if job_id == job_dir.name:
                 reads += 1
                 if reads == 2:
-                    run(job_dir, self.root / "history_v3.sqlite3")
+                    run(job_dir, self.root / "history_v4.sqlite3")
             return original_get(manager, job_id)
 
         with patch.object(JobManager, "get", new=complete_on_poll):
             app.run()
         self.assertEqual(len(app.exception), 0)
-        self.assertEqual(len(app.metric), 15)
+        self.assertIn("模拟六星均值", {metric.label for metric in app.metric})
+        self.go_page(app, "新建实验")
         self.assertFalse(self.widget(app.button, "开始模拟").disabled)
         self.assertEqual(len(app.get("progress")), 0)
         self.assertEqual(len(self.repository().list_runs({}, 10, 0)), 1)
@@ -753,7 +918,95 @@ assert app.title[0].value == '抽奖概率实验室'
         self.assertEqual([item.value for item in app.error], ["随机种子必须为整数"])
         self.assertEqual(self.widget(app.text_input, "随机种子（留空自动生成）").value,
                          "private-not-an-int")
-        self.assertEqual(list(self.root.glob("jobs_v3/*/state.json")), [])
+        self.assertEqual(list(self.root.glob("jobs_v4/*/state.json")), [])
+
+    def test_task8_navigation_keeps_draft_when_pages_are_switched(self):
+        app = self.load()
+
+        self.assertEqual(self.widget(app.radio, "导航").value, "新建实验")
+        self.widget(app.number_input, "主池抽数").set_value(17)
+        self.widget(app.number_input, "实验轮数").set_value(3)
+        self.widget(app.radio, "导航").set_value("历史记录").run()
+        self.widget(app.radio, "导航").set_value("新建实验").run()
+
+        self.assertEqual(self.widget(app.number_input, "主池抽数").value, 17)
+        self.assertEqual(self.widget(app.number_input, "实验轮数").value, 3)
+
+    def test_task8_trace_preview_uses_bonus_and_all_trials(self):
+        app = self.load()
+        self.widget(app.number_input, "主池抽数").set_value(30)
+        self.widget(app.number_input, "实验轮数").set_value(25_000)
+        self.widget(app.number_input, PITY_LABEL).set_value(0)
+        self.widget(app.toggle, "Trace").set_value(True).run()
+
+        self.assertTrue(any("预计记录数" in item.value and "1,000,000" in item.value
+                            for item in (*app.metric, *app.caption)))
+
+    def test_task8_trace_is_available_for_multiple_trials_and_rejects_over_capacity(self):
+        app = self.load()
+        trace = self.widget(app.toggle, "Trace")
+        self.assertFalse(trace.disabled)
+        self.widget(app.number_input, "主池抽数").set_value(30)
+        self.widget(app.number_input, "实验轮数").set_value(25_001)
+        self.widget(app.number_input, PITY_LABEL).set_value(0)
+        trace.set_value(True)
+        self.widget(app.button, "开始模拟").click().run()
+
+        self.assertEqual(len(app.exception), 0)
+        self.assertIn("Trace记录数超过上限", " ".join(item.value for item in app.error))
+        self.assertEqual(list(self.root.glob("jobs_v4/*/state.json")), [])
+
+    def test_task8_disabling_five_star_pity_zeros_existing_progress_draft_and_widget(self):
+        app = self.load()
+        self.widget(app.number_input, FIVE_STAR_PITY_LABEL).set_value(7).run()
+        self.widget(app.toggle, "启用五星保底").set_value(False).run()
+
+        progress = self.widget(app.number_input, FIVE_STAR_PITY_LABEL)
+        self.assertTrue(progress.disabled)
+        self.assertEqual(progress.value, 0)
+        self.assertEqual(app.session_state["new_experiment_draft"]["initial_five_star_pity"], 0)
+
+    def test_task8_real_app_continuous_data_editor_edits_apply_once_each(self):
+        app = self.load()
+        editor = next(item for item in app.dataframe if item.key == "pool_character_editor")
+        app.session_state["pool_character_editor"] = {
+            "edited_rows": {0: {"角色名称": "连续编辑一"}},
+            "added_rows": [], "deleted_rows": [],
+        }
+        app.run()
+        first = app.session_state["new_experiment_draft"]["pool_config"]
+        self.assertEqual(first["six_star_characters"][0]["name"], "连续编辑一")
+        app.session_state["pool_character_editor"] = {
+            "edited_rows": {0: {"角色名称": "连续编辑二"}},
+            "added_rows": [], "deleted_rows": [],
+        }
+        app.run()
+        second = app.session_state["new_experiment_draft"]["pool_config"]
+        self.assertEqual(second["six_star_characters"][0]["name"], "连续编辑二")
+
+    def test_task8_active_fragment_authenticates_before_read_or_cancel(self):
+        calls = []
+
+        class Manager:
+            def get(self, job_id):
+                calls.append(("get", job_id))
+                raise AssertionError("job state must not be read after auth failure")
+
+            def cancel(self, job_id):
+                calls.append(("cancel", job_id))
+                raise AssertionError("job must not be cancelled after auth failure")
+
+        class StreamlitStub:
+            def button(self, *args, **kwargs):
+                raise AssertionError("widgets must not render after auth failure")
+
+        def expired_session():
+            calls.append(("auth", None))
+            raise PermissionError("session expired")
+
+        with self.assertRaisesRegex(PermissionError, "session expired"):
+            render_active_job(StreamlitStub(), Manager(), "job-id", expired_session)
+        self.assertEqual(calls, [("auth", None)])
 
 
 if __name__ == "__main__":

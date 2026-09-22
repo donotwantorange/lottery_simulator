@@ -10,10 +10,13 @@ import subprocess
 import sys
 from tempfile import TemporaryDirectory
 import unittest
+from uuid import uuid4
 
 from dashboard.auth import AuthConfig
+from dashboard.limits import TraceLimits
 from dashboard.models import result_payload
 from dashboard.repository import HistoryRepository
+from dashboard.trace_store import TraceWriter
 from lottery_simulator.engine import simulate
 from lottery_simulator.rules.rule_1 import Rule1
 
@@ -61,18 +64,18 @@ class DeploymentFilesTest(unittest.TestCase):
         service.read_string(self.read("deploy/lottery-backup.service"))
         return shlex.split(service["Service"]["ExecStart"])
 
-    def test_compose_and_backup_use_v3_database_path(self):
+    def test_compose_and_backup_use_v4_database_path(self):
         compose = self.compose_services()
         self.assertEqual(
             compose["app"]["environment"]["LOTTERY_DB_PATH"],
-            "/app/data/lottery_v3.sqlite3",
+            "/app/data/lottery_v4.sqlite3",
         )
         command = self.backup_command()
         self.assertEqual(command[:2], ["/bin/sh", "-c"])
         self.assertEqual(
             command[2],
             "/usr/bin/docker compose exec -T app python3 scripts/backup_db.py "
-            "/app/data/lottery_v3.sqlite3 /app/backups/lottery-v3-$(date +%%F).sqlite3",
+            "/app/data/lottery_v4.sqlite3 /app/backups/lottery-v4-$(date +%%F).sqlite3",
         )
 
     def test_compose_public_boundary_and_persistent_paths(self):
@@ -86,7 +89,7 @@ class DeploymentFilesTest(unittest.TestCase):
         self.assertEqual(environment["APP_ENVIRONMENT"], "production")
         self.assertEqual(environment["APP_AUTH_MODE"], "oidc")
         self.assertIn("${ALLOWED_EMAILS", environment["ALLOWED_EMAILS"])
-        self.assertEqual(environment["LOTTERY_DB_PATH"], "/app/data/lottery_v3.sqlite3")
+        self.assertEqual(environment["LOTTERY_DB_PATH"], "/app/data/lottery_v4.sqlite3")
         config = AuthConfig(environment["APP_ENVIRONMENT"], environment["APP_AUTH_MODE"],
                             environment["STREAMLIT_SERVER_ADDRESS"], ("owner@example.invalid",))
         self.assertEqual(config.mode, "oidc")
@@ -109,7 +112,7 @@ class DeploymentFilesTest(unittest.TestCase):
             instructions.setdefault(command, []).append(value)
         self.assertEqual(instructions["USER"], ["app"])
         self.assertTrue(any("useradd" in line for line in instructions["RUN"]))
-        self.assertTrue(any("/app/data/jobs_v3" in line and "chown" in line
+        self.assertTrue(any("/app/data/jobs_v4" in line and "chown" in line
                             for line in instructions["RUN"]))
         command = json.loads(instructions["CMD"][0])
         self.assertEqual(command[:5], ["python3", "-m", "streamlit", "run", "dashboard/app.py"])
@@ -132,7 +135,7 @@ class DeploymentFilesTest(unittest.TestCase):
         command = shlex.split(service["Service"]["ExecStart"])
         self.assertEqual(command[:2], ["/bin/sh", "-c"])
         self.assertEqual(command[2], "/usr/bin/docker compose exec -T app python3 scripts/backup_db.py "
-                         "/app/data/lottery_v3.sqlite3 /app/backups/lottery-v3-$(date +%%F).sqlite3")
+                         "/app/data/lottery_v4.sqlite3 /app/backups/lottery-v4-$(date +%%F).sqlite3")
         timer = configparser.ConfigParser(interpolation=None)
         timer.read_string(self.read("deploy/lottery-backup.timer"))
         self.assertEqual(timer["Timer"]["OnCalendar"], "daily")
@@ -165,8 +168,24 @@ class BackupDatabaseTest(unittest.TestCase):
         self.repository = HistoryRepository(self.source)
         self.repository.initialize()
         rule = Rule1()
-        self.payload = result_payload(simulate(rule, 12, seed=42, collect_records=True), rule, 0.25)
-        self.run_id = self.repository.save_run(self.payload, trace_enabled=True)
+        self.trace_path = self.root / "trace.sqlite3"
+        writer = TraceWriter(
+            self.trace_path, limits=TraceLimits(batch_size=5, max_records=100)
+        )
+        try:
+            result = simulate(
+                rule, 12, seed=42, collect_records=True, record_sink=writer.append
+            )
+            writer.finish(
+                trials=1, draws=12, initial_main_draws=0,
+                bonus_per_trial=result.bonus_draws,
+            )
+        finally:
+            writer.close()
+        self.payload = result_payload(result, rule, 0.25)
+        self.non_trace_payload = result_payload(simulate(rule, 12, seed=43), rule, 0.25)
+        self.run_id = str(uuid4())
+        self.repository.save_run(self.run_id, self.payload, trace_path=self.trace_path)
 
     def backup(self, source=None, destination=None):
         script = ROOT / "scripts/backup_db.py"
@@ -178,21 +197,26 @@ class BackupDatabaseTest(unittest.TestCase):
     def test_online_backup_is_independent_complete_and_restorable(self):
         with closing(sqlite3.connect(self.source)) as live:
             live.execute("PRAGMA journal_mode=WAL")
-            self.repository.save_run(self.payload, trace_enabled=False)
+            self.repository.save_run(str(uuid4()), self.non_trace_payload)
             result = self.backup()
         self.assertEqual(result.returncode, 0, result.stderr)
         backup = HistoryRepository(self.destination)
-        expected = self.repository.get_run(self.run_id, include_records=True)
-        self.assertEqual(backup.get_run(self.run_id, include_records=True), expected)
+        expected = self.repository.get_run(self.run_id)
+        self.assertEqual(backup.get_run(self.run_id), expected)
         self.assertEqual(len(backup.list_runs({}, 20, 0)), 2)
         with closing(sqlite3.connect(self.destination)) as connection:
             self.assertEqual(connection.execute("PRAGMA integrity_check").fetchall(), [("ok",)])
+            self.assertEqual(connection.execute(
+                "SELECT count(*) FROM draw_records WHERE run_id=?", (self.run_id,)
+            ).fetchone()[0], 12)
         self.repository.delete_run(self.run_id)
         self.assertIsNotNone(backup.get_run(self.run_id))
         result = self.backup(self.destination, self.source)
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(self.repository.get_run(self.run_id, include_records=True), expected)
-        self.assertIsNotNone(self.repository.get_run(self.repository.save_run(self.payload, False)))
+        self.assertEqual(self.repository.get_run(self.run_id), expected)
+        new_id = str(uuid4())
+        self.repository.save_run(new_id, self.non_trace_payload)
+        self.assertIsNotNone(self.repository.get_run(new_id))
 
     def test_same_resolved_path_is_rejected_without_losing_data(self):
         alias = self.root / "alias.sqlite3"

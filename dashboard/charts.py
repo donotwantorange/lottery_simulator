@@ -153,3 +153,25 @@ def source_comparison_rows(payload: dict) -> list[dict]:
             ("总计", "mean_six_stars", "theoretical_expected_count"),
         )
     ]
+
+
+def position_rows(rows: list[dict], mode: str = "count") -> list[dict]:
+    """Project one TraceReader position aggregate for table and chart use."""
+    if mode in ("比例", "rate"):
+        fields = ("four_rate", "five_rate", "six_rate")
+    elif mode in ("计数", "count"):
+        fields = ("four_count", "five_count", "six_count")
+    else:
+        raise ValueError("mode must be count or rate")
+    return [
+        {
+            "抽次": row["source_index"],
+            "四星": row[fields[0]],
+            "五星": row[fields[1]],
+            "六星": row[fields[2]],
+        }
+        for row in rows
+    ]
+
+
+position_chart_rows = position_rows

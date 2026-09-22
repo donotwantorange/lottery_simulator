@@ -11,6 +11,7 @@ from lottery_simulator.engine import (
     draw_once,
     simulate,
 )
+from lottery_simulator.formats import SAMPLING_VERSION
 from lottery_simulator.rules.base import BonusEvent, DrawState, RarityProbabilities
 from lottery_simulator.rules.pool_config import PoolConfig, RewardRule, WeightedCharacter
 from lottery_simulator.rules.rule_1 import Rule1
@@ -107,13 +108,128 @@ class EngineTest(unittest.TestCase):
         self.assertFalse(result.outcome.six_star_hard_pity_triggered)
         self.assertEqual(result.state_after, DrawState(80, 1))
 
-    def test_trace_defaults_off_and_rejects_none_or_multiple_trials(self):
-        self.assertEqual(simulate(self.rule, 1, seed=42).records, ())
+    def test_trace_defaults_off_and_rejects_invalid_flag_or_disabled_sink(self):
+        result = simulate(self.rule, 1, seed=42)
+        self.assertFalse(result.trace_enabled)
+        self.assertEqual(result.record_count, 0)
+        self.assertEqual(result.records, ())
         for value in (None, 0, "yes"):
             with self.subTest(value=value), self.assertRaises(ValueError):
                 simulate(self.rule, 1, seed=42, collect_records=value)
-        with self.assertRaises(ValueError):
-            simulate(self.rule, 1, trials=2, seed=42, collect_records=True)
+        with self.assertRaisesRegex(ValueError, "record_sink"):
+            simulate(self.rule, 1, seed=42, record_sink=lambda record: None)
+
+    def test_three_trial_trace_has_per_trial_indices_and_isolated_bonus_state(self):
+        result = simulate(
+            NoEarlySixRule(), draws=2, trials=3, seed=42,
+            initial_pity=29, initial_five_star_pity=4,
+            collect_records=True,
+        )
+
+        self.assertTrue(result.trace_enabled)
+        self.assertEqual(result.record_count, 36)
+        self.assertEqual(len(result.records), 36)
+        for trial_index in (1, 2, 3):
+            records = [
+                record for record in result.records
+                if record.trial_index == trial_index
+            ]
+            self.assertEqual(len(records), 12)
+            self.assertEqual(
+                [record.source for record in records],
+                ["main"] + ["bonus"] * 10 + ["main"],
+            )
+            self.assertEqual(
+                [record.draw_index for record in records], list(range(1, 13))
+            )
+            self.assertEqual(
+                [record.main_draws_completed for record in records],
+                [30] * 11 + [31],
+            )
+            main = [record for record in records if record.source == "main"]
+            self.assertEqual(
+                [record.source_index for record in main], [1, 2]
+            )
+            self.assertEqual(
+                main[0].main_state_before, DrawState(29, 4)
+            )
+            bonus = [record for record in records if record.source == "bonus"]
+            self.assertEqual(
+                [record.source_index for record in bonus], list(range(1, 11))
+            )
+            self.assertTrue(all(
+                record.main_state_before == record.main_state_after
+                for record in bonus
+            ))
+
+    def test_sink_and_memory_modes_emit_identical_records(self):
+        memory = simulate(
+            NoEarlySixRule(), draws=2, trials=3, seed=42,
+            initial_pity=29, collect_records=True,
+        )
+        streamed = []
+        sink_result = simulate(
+            NoEarlySixRule(), draws=2, trials=3, seed=42,
+            initial_pity=29, collect_records=True, record_sink=streamed.append,
+        )
+
+        self.assertEqual(streamed, list(memory.records))
+        self.assertEqual(sink_result.records, ())
+        self.assertEqual(sink_result.record_count, len(streamed))
+        self.assertEqual(sink_result, replace(memory, records=()))
+
+    def test_trace_mode_does_not_change_aggregates(self):
+        without = simulate(
+            NoEarlySixRule(), draws=2, trials=3, seed=42, initial_pity=29,
+        )
+        with_trace = simulate(
+            NoEarlySixRule(), draws=2, trials=3, seed=42,
+            initial_pity=29, collect_records=True,
+        )
+
+        self.assertEqual(
+            without,
+            replace(
+                with_trace, trace_enabled=False, record_count=0, records=()
+            ),
+        )
+
+    def test_sink_error_aborts_simulation(self):
+        def fail(_record):
+            raise RuntimeError("sink failed")
+
+        with self.assertRaisesRegex(RuntimeError, "sink failed"):
+            simulate(
+                self.rule, draws=2, trials=3, seed=42,
+                collect_records=True, record_sink=fail,
+            )
+
+    def test_controlled_rng_advances_across_trial_boundary(self):
+        rng = SequenceRandom((0.9, 0.0, 0.0))
+        with patch(
+            "lottery_simulator.engine.random.Random", return_value=rng
+        ) as random_constructor:
+            result = simulate(
+                Rule1(subrules=()), draws=1, trials=2, seed=42,
+                collect_records=True,
+            )
+
+        random_constructor.assert_called_once_with(42)
+        self.assertEqual(
+            [record.draw_result.outcome.rarity for record in result.records],
+            [4, 6],
+        )
+
+    def test_sampling_version_one_seeded_sequence_is_unchanged(self):
+        self.assertEqual(SAMPLING_VERSION, 1)
+        result = simulate(
+            Rule1(subrules=()), draws=8, seed=42, collect_records=True
+        )
+
+        self.assertEqual(
+            [record.draw_result.outcome.rarity for record in result.records],
+            [4, 5, 4, 4, 4, 4, 4, 5],
+        )
 
     def test_trace_does_not_change_outcome(self):
         config = replace(self.rule.config,
@@ -122,7 +238,10 @@ class EngineTest(unittest.TestCase):
         rule = Rule1(config)
         without = simulate(rule, 30, trials=1, seed=42, collect_records=False)
         with_trace = simulate(rule, 30, trials=1, seed=42, collect_records=True)
-        self.assertEqual(without, replace(with_trace, records=()))
+        self.assertEqual(
+            without,
+            replace(with_trace, trace_enabled=False, record_count=0, records=()),
+        )
 
     def test_disabled_trace_never_constructs_main_or_bonus_records(self):
         with patch("lottery_simulator.engine.DrawRecord", side_effect=AssertionError):
@@ -508,8 +627,8 @@ class EngineTest(unittest.TestCase):
             self.assertAlmostEqual(sum(astuple(record.draw_result.probabilities)), 1.0)
             self.assertIsInstance(outcome.five_star_pity_triggered, bool)
             self.assertIsInstance(outcome.six_star_hard_pity_triggered, bool)
-            self.assertEqual(record.record_format_version, 1)
-            self.assertFalse(hasattr(record, "trial_index"))
+            self.assertEqual(record.record_format_version, 2)
+            self.assertEqual(record.trial_index, 1)
             if record.source == "main":
                 self.assertEqual(record.draw_result.state_before, record.main_state_before)
                 self.assertEqual(record.draw_result.state_after, record.main_state_after)
@@ -552,6 +671,27 @@ class EngineTest(unittest.TestCase):
             {30},
         )
         self.assertEqual(main_records[-1].draw_result.state_before.misses_since_six_star + 1, 31)
+
+    def test_bonus_source_index_is_cumulative_across_events_in_a_trial(self):
+        class MultipleBonusEvents:
+            def events_after_main_draw(self, completed_main_draws):
+                if completed_main_draws == 1:
+                    return (
+                        BonusEvent("first", 2, 0.008, 10),
+                        BonusEvent("second", 3, 0.008, 10),
+                    )
+                return ()
+
+            def expected_draws(self, initial_main_draws, draws):
+                return 5 if initial_main_draws == 0 and draws >= 1 else 0
+
+        result = simulate(
+            Rule1(subrules=(MultipleBonusEvents(),)), draws=1, seed=42,
+            collect_records=True,
+        )
+        bonus = [record for record in result.records if record.source == "bonus"]
+
+        self.assertEqual([record.source_index for record in bonus], [1, 2, 3, 4, 5])
 
     def test_initial_pity_thirty_means_bonus_was_already_claimed(self):
         result = simulate(self.rule, draws=1, trials=1, seed=42, initial_pity=30, collect_records=True)
@@ -631,13 +771,14 @@ class EngineTest(unittest.TestCase):
     def test_new_record_constructor_nests_draw_and_main_state(self):
         single = draw_once(self.rule, DrawState(), SequenceRandom((0.9,)))
         record = DrawRecord(
-            1, 1, "main", 1, None, 1, single, DrawState(), DrawState(1, 1)
+            2, 1, 1, "main", 1, None, 1, single, DrawState(), DrawState(1, 1)
         )
         result = SimulationResult(
             "rule1", 3, 1, 42, 2, 0, 3, {0: 1}, 0.0, 0.0, 0.0,
-            0.0, None, 0.024, 0.0, 0.024, (record,)
+            0.0, None, 0.024, 0.0, 0.024, True, 1, (record,)
         )
 
+        self.assertEqual(record.trial_index, 1)
         self.assertEqual(record.source, "main")
         self.assertEqual(record.source_index, 1)
         self.assertEqual(record.main_draws_completed, 1)
@@ -653,6 +794,8 @@ class EngineTest(unittest.TestCase):
         self.assertEqual(result.final_main_draws, 5)
         self.assertEqual(result.mean_main_six_stars, 0.0)
         self.assertEqual(result.theoretical_expected_main_count, 0.024)
+        self.assertTrue(result.trace_enabled)
+        self.assertEqual(result.record_count, 1)
         self.assertEqual(result.theoretical_source_summaries, {})
 
     def test_progress_hooks_do_not_change_seeded_result(self):

@@ -1,8 +1,6 @@
-import json
+import copy
 import unittest
-from copy import deepcopy
-
-import streamlit
+from dataclasses import asdict
 
 from dashboard.models import result_payload
 from dashboard.views.simulation import render_result
@@ -10,353 +8,185 @@ from lottery_simulator.engine import simulate
 from lottery_simulator.rules.rule_1 import Rule1
 
 
-class _Context:
-    def __init__(self, owner=None, label=None):
-        self.owner = owner
-        self.label = label
-
-    def __enter__(self):
-        if self.owner is not None:
-            self.previous_label = self.owner.active_expander
-            self.owner.active_expander = self.label
-        return self
-
-    def __exit__(self, *unused):
-        if self.owner is not None:
-            self.owner.active_expander = self.previous_label
-        return False
-
-
-class _ColumnConfig:
-    @staticmethod
-    def NumberColumn(**kwargs):
-        return kwargs
-
-
 class RecordingStreamlit:
-    def __init__(self, source="总计", reward_name="奖励A"):
-        self.events = []
-        self.metrics = []
-        self.charts = []
-        self.dataframes = []
-        self.dataframe_kwargs = []
-        self.labels = []
-        self.downloads = []
-        self.writes = []
-        self.write_contexts = []
-        self.active_expander = None
+    def __init__(self, view="实验概览", source="总计", category="星级", columns="基础列"):
+        self.view = view
         self.source = source
-        self.reward_name = reward_name
-        self.column_config = _ColumnConfig
+        self.category = category
+        self.detail_columns = columns
+        self.session_state = {}
+        self.metrics = []
+        self.dataframes = []
+        self.charts = []
+        self.infos = []
+        self.captions = []
+        self.writes = []
+        self.downloads = []
+        self.category_options = ()
 
     def columns(self, count):
         return [self] * count
 
     def metric(self, label, value, delta=None):
-        self.labels.append(label)
         self.metrics.append((label, value, delta))
 
-    def subheader(self, label):
-        self.labels.append(label)
-        self.events.append(("subheader", label))
-
-    def line_chart(self, data, **kwargs):
-        self.events.append(("line_chart", None))
-        self.charts.append(("line", data, kwargs))
-
-    def bar_chart(self, data, **kwargs):
-        self.events.append(("bar_chart", None))
-        self.charts.append(("bar", data, kwargs))
-
-    def expander(self, label):
-        self.labels.append(label)
-        self.events.append(("expander", label))
-        return _Context(self, label)
-
-    def dataframe(self, data, **kwargs):
-        self.events.append(("dataframe", None))
-        self.dataframes.append(data)
-        self.dataframe_kwargs.append(kwargs)
-
-    def tabs(self, labels):
-        self.labels.extend(labels)
-        self.events.append(("tabs", tuple(labels)))
-        return [_Context() for _ in labels]
+    def selectbox(self, label, options, **kwargs):
+        if label == "结果视图":
+            return self.view
+        if label == "分类统计":
+            self.category_options = tuple(options)
+            return self.category
+        if label == "每页条数":
+            return 100
+        return options[0]
 
     def radio(self, label, options, **kwargs):
-        self.labels.append(label)
-        self.events.append(("radio", (label, tuple(options), kwargs)))
-        return self.source
+        if label == "数据来源":
+            return self.source
+        if label == "明细列":
+            return self.detail_columns
+        return options[0]
 
-    def selectbox(self, label, options, **kwargs):
-        self.labels.append(label)
-        self.events.append(("selectbox", (label, tuple(options), kwargs)))
-        return self.reward_name
+    def dataframe(self, data, **kwargs):
+        self.dataframes.append(data)
+
+    def bar_chart(self, data, **kwargs):
+        self.charts.append(data)
+
+    def line_chart(self, data, **kwargs):
+        self.charts.append(data)
 
     def write(self, value):
         self.writes.append(value)
-        self.write_contexts.append((self.active_expander, value))
 
-    def info(self, label):
-        self.labels.append(label)
-        self.events.append(("info", label))
+    def caption(self, value):
+        self.captions.append(value)
+
+    def info(self, value):
+        self.infos.append(value)
+
+    def warning(self, value):
+        pass
+
+    def checkbox(self, label, **kwargs):
+        return False
+
+    def number_input(self, label, **kwargs):
+        return kwargs.get("value", kwargs.get("min_value", 1))
+
+    def button(self, label, **kwargs):
+        return False
 
     def download_button(self, label, **kwargs):
-        self.labels.append(label)
         self.downloads.append((label, kwargs))
+
+
+class TraceReaderStub:
+    def __init__(self, records):
+        self.records = records
+        self.query_calls = []
+        self.iter_calls = []
+        self.position_calls = []
+
+    def query_records(self, filters, *, limit=100, offset=0):
+        self.query_calls.append((filters, limit, offset))
+        return self.records[offset : offset + limit], len(self.records)
+
+    def iter_records(self, filters, *, batch_size=1000):
+        self.iter_calls.append(filters)
+        yield from self.records
+
+    def position_counts(self, **kwargs):
+        self.position_calls.append(kwargs)
+        return []
 
 
 class SimulationResultViewTest(unittest.TestCase):
     def setUp(self):
         rule = Rule1()
-        self.payload = result_payload(
-            simulate(rule, 2, seed=42, initial_pity=29, collect_records=True), rule, 0.25
+        simulation = simulate(
+            rule, 2, trials=2, seed=42, initial_pity=29, collect_records=True
         )
-        self.payload["备注"] = "六星"
+        self.payload = result_payload(simulation, rule, 0.25)
+        self.payload["id"] = "run-1"
+        self.records = [asdict(record) for record in simulation.records]
 
     @staticmethod
     def table_with_column(st, column):
         return next(table for table in st.dataframes if table and column in table[0])
 
-    def test_renderer_shows_six_regions_dynamic_rows_trace_and_utf8_download(self):
-        st = RecordingStreamlit()
+    def test_renderer_shows_four_result_views_and_summary_without_reader_query(self):
+        reader = TraceReaderStub(self.records)
+        st = RecordingStreamlit(view="实验概览")
 
-        render_result(st, self.payload, trace_enabled=True)
+        render_result(st, self.payload, reader)
 
+        self.assertEqual(reader.query_calls, [])
+        self.assertEqual(reader.iter_calls, [])
         self.assertEqual(
-            next(value for event, value in st.events if event == "tabs"),
-            ("总览", "六星构成", "具体角色", "附赠奖励", "保底统计", "Trace"),
+            [label for label, _, _ in st.metrics][:3],
+            ["每轮主池抽数", "每轮赠送抽数", "每轮总抽数"],
         )
-        source_event = next(value for event, value in st.events if event == "radio")
-        self.assertEqual(source_event[0], "数据来源")
-        self.assertEqual(source_event[1], ("主池", "赠送", "总计"))
+        summary = self.table_with_column(st, "范围")
+        self.assertEqual(summary[-1]["范围"], "全实验")
+        self.assertEqual(st.downloads[0][0], "下载汇总 JSON")
+        self.assertNotIn(b'"records"', st.downloads[0][1]["data"])
 
-        probability_table = self.table_with_column(st, "抽次")
-        self.assertEqual(len(probability_table), 80)
-        self.assertEqual(
-            (probability_table[64]["抽次"], probability_table[64]["条件六星概率"]),
-            (65, 0.008),
-        )
-        self.assertEqual(
-            (probability_table[65]["抽次"], probability_table[65]["条件六星概率"]),
-            (66, 0.058),
-        )
+    def test_renderer_switches_category_subviews_without_reader_query(self):
+        reader = TraceReaderStub(self.records)
+        for category in ("星级", "六星构成", "六星具体角色", "奖励", "保底"):
+            with self.subTest(category=category):
+                st = RecordingStreamlit(view="分类统计", category=category, source="总计")
+                render_result(st, self.payload, reader)
+                self.assertEqual(reader.query_calls, [])
+                self.assertTrue(st.dataframes)
+                self.assertIn("六星具体角色", st.category_options)
 
-        rarity_table = self.table_with_column(st, "星级")
-        self.assertEqual([row["星级"] for row in rarity_table], ["四星", "五星", "六星"])
-        self.assertEqual([row["模拟均值"] for row in rarity_table], [9.0, 3.0, 0.0])
+    def test_renderer_detail_uses_reader_and_keeps_new_round_columns(self):
+        reader = TraceReaderStub(self.records)
+        st = RecordingStreamlit(view="逐抽明细", columns="完整列")
 
-        category_table = self.table_with_column(st, "类型")
-        self.assertEqual(
-            [row["类型"] for row in category_table],
-            ["UP限定", "其他限定", "常驻"],
-        )
+        render_result(st, self.payload, reader)
 
-        character_table = self.table_with_column(st, "角色")
-        self.assertEqual(len(character_table), 9)
-        self.assertEqual(character_table[0]["角色"], "UP-A")
-        self.assertEqual(character_table[-1]["角色"], "常驻-I")
+        self.assertEqual(len(reader.query_calls), 1)
+        filters, limit, offset = reader.query_calls[0]
+        self.assertEqual((filters.trial_from, filters.trial_to, filters.source), (1, 1, None))
+        self.assertEqual((limit, offset), (100, 0))
+        table = self.table_with_column(st, "轮次")
+        self.assertEqual((table[0]["轮次"], table[0]["轮内总抽次"]), (1, 1))
+        self.assertIn("总体抽取序号", table[0])
 
-        reward_table = self.table_with_column(st, "奖励")
-        self.assertEqual([row["奖励"] for row in reward_table], ["奖励A", "奖励B"])
-        reward_distribution = self.table_with_column(st, "奖励总量")
-        self.assertEqual(reward_distribution, [
-            {"奖励总量": 24.0, "实验次数": 1, "占比": 1.0},
-        ])
-
-        pity_table = self.table_with_column(st, "保底类型")
-        self.assertEqual(
-            [row["保底类型"] for row in pity_table],
-            ["五星保底", "六星硬保底"],
-        )
-
-        trace_table = next(table for table in st.dataframes if table and "总体抽取序号" in table[0])
-        self.assertEqual(trace_table[0]["总体抽取序号"], 1)
-        self.assertEqual(trace_table[0]["来源"], "主池")
-        self.assertEqual(trace_table[0]["星级"], 4)
-        self.assertEqual(trace_table[0]["角色"], "未配置角色名单")
-        self.assertEqual(trace_table[0]["六星概率"], 0.008)
-        trace_kwargs = next(
-            kwargs for table, kwargs in zip(st.dataframes, st.dataframe_kwargs)
-            if table is trace_table
-        )
-        self.assertEqual(
-            trace_kwargs["column_config"]["六星概率"],
-            {"format": "percent"},
-        )
-        label, download = st.downloads[0]
-        self.assertEqual(label, "下载结果 JSON")
-        self.assertEqual(download["file_name"], "simulation-result.json")
-        self.assertEqual(download["mime"], "application/json")
-        self.assertIsInstance(download["data"], bytes)
-        self.assertIn("六星".encode("utf-8"), download["data"])
-        self.assertEqual(json.loads(download["data"].decode("utf-8")), self.payload)
-
-    def test_renderer_switches_all_summary_tables_between_sources(self):
-        self.payload["source_summaries"]["main"]["mean_rarity_counts"] = {
-            "4": 10.1, "5": 10.2, "6": 10.3,
-        }
-        self.payload["source_summaries"]["bonus"]["mean_rarity_counts"] = {
-            "4": 20.1, "5": 20.2, "6": 20.3,
-        }
-        self.payload["source_summaries"]["total"]["mean_rarity_counts"] = {
-            "4": 30.1, "5": 30.2, "6": 30.3,
-        }
-        self.payload["source_summaries"]["main"]["mean_six_star_categories"] = {
-            "up": 11.1, "other_limited": 11.2, "standard": 11.3,
-        }
-        self.payload["source_summaries"]["bonus"]["mean_six_star_categories"] = {
-            "up": 21.1, "other_limited": 21.2, "standard": 21.3,
-        }
-        self.payload["source_summaries"]["total"]["mean_six_star_categories"] = {
-            "up": 31.1, "other_limited": 31.2, "standard": 31.3,
-        }
-        self.payload["source_summaries"]["main"]["mean_character_counts"]["UP-A"] = 12.1
-        self.payload["source_summaries"]["bonus"]["mean_character_counts"]["UP-A"] = 22.1
-        self.payload["source_summaries"]["total"]["mean_character_counts"]["UP-A"] = 32.1
-        self.payload["source_summaries"]["main"]["mean_rewards"] = {
-            "奖励A": 13.1, "奖励B": 13.2,
-        }
-        self.payload["source_summaries"]["bonus"]["mean_rewards"] = {
-            "奖励A": 23.1, "奖励B": 23.2,
-        }
-        self.payload["source_summaries"]["total"]["mean_rewards"] = {
-            "奖励A": 33.1, "奖励B": 33.2,
-        }
-        self.payload["source_distributions"]["main"]["reward_totals"]["奖励A"] = {
-            "14.1": 1,
-        }
-        self.payload["source_distributions"]["bonus"]["reward_totals"]["奖励A"] = {
-            "24.1": 1,
-        }
-        self.payload["source_distributions"]["total"]["reward_totals"]["奖励A"] = {
-            "34.1": 1,
-        }
-        self.payload["source_summaries"]["main"]["mean_pity_triggers"] = {
-            "five_star": 15.1, "six_star_hard": 15.2,
-        }
-        self.payload["source_summaries"]["bonus"]["mean_pity_triggers"] = {
-            "five_star": 25.1, "six_star_hard": 25.2,
-        }
-        self.payload["source_summaries"]["total"]["mean_pity_triggers"] = {
-            "five_star": 35.1, "six_star_hard": 35.2,
-        }
-        expected = {
-            "主池": {
-                "rarities": [10.1, 10.2, 10.3],
-                "categories": [11.1, 11.2, 11.3],
-                "character": 12.1,
-                "rewards": [13.1, 13.2],
-                "distribution": [{"奖励总量": 14.1, "实验次数": 1, "占比": 1.0}],
-                "pity": [15.1, 15.2],
-            },
-            "赠送": {
-                "rarities": [20.1, 20.2, 20.3],
-                "categories": [21.1, 21.2, 21.3],
-                "character": 22.1,
-                "rewards": [23.1, 23.2],
-                "distribution": [{"奖励总量": 24.1, "实验次数": 1, "占比": 1.0}],
-                "pity": [25.1, 25.2],
-            },
-            "总计": {
-                "rarities": [30.1, 30.2, 30.3],
-                "categories": [31.1, 31.2, 31.3],
-                "character": 32.1,
-                "rewards": [33.1, 33.2],
-                "distribution": [{"奖励总量": 34.1, "实验次数": 1, "占比": 1.0}],
-                "pity": [35.1, 35.2],
-            },
-        }
-        for label, source_values in expected.items():
-            with self.subTest(source=label):
-                st = RecordingStreamlit(source=label)
-
-                render_result(st, self.payload, trace_enabled=False)
-
-                rarity_table = self.table_with_column(st, "星级")
-                self.assertEqual(
-                    [row["模拟均值"] for row in rarity_table],
-                    source_values["rarities"],
-                )
-                category_table = self.table_with_column(st, "类型")
-                self.assertEqual(
-                    [row["模拟均值"] for row in category_table],
-                    source_values["categories"],
-                )
-                character_table = self.table_with_column(st, "角色")
-                self.assertEqual(
-                    character_table[0]["模拟均值"], source_values["character"]
-                )
-                reward_table = self.table_with_column(st, "奖励")
-                self.assertEqual(
-                    [row["模拟均值"] for row in reward_table],
-                    source_values["rewards"],
-                )
-                reward_distribution = self.table_with_column(st, "奖励总量")
-                self.assertEqual(
-                    reward_distribution, source_values["distribution"]
-                )
-                pity_table = self.table_with_column(st, "保底类型")
-                self.assertEqual(
-                    [row["模拟均值"] for row in pity_table],
-                    source_values["pity"],
-                )
-
-    def test_renderer_never_passes_records_to_dataframe_without_trace(self):
-        st = RecordingStreamlit()
-
-        render_result(st, self.payload, trace_enabled=False)
-
-        self.assertNotIn(self.payload["records"], st.dataframes)
-        self.assertIn("本次运行未保存逐抽记录", st.labels)
-
-    def test_current_and_saved_results_share_trace_and_folded_run_metadata(self):
-        self.payload.update(
-            id=9, sampling_version=1, rng_algorithm="python.random.Random",
-            python_implementation="CPython", python_version="3.12.3",
-        )
-        before = deepcopy(self.payload)
-        trace_tables = []
-        for saved in (False, True):
-            with self.subTest(saved_snapshot=saved):
-                st = RecordingStreamlit()
-                render_result(st, self.payload, trace_enabled=True, saved_snapshot=saved)
-                trace_tables.append(self.table_with_column(st, "总体抽取序号"))
-                self.assertIn(("运行信息", {
-                    "sampling_version": 1, "rng_algorithm": "python.random.Random",
-                    "python_implementation": "CPython", "python_version": "3.12.3",
-                }), st.write_contexts)
-                downloaded = json.loads(st.downloads[0][1]["data"].decode("utf-8"))
-                self.assertEqual(downloaded, before)
-                self.assertIn("draw_result", downloaded["records"][0])
-                self.assertEqual(self.payload, before)
-        self.assertEqual(trace_tables[0], trace_tables[1])
-        self.assertEqual(trace_tables[1][0]["六星概率"], 0.008)
-
-    def test_renderer_uses_real_number_column_percent_for_raw_probability_boundaries(self):
-        records = []
+    def test_renderer_detail_probability_boundaries_come_from_reader_records(self):
+        records = [copy.deepcopy(record) for record in self.records[:3]]
         for index, probability in enumerate((0.0, 0.008, 1.0), start=1):
-            record = deepcopy(self.payload["records"][0])
-            record["draw_index"] = index
-            record["draw_result"]["probabilities"] = {
-                "four_star": 1.0 - probability, "five_star": 0.0, "six_star": probability,
+            records[index - 1]["draw_index"] = index
+            records[index - 1]["draw_result"]["probabilities"] = {
+                "four_star": 1.0 - probability,
+                "five_star": 0.0,
+                "six_star": probability,
             }
-            records.append(record)
-        self.payload["records"] = records
-        before = deepcopy(self.payload)
-        st = RecordingStreamlit()
-        st.column_config = streamlit.column_config
+        reader = TraceReaderStub(records)
+        st = RecordingStreamlit(view="逐抽明细", columns="完整列")
 
-        render_result(st, self.payload, trace_enabled=True)
+        render_result(st, self.payload, reader)
 
-        table = self.table_with_column(st, "总体抽取序号")
+        table = self.table_with_column(st, "六星概率")
         self.assertEqual([row["六星概率"] for row in table], [0.0, 0.008, 1.0])
-        kwargs = next(kwargs for data, kwargs in zip(st.dataframes, st.dataframe_kwargs)
-                      if data is table)
-        for name in ("四星概率", "五星概率", "六星概率"):
-            self.assertEqual(kwargs["column_config"][name]["type_config"]["format"], "percent")
-        self.assertEqual(self.payload, before)
-        self.assertEqual(json.loads(st.downloads[0][1]["data"].decode("utf-8")), before)
+
+    def test_renderer_without_trace_shows_detail_notice_without_reader(self):
+        st = RecordingStreamlit(view="逐抽明细")
+
+        render_result(st, self.payload, None)
+
+        self.assertIn("本次运行未保存逐抽结果", st.infos)
+
+    def test_legacy_trace_argument_is_rejected_without_reading_payload_records(self):
+        st = RecordingStreamlit(view="逐抽明细")
+        payload = dict(self.payload)
+        payload["records"] = object()
+
+        with self.assertRaises(TypeError):
+            render_result(st, payload, None, trace_enabled=True)
 
 
 if __name__ == "__main__":

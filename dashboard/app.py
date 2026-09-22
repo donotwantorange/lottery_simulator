@@ -1,6 +1,5 @@
 """Run with: streamlit run dashboard/app.py."""
 
-from datetime import datetime, timezone
 import logging
 import os
 from pathlib import Path
@@ -14,18 +13,13 @@ if str(project_root) not in sys.path:
     sys.path.insert(0, str(project_root))
 
 from dashboard.auth import AuthConfig, require_access
-from dashboard.jobs import (
-    ACTIVE_STATUSES,
-    JobAlreadyRunning,
-    JobManager,
-    validate_parameters_for_active_rule,
-)
-from dashboard.models import RunParameters
+from dashboard.jobs import ACTIVE_STATUSES, JobManager
 from dashboard.repository import HistoryRepository
-from dashboard.views.configuration import render_pool_config_editor
-from dashboard.views.history import apply_pending_reuse, render_history
+from dashboard.views.history import apply_pending_reuse, render_history, reuse_parameters
+from dashboard.views.job_status import render_active_job
+from dashboard.views.new_experiment import render_new_experiment
 from dashboard.views.simulation import render_result
-from lottery_simulator.cli import RULES
+from dashboard.views.trace_details import result_owner
 
 
 def require_dashboard_access():
@@ -48,121 +42,155 @@ def startup_job_manager(job_root: str, database_path: str) -> JobManager:
     return manager
 
 
+@st.cache_resource
+def startup_repository(database_path: str) -> HistoryRepository:
+    repository = HistoryRepository(database_path)
+    repository.initialize()
+    return repository
+
+
+def _selected_result(st):
+    value = st.session_state.get("selected_result")
+    if isinstance(value, (tuple, list)) and len(value) == 2:
+        return tuple(value)
+    return None
+
+
+def _render_active_status(manager, current_id):
+    state = manager.get(current_id) if current_id is not None else None
+    if state is None or state.status not in ACTIVE_STATUSES:
+        return
+
+    @st.fragment(run_every=0.5)
+    def poll_job():
+        render_active_job(st, manager, current_id, require_dashboard_access)
+
+    poll_job()
+
+
+def _render_selected_result(st, manager, repository):
+    selected = _selected_result(st)
+    if selected is None:
+        st.info("请选择一个实验结果，或先开始模拟")
+        return
+    kind, identifier = selected
+    if st.session_state.get("result-owner") != selected:
+        st.session_state["result-owner"] = selected
+        for key in ("trace-page", "trace-download", "trace-filter-signature"):
+            st.session_state.pop(key, None)
+    payload = None
+    trace_enabled = False
+    trace_reader = None
+    saved_snapshot = kind == "history"
+    if kind == "job":
+        state = manager.get(identifier)
+        if state is not None and state.status == "cancelled":
+            st.info("模拟已取消")
+            return
+        if state is not None and state.status == "failed":
+            st.error("模拟任务失败")
+            return
+        if state is not None and state.history_saved:
+            history_id = state.run_id or identifier
+            if repository.get_run(history_id) is None:
+                st.info("历史记录已删除，当前任务结果不可恢复")
+                return
+        payload = manager.get_result(identifier)
+        if state is not None:
+            trace_enabled = bool(state.parameters.get("trace"))
+        if payload is None and state is not None and state.status in ACTIVE_STATUSES:
+            st.info("模拟运行中，请稍候")
+            return
+        result_view = st.session_state.get(
+            f'result-view-{result_owner(st, payload)}' if payload is not None else "",
+            "实验概览",
+        )
+        if payload is not None and trace_enabled and result_view in ("按抽次分析", "逐抽明细"):
+            trace_reader = manager.get_trace_reader(identifier)
+    elif kind == "history":
+        payload = repository.get_run(identifier)
+        if payload is None:
+            st.warning("所选历史记录已不存在")
+            st.session_state.pop("selected_result", None)
+            return
+        trace_enabled = payload["trace_enabled"]
+        result_view = st.session_state.get(
+            f'result-view-{result_owner(st, payload)}', "实验概览"
+        )
+        if trace_enabled and result_view in ("按抽次分析", "逐抽明细"):
+            trace_reader = repository.get_trace_reader(identifier)
+    else:
+        st.warning("所选实验结果引用无效")
+        st.session_state.pop("selected_result", None)
+        return
+    if payload is None:
+        st.info("模拟结果暂不可用")
+        return
+    if kind == "job":
+        st.success("模拟已完成")
+        state = manager.get(identifier)
+        if state is not None and state.persistence_error:
+            st.warning("历史保存失败")
+    st.subheader("实验结果")
+    st.caption(f"结果来源：{'历史记录' if saved_snapshot else '当前任务'} · {identifier}")
+    st.caption(f"已完成 · Trace：{'启用' if trace_enabled else '关闭'} · 记录数：{payload.get('record_count', 0):,}")
+    with st.expander("参数与配置快照"):
+        st.json({key: payload.get(key) for key in (
+            "rule_name", "rule_version", "main_draws", "trials", "seed",
+            "initial_pity", "initial_five_star_pity", "trace_enabled",
+            "result_format_version", "sampling_version", "pool_config",
+        )})
+    if st.button("复用参数", key=f"result-reuse-{kind}-{identifier}"):
+        if reuse_parameters(st, payload):
+            st.rerun()
+    render_result(st, payload, trace_reader, saved_snapshot=saved_snapshot)
+
+
 st.set_page_config(page_title="抽奖概率实验室", layout="wide")
 require_dashboard_access()
 
 data_dir = Path(os.environ.get("LOTTERY_DATA_DIR", project_root / "data"))
-database_path = Path(os.environ.get("LOTTERY_DB_PATH", data_dir / "history_v3.sqlite3"))
-manager = startup_job_manager(str(data_dir / "jobs_v3"), str(database_path))
-repository = HistoryRepository(database_path)
+database_path = Path(os.environ.get("LOTTERY_DB_PATH", data_dir / "history_v4.sqlite3"))
+manager = startup_job_manager(str(data_dir / "jobs_v4"), str(database_path))
 try:
-    repository.initialize()
+    repository = startup_repository(str(database_path))
 except Exception:
     logging.getLogger(__name__).exception("History database initialization failed")
     st.error("历史数据库暂不可用；当前为只读错误页。请联系管理员检查迁移或从备份恢复。")
     st.stop()
+
 apply_pending_reuse(st, repository)
+pending_delete = st.session_state.get("pending_delete_id")
+if pending_delete and repository.get_run(pending_delete) is None:
+    st.session_state.pop("pending_delete_id", None)
+    st.warning("待删除的历史记录已不存在")
+pending_page = st.session_state.pop("_pending_page", None)
+if pending_page in ("新建实验", "实验结果", "历史记录"):
+    st.session_state["page"] = pending_page
 current_id = st.session_state.get("current_job_id")
-current = manager.get_active()
-invalid_current_reference = False
-if current is not None:
-    current_id = current.job_id
+active = manager.get_active()
+if active is not None:
+    current_id = active.job_id
     st.session_state["current_job_id"] = current_id
-else:
-    current = manager.get(current_id)
-    if current_id is not None and current is None:
-        st.session_state.pop("current_job_id", None)
-        current_id = None
-        invalid_current_reference = True
-live = current is not None and current.status in ACTIVE_STATUSES
+elif current_id is not None and manager.get(current_id) is None:
+    st.session_state.pop("current_job_id", None)
+    current_id = None
+live = active is not None
 
 st.title("抽奖概率实验室")
-if invalid_current_reference:
-    st.warning("当前任务结果已失效")
-st.session_state.setdefault("draws", 100)
+st.session_state.setdefault("page", "新建实验")
 with st.sidebar:
-    rule_name = st.selectbox("规则", tuple(RULES), key="rule_name")
-    draws = st.number_input("主池抽数", min_value=1, step=1, key="draws")
-    trials = st.number_input("实验轮数", min_value=1, step=1, key="trials")
-    initial_pity = st.number_input("假设主池已累计多少抽仍未出6星", min_value=0,
-                                   step=1, key="initial_pity",
-                                   help="该值同时初始化主池保底位置与累计主池抽数；累计抽数决定首次30抽赠送是已领取还是会在本次模拟中触发。")
-    seed_text = st.text_input("随机种子（留空自动生成）", key="seed_text")
-    trace = st.toggle("Trace", disabled=trials != 1, help="逐抽记录仅支持单轮模拟", key="trace")
-    with st.expander("高级设置"):
-        five_star_pity_enabled = st.session_state.get("pool_five_star_pity_enabled", True)
-        if not five_star_pity_enabled:
-            st.session_state["initial_five_star_pity"] = 0
-        initial_five_star_pity = st.number_input(
-            "假设主池已连续多少抽未出5星及以上", min_value=0, step=1,
-            disabled=not five_star_pity_enabled, key="initial_five_star_pity",
-        )
-    try:
-        pool_config = render_pool_config_editor(st)
-    except ValueError as error:
-        st.error(str(error))
-        pool_config = None
-    if st.button("开始模拟", disabled=live):
-        try:
-            seed = int(seed_text) if seed_text.strip() else None
-        except ValueError:
-            st.error("随机种子必须为整数")
-        else:
-            try:
-                if pool_config is None:
-                    raise ValueError("奖池配置无效，请修正后重试")
-                parameters = validate_parameters_for_active_rule(
-                    RunParameters(rule_name, draws, trials, initial_pity,
-                                  seed, trace and trials == 1,
-                                  initial_five_star_pity, pool_config.to_dict())
-                )
-            except ValueError as error:
-                st.error(str(error))
-            else:
-                try:
-                    state = manager.start(
-                        parameters, synchronous=os.environ.get("DASHBOARD_SYNC_JOBS") == "1")
-                except JobAlreadyRunning:
-                    st.error("已有模拟任务正在运行")
-                except Exception:
-                    logging.getLogger(__name__).exception("Could not start simulation")
-                    st.error("模拟任务启动失败")
-                else:
-                    st.session_state["current_job_id"] = state.job_id
-                    st.rerun()
+    page = st.radio("导航", ("新建实验", "实验结果", "历史记录"), key="page")
+    if live:
+        st.caption(f"当前任务：{current_id}")
+    _render_active_status(manager, current_id)
 
-if live:
-    @st.fragment(run_every=0.5)
-    def poll_job():
-        require_dashboard_access()
-        state = manager.get(current_id)
-        if state is None or state.status not in ACTIVE_STATUSES:
-            st.rerun()
-        st.info("等待运行" if state.status == "queued" else "模拟运行中")
-        st.progress(state.completed_units / state.total_units if state.total_units else 0.0,
-                    text=f"{state.completed_units:,} / {state.total_units:,}")
-        elapsed = state.duration_seconds or 0.0
-        if state.started_at:
-            elapsed = max(elapsed, (datetime.now(timezone.utc)
-                                   - datetime.fromisoformat(state.started_at)).total_seconds())
-        st.caption(f"已用时 {elapsed:.1f} 秒")
-        if st.button("停止模拟"):
-            manager.cancel(current_id)
-    poll_job()
-elif current is None:
-    st.info("设置参数后开始模拟")
-elif current.status == "cancelled":
-    st.info("模拟已取消")
-elif current.status == "failed":
-    st.error("模拟任务失败")
-elif current.status == "completed":
-    st.success("模拟已完成")
-    if current.persistence_error:
-        st.warning("历史保存失败")
-    payload = manager.get_result(current_id)
-    if payload is not None:
-        render_result(st, payload, trace_enabled=current.parameters["trace"])
-    else:
-        st.error("模拟结果暂不可用")
-
-render_history(st, repository)
+if page == "新建实验":
+    render_new_experiment(
+        st, manager, live=live,
+        synchronous=os.environ.get("DASHBOARD_SYNC_JOBS") == "1",
+    )
+elif page == "实验结果":
+    _render_selected_result(st, manager, repository)
+elif page == "历史记录":
+    render_history(st, repository)
