@@ -32,7 +32,7 @@ class CliTest(unittest.TestCase):
         payload = json.loads(output)
         self.assertAlmostEqual(payload["mean"], 53.89927355371174)
         self.assertEqual(payload["hard_pity"], 80)
-        self.assertEqual(payload["result_format_version"], 1)
+        self.assertEqual(payload["result_format_version"], 2)
         self.assertEqual(payload["rule_version"], "2.0")
         self.assertNotIn("sampling_version", payload)
         self.assertNotIn("rng_algorithm", payload)
@@ -49,7 +49,7 @@ class CliTest(unittest.TestCase):
         payload = json.loads(output)
         self.assertEqual(payload["rule"], "rule1")
         self.assertEqual(payload["seed"], 42)
-        self.assertEqual(payload["result_format_version"], 1)
+        self.assertEqual(payload["result_format_version"], 2)
         self.assertEqual(payload["sampling_version"], 1)
         self.assertEqual(payload["rng_algorithm"], "python.random.Random")
         self.assertIsInstance(payload["python_implementation"], str)
@@ -109,15 +109,15 @@ class CliTest(unittest.TestCase):
             output,
         )
         for line in (
-            "1  主池  1  1  4星  未配置角色名单  奖励A=1, 奖励B=0  "
+            "1  1  主池  1  1  4星  未配置角色名单  奖励A=1, 奖励B=0  "
             "91.2%/8.0%/0.8%  主池前(0,0)  主池后(1,1)  来源池前(0,0)  来源池后(1,1)  否  否",
-            "20  主池  20  20  6星  常驻-F  奖励A=25, 奖励B=10  "
+            "1  20  主池  20  20  6星  常驻-F  奖励A=25, 奖励B=10  "
             "91.2%/8.0%/0.8%  主池前(19,6)  主池后(0,0)  来源池前(19,6)  来源池后(0,0)  否  否",
-            "30  主池  30  30  5星  未配置角色名单  奖励A=5, 奖励B=2  "
+            "1  30  主池  30  30  5星  未配置角色名单  奖励A=5, 奖励B=2  "
             "0.0%/99.2%/0.8%  主池前(9,9)  主池后(10,0)  来源池前(9,9)  来源池后(10,0)  是  否",
-            "31  赠送  1  30  4星  未配置角色名单  奖励A=1, 奖励B=0  "
+            "1  31  赠送  1  30  4星  未配置角色名单  奖励A=1, 奖励B=0  "
             "91.2%/8.0%/0.8%  主池前(10,0)  主池后(10,0)  来源池前(0,0)  来源池后(1,1)  否  否",
-            "40  赠送  10  30  5星  未配置角色名单  奖励A=5, 奖励B=2  "
+            "1  40  赠送  10  30  5星  未配置角色名单  奖励A=5, 奖励B=2  "
             "0.0%/99.2%/0.8%  主池前(10,0)  主池后(10,0)  来源池前(9,9)  来源池后(10,0)  是  否",
         ):
             with self.subTest(line=line.split("  ", 1)[0]):
@@ -129,7 +129,8 @@ class CliTest(unittest.TestCase):
         _, output = self.run_cli("simulate", "--draws", "1", "--seed", "42",
                                  "--trace", "--format", "json")
         record = json.loads(output)["records"][0]
-        self.assertEqual(record["record_format_version"], 1)
+        self.assertEqual(record["record_format_version"], 2)
+        self.assertEqual(record["trial_index"], 1)
         self.assertEqual(record["draw_result"]["outcome"]["rarity"], 4)
         self.assertNotIn("six_star_character", record)
         self.assertNotIn("state_after", record)
@@ -213,12 +214,18 @@ class CliTest(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertIn("抽次", output)
         self.assertIn("来源池前双保底", output)
-        self.assertIn("1  主池  1  1  4星", output)
-        self.assertIn("2  主池  2  2  5星", output)
+        self.assertIn("1  1  主池  1  1  4星", output)
+        self.assertIn("1  2  主池  2  2  5星", output)
 
-    def test_trace_rejects_multiple_trials(self):
-        with self.assertRaises(SystemExit):
-            self.run_cli("simulate", "--draws", "2", "--trials", "2", "--trace")
+    def test_trace_supports_multiple_trials(self):
+        code, output = self.run_cli(
+            "simulate", "--draws", "2", "--trials", "3", "--initial-pity", "29",
+            "--seed", "42", "--trace", "--format", "json",
+        )
+        self.assertEqual(code, 0)
+        payload = json.loads(output)
+        self.assertEqual(payload["record_count"], 36)
+        self.assertEqual({record["trial_index"] for record in payload["records"]}, {1, 2, 3})
 
     def test_real_module_entry_point_returns_json(self):
         completed = subprocess.run(

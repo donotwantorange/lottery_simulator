@@ -6,7 +6,7 @@ Python 3.11+ 的规则 1（版本 `2.0`）抽奖模拟器。命令行核心没�
 
 本项目本地操作的唯一主目录是 `/home/qykj/202607/test/lottery_simulator`。请先进入该目录，再按[本地使用手册](docs/local-usage.md)创建或复用 `.venv`、启动网页、运行 CLI 和管理历史数据；已合并到 `master` 后不需要进入旧 worktree 路径。
 
-界面各参数、六个结果标签页、图表口径及历史操作，详见[网页页面详细说明](docs/dashboard-guide.md)。
+界面各参数、三页面、四种结果视图、图表口径及历史操作，详见[网页页面详细说明](docs/dashboard-guide.md)。
 
 ## 默认奖池与保底
 
@@ -38,7 +38,7 @@ Python 3.11+ 的规则 1（版本 `2.0`）抽奖模拟器。命令行核心没�
 - `--pool-config PATH`：读取自定义 JSON；省略时加载默认配置。
 - `--initial-pity N`：开始前主池连续未出六星次数，同时是已完成主池抽数；它决定首次 30 抽赠送是否已领取。
 - `--initial-five-star-pity N`：开始前连续未出五星及以上次数；默认 0。五星保底关闭时只能为 0。
-- `--trace`：仅限 `--trials 1`，输出每一抽的结构化记录。
+- `--trace`：按轮次输出每一抽的结构化记录；可与多轮 `--trials` 一起使用。
 - `--format text|json`：JSON 包含 `pool_config`、`source_summaries`、`theoretical_source_summaries`、`source_distributions` 与 `at_least_one_rates`；Trace 时另有 `records`。
 
 例如查看一次 30 主抽与赠送记录：
@@ -47,7 +47,7 @@ Python 3.11+ 的规则 1（版本 `2.0`）抽奖模拟器。命令行核心没�
 .venv/bin/python -m lottery_simulator simulate --draws 30 --trials 1 --seed 42 --trace
 ```
 
-结果按 `main`（主池）、`bonus`（赠送）和 `total`（总计）分别给出四/五/六星、UP/其他限定/常驻、具体角色、奖励、五星/六星硬保底以及分布。`--format json --trace` 的每条记录使用嵌套的 `draw_result`（`outcome`、`probabilities`、`state_before`、`state_after`），另保留 `main_state_before`/`main_state_after`；网页 Trace 将其展开为中文列。Trace 默认关闭，只能单轮，批量非 Trace 模式不保存逐抽记录。
+结果按 `main`（主池）、`bonus`（赠送）和 `total`（总计）分别给出四/五/六星、UP/其他限定/常驻、具体角色、奖励、五星/六星硬保底以及分布。`--format json --trace` 的每条记录使用嵌套的 `draw_result`（`outcome`、`probabilities`、`state_before`、`state_after`），另保留 `main_state_before`/`main_state_after`；每条记录还带 `trial_index`（轮次）和 `draw_index`（该轮总抽次），赠送抽也计入记录数。网页 Trace 将其展开为中文列。Trace 默认关闭；批量非 Trace 模式不保存逐抽记录。CLI Trace 会把记录保存在内存中，超大实验可能占用大量内存，完整多轮记录请优先使用网页落库或 `export-trace` 本地导出。
 
 ## 网页仪表盘与配置 JSON
 
@@ -61,7 +61,7 @@ APP_ENVIRONMENT=development APP_AUTH_MODE=disabled STREAMLIT_SERVER_ADDRESS=127.
 
 打开 `http://127.0.0.1:8501`。侧栏的“高级设置”可设初始五星保底；“奖池与奖励设置”可修改 UP 占比、五星保底、角色表与奖励表，恢复默认配置，导入 UTF-8 JSON，或下载当前已校验的 JSON。后台任务和历史记录保存的是不可变配置快照，运行中继续编辑不会改变已启动任务；历史“复用参数”会恢复当次完整配置。
 
-结果页提供“总览、六星构成、具体角色、附赠奖励、保底统计、Trace”六个区域，并可在主池、赠送、总计之间切换；每个图表都有可展开的数值表和 JSON 结果下载。开发默认历史库是 `data/history_v3.sqlite3`，任务状态在 `data/jobs_v3/`。Trace 默认关闭、只支持单轮；仅网页限制主池抽数最多 100,000，CLI 和核心不增加该上限。可用 `LOTTERY_DATA_DIR` 更改数据目录，或用 `LOTTERY_DB_PATH` 单独覆盖数据库路径。
+网页固定为三个页面：“新建实验”“实验结果”“历史记录”。实验结果页有四种视图：“实验概览”“分类统计”“按抽次分析”“逐抽明细”；分类统计中可切换星级、六星构成、具体角色、奖励和保底，来源可选主池、赠送或总计。Trace 多轮记录在“按抽次分析”和“逐抽明细”中按轮次、轮内总抽次查看。开发默认历史库是 `data/history_v4.sqlite3`，任务状态在 `data/jobs_v4/`。默认逐抽上限为 1,000,000 条、单次网页明细下载上限为 10,000 条，分别可用 `LOTTERY_MAX_TRACE_RECORDS`、`LOTTERY_MAX_TRACE_DOWNLOAD_RECORDS` 覆盖；改动环境变量后必须重启网页进程才会读取。可用 `LOTTERY_DATA_DIR` 更改数据目录，或用 `LOTTERY_DB_PATH` 单独覆盖数据库路径。
 
 旧 `data/history.sqlite3` 不读取、不迁移、不覆盖，也不自动删除；如需保留，请自行备份。显式把 `LOTTERY_DB_PATH` 指向旧 schema 时，程序会安全拒绝而不会改写旧库。固定种子、完整配置快照、相同参数、相同 `rule_version`（规则版本）、相同 `sampling_version` 和 Python 实现/版本才构成可复现实验条件。
 
@@ -76,7 +76,7 @@ docker compose ps
 docker compose logs --tail=100 app caddy
 ```
 
-Compose 固定 production/OIDC；仅 Caddy 发布 80/443，并声明 HSTS。页面、worker 和每日备份统一使用 `LOTTERY_DB_PATH=/app/data/lottery_v3.sqlite3`，备份文件使用 `lottery-v3-` 前缀。旧库不迁移、不删除。数据、备份和证书在命名卷中，secrets 只读挂载；不要执行 `docker compose down -v`。
+Compose 固定 production/OIDC；仅 Caddy 发布 80/443，并声明 HSTS。页面、worker 和每日备份统一使用 `LOTTERY_DB_PATH=/app/data/lottery_v4.sqlite3`，任务目录为 `/app/data/jobs_v4/`，备份文件使用 `lottery-v4-` 前缀。备份只包含已提交的 v4 历史数据库，不包含 jobs_v4 暂存任务、secrets 或证书；保存失败时保留的完整暂存 Trace 也不在历史备份中。恢复只接受 v4 数据库，旧库不迁移、不删除。数据、备份和证书在命名卷中，secrets 只读挂载；不要执行 `docker compose down -v` 或宽泛删除 `data/`、`jobs/`。
 
 ✅ 本地功能和部署静态合同已验证。⚠️ Docker/Caddy 实际运行、卷权限、自动证书、真实公网 HTTPS/HSTS 与 OIDC 仍是服务器现场未验，不能由本地测试替代。完整操作与边界见[部署与运维手册](docs/deployment.md)、[概率核心重构实施记录](docs/changes/2026-09-17-probability-core.md)及[最新本地合并记录](docs/changes/2026-09-18-probability-core-local-merge.md)。
 

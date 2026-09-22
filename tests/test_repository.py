@@ -1,4 +1,4 @@
-from contextlib import closing
+from contextlib import closing, contextmanager
 from copy import deepcopy
 from datetime import datetime, timezone
 import json
@@ -12,11 +12,14 @@ import sys
 from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
-from uuid import UUID
+from uuid import UUID, uuid4
 
+from dashboard.limits import TraceLimits
 from dashboard.models import result_payload
 from dashboard.repository import HistoryRepository
-from lottery_simulator.engine import simulate
+from dashboard.trace_store import TraceWriter
+from lottery_simulator.engine import SimulationCancelled, simulate
+from lottery_simulator.formats import RESULT_FORMAT_VERSION, SAMPLING_VERSION
 from lottery_simulator.rules.rule_1 import Rule1
 
 
@@ -29,8 +32,28 @@ class HistoryRepositoryTest(unittest.TestCase):
             connection.execute("PRAGMA user_version = 0")
         self.repository = HistoryRepository(self.path)
         self.repository.initialize()
+        self.run_id = str(uuid4())
+        self.payload, self.trace_path = self.snapshot(draws=12)
+
+    def snapshot(self, *, draws=12, trials=1, initial_pity=0, trace=True, name=None):
         rule = Rule1()
-        self.payload = result_payload(simulate(rule, 12, seed=42, collect_records=True), rule, 0.25)
+        trace_path = self.path.with_name(name or f"trace-{uuid4()}.sqlite3") if trace else None
+        writer = (TraceWriter(trace_path, limits=TraceLimits(batch_size=5, max_records=10_000))
+                  if trace else None)
+        try:
+            result = simulate(
+                rule, draws, trials=trials, initial_pity=initial_pity, seed=42,
+                collect_records=trace, record_sink=writer.append if writer else None,
+            )
+            if writer:
+                writer.finish(
+                    trials=trials, draws=draws, initial_main_draws=initial_pity,
+                    bonus_per_trial=result.bonus_draws,
+                )
+            return result_payload(result, rule, 0.25), trace_path
+        finally:
+            if writer:
+                writer.close()
 
     def counts(self):
         with closing(sqlite3.connect(self.path)) as connection:
@@ -39,20 +62,26 @@ class HistoryRepositoryTest(unittest.TestCase):
 
     def test_initialize_empty_version_zero_and_repeat_preserves_run(self):
         with closing(sqlite3.connect(self.path)) as connection:
-            self.assertEqual(connection.execute("PRAGMA user_version").fetchone()[0], 3)
+            self.assertEqual(connection.execute("PRAGMA user_version").fetchone()[0], 4)
             self.assertEqual(
                 [row[1] for row in connection.execute("PRAGMA table_info(simulation_runs)")],
                 [
                     "id", "created_at", "rule_name", "rule_version", "main_draws", "trials",
                     "initial_pity", "initial_five_star_pity", "seed", "trace_enabled",
-                    "pool_config_json", "result_json", "schema_version",
+                    "record_count", "pool_config_json", "result_json", "schema_version",
                 ],
             )
             self.assertEqual(
                 [row[1] for row in connection.execute("PRAGMA table_info(draw_records)")],
-                ["run_id", "draw_index", "record_json"],
+                ["run_id", "trial_index", "draw_index", "source", "source_index",
+                 "rarity", "character_name", "record_json"],
             )
-        run_id = self.repository.save_run(self.payload, trace_enabled=True)
+            indexes = [tuple(row) for row in connection.execute(
+                "PRAGMA index_info(draw_records_run_source_position_rarity)"
+            )]
+            self.assertEqual(indexes, [(0, 0, "run_id"), (1, 3, "source"),
+                                       (2, 4, "source_index"), (3, 5, "rarity")])
+        run_id = self.repository.save_run(self.run_id, self.payload, trace_path=self.trace_path)
         self.repository.initialize()
         self.assertEqual(self.repository.get_run(run_id)["seed"], 42)
 
@@ -488,7 +517,7 @@ os._exit(19)
                     (0, (True, False, False, False), (0, False)),
                     (0, (True, False, False, False), (0, False)),
                 ],
-                "source_version": 3,
+                "source_version": 4,
                 "source_tables": ["draw_records", "simulation_runs"],
                 "source_integrity": "ok",
             },
@@ -497,47 +526,42 @@ os._exit(19)
     def test_initialize_rejects_future_version_without_changes(self):
         path = self.path.with_name("future.sqlite3")
         with closing(sqlite3.connect(path)) as connection, connection:
-            connection.execute("PRAGMA user_version = 4")
-        self.assert_initialize_rejected_without_changes(path, 4)
+            connection.execute("PRAGMA user_version = 5")
+        self.assert_initialize_rejected_without_changes(path, 5)
 
-    def test_v3_round_trip_preserves_config_summary_and_trace(self):
-        original = deepcopy(self.payload)
-        run_id = self.repository.save_run(self.payload, trace_enabled=True)
-        run = self.repository.get_run(run_id, include_records=True)
-        self.assertEqual(run["pool_config"], original["pool_config"])
-        self.assertEqual(run["records"], original["records"])
-        self.assertEqual(run["initial_five_star_pity"], original["initial_five_star_pity"])
-        self.assertEqual(run["schema_version"], 3)
-
-    def test_save_and_read_trace_preserve_payload_and_metadata(self):
-        original = deepcopy(self.payload)
+    def test_v4_imports_three_trials_and_get_run_is_summary_only(self):
+        payload, trace_path = self.snapshot(draws=2, trials=3, initial_pity=29)
+        original = deepcopy(payload)
         before = datetime.now(timezone.utc)
-        run_id = self.repository.save_run(self.payload, trace_enabled=True)
-        run = self.repository.get_run(run_id, include_records=True)
+
+        run_id = self.repository.save_run(self.run_id, payload, trace_path=trace_path)
+        run = self.repository.get_run(run_id)
+
         self.assertEqual(str(UUID(run_id)), run_id)
         self.assertGreaterEqual(datetime.fromisoformat(run["created_at"]), before)
-        self.assertEqual(run["schema_version"], 3)
-        self.assertIs(run["trace_enabled"], True)
-        for key, value in original.items():
-            self.assertEqual(run[key], value, key)
-        self.assertEqual(len(run["records"]), 12)
-        self.assertIsInstance(run["records"][0]["draw_result"]["outcome"]["is_up"], bool)
-        self.assertNotIn("records", self.repository.get_run(run_id))
-        self.assertEqual(self.payload, original)
-
-    def test_bonus_trace_round_trips_nested_state(self):
-        rule = Rule1()
-        payload = result_payload(simulate(rule, 2, seed=42, initial_pity=29, collect_records=True), rule, 0.1)
-        run_id = self.repository.save_run(payload, trace_enabled=True)
-        records = self.repository.get_run(run_id, include_records=True)["records"]
-        self.assertEqual(len(records), 12)
-        self.assertEqual(records, payload["records"])
-        self.assertEqual(records[1]["source"], "bonus")
-        self.assertEqual(records[1]["main_state_before"], records[1]["main_state_after"])
+        self.assertEqual(run["schema_version"], 4)
+        self.assertEqual(run["record_count"], 36)
+        self.assertNotIn("records", run)
+        self.assertEqual(payload, original)
+        with self.assertRaises(TypeError):
+            self.repository.get_run(run_id, include_records=True)
+        with closing(sqlite3.connect(self.path)) as connection:
+            rows = connection.execute(
+                "SELECT trial_index, draw_index, source, source_index, record_json "
+                "FROM draw_records WHERE run_id=? ORDER BY trial_index, draw_index", (run_id,)
+            ).fetchall()
+        self.assertEqual(len(rows), 36)
+        self.assertEqual(rows[0][:4], (1, 1, "main", 1))
+        self.assertEqual(rows[12][:4], (2, 1, "main", 1))
+        self.assertEqual(rows[24][:4], (3, 1, "main", 1))
+        bonus = json.loads(rows[1][4])
+        self.assertEqual(bonus["source"], "bonus")
+        self.assertEqual(bonus["main_state_before"], bonus["main_state_after"])
 
     def test_save_rejects_missing_bool_and_unsupported_versions_without_inserts(self):
-        for key in ("result_format_version", "sampling_version"):
-            for value in (None, True, "1", 2):
+        for key, supported in (("result_format_version", RESULT_FORMAT_VERSION),
+                               ("sampling_version", SAMPLING_VERSION)):
+            for value in (None, True, "1", supported + 1):
                 with self.subTest(key=key, value=value):
                     payload = deepcopy(self.payload)
                     if value is None:
@@ -545,7 +569,7 @@ os._exit(19)
                     else:
                         payload[key] = value
                     with self.assertRaises(ValueError):
-                        self.repository.save_run(payload, trace_enabled=False)
+                        self.repository.save_run(str(uuid4()), payload)
                     self.assertEqual(self.counts(), (0, 0))
         for value in (None, True, "1", 2):
             payload = deepcopy(self.payload)
@@ -554,85 +578,27 @@ os._exit(19)
             else:
                 payload["pool_config"]["format_version"] = value
             with self.subTest(config_version=value), self.assertRaises(ValueError):
-                self.repository.save_run(payload, trace_enabled=False)
+                self.repository.save_run(str(uuid4()), payload)
             self.assertEqual(self.counts(), (0, 0))
 
     def test_reject_invalid_sampling_version_before_insert(self):
         payload = deepcopy(self.payload)
         payload["sampling_version"] = True
         with self.assertRaises(ValueError):
-            self.repository.save_run(payload, trace_enabled=False)
+            self.repository.save_run(str(uuid4()), payload)
         self.assertEqual(self.counts(), (0, 0))
-
-    def test_save_rejects_missing_or_unsupported_record_version_before_insert(self):
-        for value in (None, "1", 2):
-            payload = deepcopy(self.payload)
-            if value is None:
-                payload["records"][0].pop("record_format_version")
-            else:
-                payload["records"][0]["record_format_version"] = value
-            with self.subTest(value=value), self.assertRaises(ValueError):
-                self.repository.save_run(payload, trace_enabled=True)
-            self.assertEqual(self.counts(), (0, 0))
-
-    def test_save_rejects_invalid_nested_leaf_types_before_insert(self):
-        changes = (
-            ("state_before", "misses_since_six_star", True),
-            ("state_after", "misses_since_five_or_higher", -1),
-            ("probabilities", "six_star", True),
-            ("probabilities", "four_star", float("nan")),
-            ("outcome", "rarity", True), ("outcome", "character_name", 4),
-            ("outcome", "is_up", 1), ("outcome", "is_limited", None),
-            ("outcome", "five_star_pity_triggered", "False"),
-            ("outcome", "six_star_hard_pity_triggered", 0),
-            ("outcome", "rewards", []),
-            ("outcome", "rewards", {"奖励A": True}),
-        )
-        for section, key, value in changes:
-            payload = deepcopy(self.payload)
-            payload["records"][0]["draw_result"][section][key] = value
-            with self.subTest(section=section, key=key), self.assertRaises(ValueError):
-                self.repository.save_run(payload, trace_enabled=True)
-            self.assertEqual(self.counts(), (0, 0))
 
     def test_save_rejects_invalid_rule_version_without_inserts(self):
         for value in (None, True, 2.0, "1.0", ""):
             payload = deepcopy(self.payload)
             payload["rule_version"] = value
             with self.subTest(value=value), self.assertRaises(ValueError):
-                self.repository.save_run(payload, trace_enabled=False)
+                self.repository.save_run(str(uuid4()), payload)
             self.assertEqual(self.counts(), (0, 0))
-
-    def test_save_rejects_invalid_trace_types_without_inserts(self):
-        invalid = (
-            ("record_format_version", True), ("record_format_version", None),
-            ("draw_index", True), ("source_index", 0), ("source_index", True),
-            ("source", "old"), ("main_draws_completed", "1"),
-            ("draw_result", []), ("main_state_before", None),
-            ("main_state_after", []), ("bonus_event", 1),
-        )
-        for key, value in invalid:
-            payload = deepcopy(self.payload)
-            payload["records"][0][key] = value
-            with self.subTest(key=key, value=value), self.assertRaises(ValueError):
-                self.repository.save_run(payload, trace_enabled=True)
-            self.assertEqual(self.counts(), (0, 0))
-        for key in ("outcome", "probabilities", "state_before", "state_after"):
-            payload = deepcopy(self.payload)
-            payload["records"][0]["draw_result"][key] = None
-            with self.subTest(nested=key), self.assertRaises(ValueError):
-                self.repository.save_run(payload, trace_enabled=True)
-            self.assertEqual(self.counts(), (0, 0))
-
-    def test_save_rejects_multiple_trial_trace_without_inserts(self):
-        payload = deepcopy(self.payload)
-        payload["trials"] = 2
-        with self.assertRaises(ValueError):
-            self.repository.save_run(payload, trace_enabled=True)
-        self.assertEqual(self.counts(), (0, 0))
 
     def test_get_run_rejects_invalid_snapshot_and_config_versions(self):
-        run_id = self.repository.save_run(self.payload, trace_enabled=False)
+        payload, _ = self.snapshot(trace=False)
+        run_id = self.repository.save_run(str(uuid4()), payload)
         for key in ("result_format_version", "sampling_version", "rule_version"):
             payload = deepcopy(self.payload)
             payload.pop(key)
@@ -649,23 +615,13 @@ os._exit(19)
         with self.assertRaises(ValueError):
             self.repository.get_run(run_id)
 
-    def test_get_run_validates_records_only_when_requested(self):
-        run_id = self.repository.save_run(self.payload, trace_enabled=True)
-        record = deepcopy(self.payload["records"][0])
-        record["record_format_version"] = True
-        with closing(sqlite3.connect(self.path)) as connection, connection:
-            connection.execute("UPDATE draw_records SET record_json=? WHERE run_id=? AND draw_index=1",
-                               (json.dumps(record), run_id))
-        self.assertIsNotNone(self.repository.get_run(run_id))
-        with self.assertRaises(ValueError):
-            self.repository.get_run(run_id, include_records=True)
-
-    def test_non_trace_saves_no_records_even_in_snapshot(self):
-        run_id = self.repository.save_run(self.payload, trace_enabled=False)
+    def test_non_trace_requires_zero_count_and_no_trace_path(self):
+        payload, _ = self.snapshot(trace=False)
+        run_id = self.repository.save_run(self.run_id, payload)
         self.assertEqual(self.counts(), (1, 0))
-        run = self.repository.get_run(run_id, include_records=True)
-        self.assertEqual(run["records"], [])
+        run = self.repository.get_run(run_id)
         self.assertIs(run["trace_enabled"], False)
+        self.assertEqual(run["record_count"], 0)
         with closing(sqlite3.connect(self.path)) as connection:
             snapshot, pool_config = connection.execute(
                 "SELECT result_json, pool_config_json FROM simulation_runs"
@@ -673,40 +629,185 @@ os._exit(19)
         self.assertNotIn("records", json.loads(snapshot))
         self.assertEqual(snapshot, json.dumps(json.loads(snapshot), sort_keys=True))
         self.assertEqual(pool_config, json.dumps(self.payload["pool_config"], sort_keys=True))
+        with self.assertRaises(ValueError):
+            self.repository.save_run(str(uuid4()), payload, trace_path=self.trace_path)
+        changed = deepcopy(payload)
+        changed["record_count"] = 1
+        with self.assertRaises(ValueError):
+            self.repository.save_run(str(uuid4()), changed)
 
     def test_seed_round_trips_unsigned_64_bit_as_decimal_text(self):
-        self.payload["seed"] = 18_446_744_073_709_551_615
-        run_id = self.repository.save_run(self.payload, trace_enabled=False)
+        payload, _ = self.snapshot(trace=False)
+        payload["seed"] = 18_446_744_073_709_551_615
+        run_id = self.repository.save_run(self.run_id, payload)
         self.assertEqual(self.repository.get_run(run_id)["seed"], 18_446_744_073_709_551_615)
         self.assertEqual(self.repository.list_runs({}, 20, 0)[0]["seed"], 18_446_744_073_709_551_615)
         with closing(sqlite3.connect(self.path)) as connection:
             self.assertEqual(connection.execute("SELECT seed, typeof(seed) FROM simulation_runs").fetchone(),
                              ("18446744073709551615", "text"))
 
-    def test_second_trace_insert_failure_rolls_back_summary_and_records(self):
+    def test_trace_requires_uuid_complete_matching_metadata_and_count(self):
+        for invalid in (None, True, 1, "not-a-uuid", self.run_id.upper()):
+            with self.subTest(run_id=invalid), self.assertRaises(ValueError):
+                self.repository.save_run(invalid, self.payload, trace_path=self.trace_path)
+        with self.assertRaises(ValueError):
+            self.repository.save_run(str(uuid4()), self.payload)
+        with closing(sqlite3.connect(self.trace_path)) as connection, connection:
+            connection.execute("UPDATE metadata SET complete=0")
+        with self.assertRaises(ValueError):
+            self.repository.save_run(self.run_id, self.payload, trace_path=self.trace_path)
+        self.assertEqual(self.counts(), (0, 0))
+
+        payload, trace_path = self.snapshot(draws=2, trials=3, initial_pity=29,
+                                            name="metadata.sqlite3")
+        for column, value in (("trials", 2), ("draws", 3), ("initial_main_draws", 28),
+                              ("bonus_per_trial", 9), ("record_count", 35)):
+            with self.subTest(column=column):
+                copy = trace_path.with_name(f"metadata-{column}.sqlite3")
+                shutil.copyfile(trace_path, copy)
+                with closing(sqlite3.connect(copy)) as connection, connection:
+                    connection.execute("PRAGMA ignore_check_constraints=ON")
+                    connection.execute(f"UPDATE metadata SET {column}=?", (value,))
+                with self.assertRaises(ValueError):
+                    self.repository.save_run(str(uuid4()), payload, trace_path=copy)
+                self.assertEqual(self.counts(), (0, 0))
+
+    def test_import_revalidates_projection_and_nested_json(self):
+        cases = (("source", "bonus"), ("record_json", "{}"))
+        for column, value in cases:
+            with self.subTest(column=column):
+                payload, trace_path = self.snapshot(name=f"invalid-{column}.sqlite3")
+                with closing(sqlite3.connect(trace_path)) as connection, connection:
+                    connection.execute("PRAGMA ignore_check_constraints=ON")
+                    connection.execute(f"UPDATE records SET {column}=? WHERE draw_index=1", (value,))
+                with self.assertRaises((ValueError, json.JSONDecodeError)):
+                    self.repository.save_run(str(uuid4()), payload, trace_path=trace_path)
+                self.assertEqual(self.counts(), (0, 0))
+
+    def test_second_import_batch_failure_rolls_back_summary_and_records(self):
         with closing(sqlite3.connect(self.path)) as connection:
             connection.executescript("""
                 CREATE TRIGGER abort_second_record BEFORE INSERT ON draw_records
-                WHEN NEW.draw_index = 2
+                WHEN NEW.draw_index = 3
                 BEGIN SELECT RAISE(ABORT, 'second record rejected'); END;
             """)
-        with self.assertRaisesRegex(sqlite3.IntegrityError, "second record rejected"):
-            self.repository.save_run(self.payload, trace_enabled=True)
+        with patch("dashboard.repository._IMPORT_BATCH_SIZE", 2), \
+                self.assertRaisesRegex(sqlite3.IntegrityError, "second record rejected"):
+            self.repository.save_run(self.run_id, self.payload, trace_path=self.trace_path)
         self.assertEqual(self.counts(), (0, 0))
-        with closing(sqlite3.connect(self.path)) as connection:
-            connection.execute("DROP TRIGGER abort_second_record")
-        self.repository.save_run(self.payload, trace_enabled=True)
+
+    def test_cancel_and_commit_guard_failures_roll_back_everything(self):
+        calls = []
+
+        def cancel_on_second_batch():
+            calls.append("cancel")
+            return len(calls) == 2
+
+        with patch("dashboard.repository._IMPORT_BATCH_SIZE", 2), \
+                self.assertRaises(SimulationCancelled):
+            self.repository.save_run(
+                self.run_id, self.payload, trace_path=self.trace_path,
+                cancel_check=cancel_on_second_batch,
+            )
+        self.assertEqual(self.counts(), (0, 0))
+
+        final_checks = 0
+
+        def cancel_before_commit():
+            nonlocal final_checks
+            final_checks += 1
+            return final_checks == 2
+
+        with self.assertRaises(SimulationCancelled):
+            self.repository.save_run(
+                self.run_id, self.payload, trace_path=self.trace_path,
+                cancel_check=cancel_before_commit,
+            )
+        self.assertEqual(final_checks, 2)
+        self.assertEqual(self.counts(), (0, 0))
+
+        @contextmanager
+        def failing_guard():
+            calls.append("guard")
+            raise RuntimeError("guard failed")
+            yield
+
+        with self.assertRaisesRegex(RuntimeError, "guard failed"):
+            self.repository.save_run(
+                self.run_id, self.payload, trace_path=self.trace_path,
+                cancel_check=lambda: False, commit_guard=failing_guard,
+            )
+        self.assertEqual(calls[-1], "guard")
+        self.assertEqual(self.counts(), (0, 0))
+
+    def test_commit_guard_contains_final_cancel_check_and_commit(self):
+        events = []
+
+        def not_cancelled():
+            events.append("cancel")
+            return False
+
+        @contextmanager
+        def guard():
+            events.append("guard-enter")
+            yield
+            with closing(sqlite3.connect(self.path)) as observer:
+                events.append(("visible-before-guard-exit", observer.execute(
+                    "SELECT count(*) FROM simulation_runs"
+                ).fetchone()[0]))
+            events.append("guard-exit")
+
+        self.repository.save_run(
+            self.run_id, self.payload, trace_path=self.trace_path,
+            cancel_check=not_cancelled, commit_guard=guard,
+        )
+        self.assertEqual(events[-4:], ["guard-enter", "cancel",
+                                      ("visible-before-guard-exit", 1), "guard-exit"])
+
+    def test_same_id_is_idempotent_and_conflicting_snapshot_is_rejected(self):
+        first = self.repository.save_run(self.run_id, self.payload, trace_path=self.trace_path)
+        second = self.repository.save_run(self.run_id, deepcopy(self.payload),
+                                          trace_path=self.trace_path)
+        self.assertEqual((first, second), (self.run_id, self.run_id))
         self.assertEqual(self.counts(), (1, 12))
 
+        changed = deepcopy(self.payload)
+        changed["duration_seconds"] += 1
+        with self.assertRaises(ValueError):
+            self.repository.save_run(self.run_id, changed, trace_path=self.trace_path)
+        self.assertEqual(self.counts(), (1, 12))
+
+        other = str(uuid4())
+        self.assertEqual(self.repository.save_run(other, self.payload, trace_path=self.trace_path),
+                         other)
+        self.assertEqual(self.counts(), (2, 24))
+
+    def test_operations_reject_old_schema_independent_of_filename(self):
+        self.repository.save_run(self.run_id, self.payload, trace_path=self.trace_path)
+        with closing(sqlite3.connect(self.path)) as connection, connection:
+            connection.execute("PRAGMA ignore_check_constraints=ON")
+            connection.execute("PRAGMA user_version=3")
+        before = self.path.read_bytes()
+        for operation in (
+            lambda: self.repository.get_run(self.run_id),
+            lambda: self.repository.list_runs({}, 20, 0),
+            lambda: self.repository.save_run(str(uuid4()), self.payload,
+                                             trace_path=self.trace_path),
+            lambda: self.repository.delete_run(self.run_id),
+        ):
+            with self.subTest(operation=operation), self.assertRaisesRegex(ValueError, "版本不兼容"):
+                operation()
+        self.assertEqual(self.path.read_bytes(), before)
+
     def test_delete_cascades_and_missing_run_is_empty(self):
-        run_id = self.repository.save_run(self.payload, trace_enabled=True)
+        run_id = self.repository.save_run(self.run_id, self.payload, trace_path=self.trace_path)
         self.repository.delete_run(run_id)
         self.assertIsNone(self.repository.get_run(run_id))
         self.assertEqual(self.counts(), (0, 0))
         self.repository.delete_run(run_id)
 
     def test_delete_failure_keeps_summary_and_records(self):
-        run_id = self.repository.save_run(self.payload, trace_enabled=True)
+        run_id = self.repository.save_run(self.run_id, self.payload, trace_path=self.trace_path)
         with closing(sqlite3.connect(self.path)) as connection:
             connection.executescript("""
                 CREATE TRIGGER abort_record_delete BEFORE DELETE ON draw_records
@@ -717,9 +818,10 @@ os._exit(19)
         self.assertEqual(self.counts(), (1, 12))
 
     def test_filters_sort_and_pagination(self):
-        first = self.repository.save_run(self.payload, trace_enabled=True)
-        self.payload["rule_name"] = "archived-rule"
-        second = self.repository.save_run(self.payload, trace_enabled=False)
+        first = self.repository.save_run(self.run_id, self.payload, trace_path=self.trace_path)
+        archived, _ = self.snapshot(trace=False)
+        archived["rule_name"] = "archived-rule"
+        second = self.repository.save_run(str(uuid4()), archived)
         with closing(sqlite3.connect(self.path)) as connection, connection:
             connection.execute("UPDATE simulation_runs SET created_at=? WHERE id=?",
                                ("2026-01-01T00:00:00+00:00", first))
@@ -742,7 +844,8 @@ os._exit(19)
                 self.assertNotIn("records", rows[0])
 
     def test_filters_and_pagination_reject_untrusted_inputs(self):
-        self.repository.save_run(self.payload, trace_enabled=False)
+        payload, _ = self.snapshot(trace=False)
+        self.repository.save_run(self.run_id, payload)
         for limit, offset in ((0, 0), (101, 0), (20, -1), (True, 0), (20, False), (1.5, 0), (20, "0")):
             with self.subTest(limit=limit, offset=offset), self.assertRaises(ValueError):
                 self.repository.list_runs({}, limit, offset)
@@ -752,15 +855,17 @@ os._exit(19)
         self.assertEqual(self.counts(), (1, 0))
 
     def test_backup_contains_queryable_summary_and_trace(self):
-        run_id = self.repository.save_run(self.payload, trace_enabled=True)
+        run_id = self.repository.save_run(self.run_id, self.payload, trace_path=self.trace_path)
         backup_path = self.path.with_name("backup.sqlite3")
         self.repository.backup_to(backup_path)
         backup = HistoryRepository(backup_path)
         backup.initialize()
-        self.assertEqual(backup.get_run(run_id, include_records=True),
-                         self.repository.get_run(run_id, include_records=True))
+        self.assertEqual(backup.get_run(run_id), self.repository.get_run(run_id))
         self.repository.delete_run(run_id)
-        self.assertEqual(len(backup.get_run(run_id, include_records=True)["records"]), 12)
+        with closing(sqlite3.connect(backup_path)) as connection:
+            self.assertEqual(connection.execute(
+                "SELECT count(*) FROM draw_records WHERE run_id=?", (run_id,)
+            ).fetchone()[0], 12)
 
 
 if __name__ == "__main__":

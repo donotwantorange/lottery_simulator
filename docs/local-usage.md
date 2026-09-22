@@ -2,7 +2,7 @@
 
 本文只覆盖本机开发和使用。服务器 Docker/Caddy/OIDC、域名、证书和公网验收请看[部署与运维手册](deployment.md)，两套流程不要混用。
 
-想逐项了解侧栏参数、六个结果标签页、图表和历史记录，请看[网页页面详细说明](dashboard-guide.md)。本文负责安装、启动及数据管理；页面说明负责界面操作和统计口径。
+想逐项了解三页面、四种结果视图、图表和历史记录，请看[网页页面详细说明](dashboard-guide.md)。本文负责安装、启动及数据管理；页面说明负责界面操作和统计口径。
 
 ## 1. 唯一主目录与虚拟环境
 
@@ -54,7 +54,7 @@ APP_ENVIRONMENT=development APP_AUTH_MODE=disabled STREAMLIT_SERVER_ADDRESS=127.
 - `实验轮数`：重复多少轮；网页上限为 1,000,000，且 `主池抽数 × 实验轮数` 不得超过 100,000,000。
 - `假设主池已累计多少抽仍未出6星`：同时初始化六星连续未出状态和已完成的主池抽数，范围 0–79；它还决定首次 30 主抽赠送是否已领取。
 - `随机种子（留空自动生成）`：留空自动生成；填写整数可复现同配置、同规则版本的结果。
-- `Trace`：保存逐抽记录，只能单轮；网页 Trace 的主池抽数上限为 100,000。实验轮数不是 1 时开关不可用。
+- `Trace`：保存逐抽记录，支持多轮；每条记录包含轮次和轮内总抽次，赠送抽也计入总记录数。网页总实际记录上限默认 1,000,000，单次明细下载默认 10,000。
 - `高级设置` 中的 `假设主池已连续多少抽未出5星及以上`：五星保底开启时范围为 0 到硬保底减 1；关闭时只能是 0。
 
 运行中会显示进度和“停止模拟”。停止、服务重启或任务失败造成的不完整结果不会保存为历史；只有完成的运行才进入历史库。
@@ -145,8 +145,8 @@ cp configs/rule1_default.json configs/my-pool.json
 # 批量模拟、固定种子、指定自定义奖池
 .venv/bin/python -m lottery_simulator simulate --draws 30 --trials 1000 --seed 42 --pool-config configs/my-pool.json
 
-# 单轮逐抽 Trace
-.venv/bin/python -m lottery_simulator simulate --draws 30 --trials 1 --seed 42 --trace
+# 多轮逐抽 Trace（赠送抽也计入每轮记录数）
+.venv/bin/python -m lottery_simulator simulate --draws 30 --trials 3 --seed 42 --trace
 
 # 从历史主抽29/五星进度9开始，完成1主抽后触发送10抽
 .venv/bin/python -m lottery_simulator simulate --draws 1 --trials 1 \
@@ -161,22 +161,31 @@ cp configs/rule1_default.json configs/my-pool.json
 
 `--format text|json` 只改变输出形式，不改变概率或随机过程，默认 `text`。使用 `>` 重定向 JSON 前要确认目标文件名；Shell 会先覆盖目标，尤其不要把 `--pool-config my-pool.json > my-pool.json` 写成同名，否则配置会先被清空。
 
-`--trace` 默认关闭且只允许 `--trials 1`。CLI 不会自动写网页历史库；CLI 的非 Trace JSON 不含 `records`，网页 Trace 运行才保存逐抽记录。固定随机种子、相同规则/配置/参数、相同 `sampling_version`、Python 实现及版本才是可复现条件；改动任一项都不要把输出当作同一实验。网页 Trace 的主池抽数上限为 100,000，CLI 和核心不增加该上限。
+`--trace` 默认关闭且可用于多轮。CLI 不会自动写网页历史库；CLI Trace 将全部记录保存在内存中，大规模多轮实验可能占用大量内存。完整记录可将网页 Trace 保存后用 `export-trace` 本地导出；CLI 和网页分别遵守各自边界。CLI 的非 Trace JSON 不含 `records`。固定随机种子、相同规则/配置/参数、相同 `sampling_version`、Python 实现及版本才是可复现条件；改动任一项都不要把输出当作同一实验。
 
-网页结果有六个区域：“总览”“六星构成”“具体角色”“附赠奖励”“保底统计”“Trace”，并可在“主池”（`main`）、“赠送”（`bonus`）、“总计”（`total`）间切换。批量角色图和角色统计只包含六星；四星、五星名单只在单抽结果和 Trace 中显示。结果中：
+对已保存的网页历史 Trace 做本地完整导出（把 `<RUN_ID>` 替换为历史运行 UUID；目标文件不能已存在）：
 
-Trace JSON 的唯一单抽结构是 `draw_result` 嵌套对象：`draw_result.outcome` 保存星级、角色、UP/限定、奖励和保底触发，`draw_result.probabilities` 保存四/五/六星概率，`draw_result.state_before`/`state_after` 保存来源池双保底状态；记录本身的 `main_state_before`/`main_state_after` 独立保存主池状态。网页将其只读展开为中文列：
+```bash
+.venv/bin/python -m lottery_simulator export-trace \
+  --database data/history_v4.sqlite3 --run-id <RUN_ID> --output trace.jsonl
+```
+
+该命令按批次读取，不受网页单次 10,000 条下载上限影响；只读历史数据库，不导出 `jobs_v4/` 中未提交的暂存任务。
+
+网页固定为三个页面：“新建实验”“实验结果”“历史记录”。实验结果页有四种结果视图：“实验概览”“分类统计”“按抽次分析”“逐抽明细”；“分类统计”中再选择星级、六星构成、具体角色、奖励或保底，并可在“主池”（`main`）、“赠送”（`bonus`）、“总计”（`total`）间切换。批量角色图和角色统计只包含六星；四星、五星名单只在单抽结果和 Trace 中显示。结果中：
+
+Trace JSON 的唯一单抽结构是 `draw_result` 嵌套对象：`draw_result.outcome` 保存星级、角色、UP/限定、奖励和保底触发，`draw_result.probabilities` 保存四/五/六星概率，`draw_result.state_before`/`state_after` 保存来源池双保底状态；记录本身的 `main_state_before`/`main_state_after` 独立保存主池状态。多轮记录另有 `trial_index`（从1开始的轮次）和 `draw_index`（该轮内主池与赠送合并后的抽次，从1开始）；`source_index` 是各来源自己的序号。网页将其只读展开为中文列：
 
 | 中文列 | JSON 路径 |
 |---|---|
-| 总体抽取序号、来源、来源内序号、主池累计抽数、赠送事件 | `draw_index`、`source`、`source_index`、`main_draws_completed`、`bonus_event` |
+| 轮次、轮内总抽次、来源、来源内序号、主池累计抽数、赠送事件 | `trial_index`、`draw_index`、`source`、`source_index`、`main_draws_completed`、`bonus_event` |
 | 星级、角色、是否UP、是否限定 | `draw_result.outcome.rarity`、`character_name`、`is_up`、`is_limited` |
 | 四星概率、五星概率、六星概率 | `draw_result.probabilities.four_star/five_star/six_star` |
 | 来源池抽前/后未出六星、未出五星及以上 | `draw_result.state_before/state_after.*` |
 | 主池抽前/后未出六星、未出五星及以上 | `main_state_before/main_state_after.*` |
 | 五星保底触发、六星硬保底触发、各奖励数量 | `draw_result.outcome.*` |
 
-概率在原始 JSON 中保持 `0..1`，网页表格按百分比显示；没有角色名单时显示“未配置角色名单”，不会伪装成未出六星。Trace 仍只支持单轮，默认 `False`；历史和下载保留上述嵌套 JSON，不用展开后的中文表格替代原始记录。
+概率在原始 JSON 中保持 `0..1`，网页表格按百分比显示；没有角色名单时显示“未配置角色名单”，不会伪装成未出六星。Trace 默认 `False`；历史和下载保留上述嵌套 JSON，不用展开后的中文表格替代原始记录。Trace 记录数按每轮主抽加赠送抽计算，网页在启动前和 worker 冷启动时都会检查总量上限。
 
 - “每轮均值”是每轮平均数量，不是 1000 轮的总数量；总计等于主池和赠送合并后的来源。
 - 理论期望按有限保底状态动态规划计算；完整周期理论平均间隔是长期周期量，可能与有限模拟中已完成周期的平均间隔不同。
@@ -188,7 +197,7 @@ Trace JSON 的唯一单抽结构是 `draw_result` 嵌套对象：`draw_result.ou
 
 ## 6. 历史记录
 
-历史筛选使用实际网页标签“历史规则”“历史 Trace”“历史开始日期（UTC）”“历史结束日期（UTC）”“历史页码”。日期按 UTC 过滤；每页最多 20 条，创建时间倒序，改变筛选后将页码设为 1。通过“选择历史运行”选择一条查看详情、最多两条并排比较；每份记录显示规则版本，展开“配置摘要”查看保存的奖池快照和初始五星进度。
+“历史记录”页面使用实际网页标签“历史规则”“历史 Trace”“历史开始日期（UTC）”“历史结束日期（UTC）”“历史页码”。日期按 UTC 过滤；每页最多 20 条，创建时间倒序，改变筛选后将页码设为 1。通过“选择历史运行”选择一条查看详情、最多两条并排比较；每份记录显示规则版本，展开“配置摘要”查看保存的奖池快照和初始五星进度。
 
 “复用参数”只恢复当次的参数和配置快照，不会直接重新运行；需要重新模拟时再点击开始。删除流程分两次：第一次点击“删除历史 …”只进入确认，随后选择“确认删除”才执行；删除不可撤销，并会连同该运行的 `records` 一起删除。选择“取消删除”则保留记录。
 
@@ -197,28 +206,28 @@ Trace JSON 的唯一单抽结构是 `draw_result` 嵌套对象：`draw_result.ou
 未设置环境变量时，数据位于主目录：
 
 ```text
-data/history_v3.sqlite3
-data/jobs_v3/
+data/history_v4.sqlite3
+data/jobs_v4/
 ```
 
-可用绝对路径自定义：`LOTTERY_DATA_DIR` 控制数据目录（数据库默认是其中的 `history_v3.sqlite3` 和 `jobs_v3/`），`LOTTERY_DB_PATH` 单独覆盖数据库路径。例如：
+可用绝对路径自定义：`LOTTERY_DATA_DIR` 控制数据目录（数据库默认是其中的 `history_v4.sqlite3` 和 `jobs_v4/`），`LOTTERY_DB_PATH` 单独覆盖数据库路径。例如：
 
 ```bash
-LOTTERY_DATA_DIR=/srv/lottery-data LOTTERY_DB_PATH=/srv/lottery-data/history_v3.sqlite3 \
+LOTTERY_DATA_DIR=/srv/lottery-data LOTTERY_DB_PATH=/srv/lottery-data/history_v4.sqlite3 \
 APP_ENVIRONMENT=development APP_AUTH_MODE=disabled STREAMLIT_SERVER_ADDRESS=127.0.0.1 \
 .venv/bin/python -m streamlit run dashboard/app.py --server.address=127.0.0.1
 ```
 
-启动目录和数据目录都要确认清楚：旧 worktree 的 `data/` 不会自动迁移到主目录。确实要沿用旧 worktree 中的新版历史时，可显式把 `LOTTERY_DATA_DIR` 指向该 worktree 的 `data` 目录；旧 v1 库不会迁移、覆盖或自动删除，程序会拒绝不兼容 schema。
+启动目录和数据目录都要确认清楚：旧 worktree 的 `data/` 不会自动迁移到主目录。历史库只接受数据库 schema v4；旧 v1/v2/v3 库不会迁移、覆盖或自动删除，程序会拒绝不兼容 schema。仅在开启 Trace 且历史保存失败时，`jobs_v4/<job_id>/` 会保留完整 `trace.sqlite3` 和 `result.json`，当前结果仍可分页查看并导出；未开启 Trace 时没有暂存明细，只保留 `result.json` 汇总。上述任务目录文件均不在历史备份中。
 
 SQLite 在线备份使用项目已有脚本，源库必须存在：
 
 ```bash
 mkdir -p backups
-.venv/bin/python scripts/backup_db.py data/history_v3.sqlite3 backups/history-v3-$(date +%F-%H%M%S).sqlite3
+.venv/bin/python scripts/backup_db.py data/history_v4.sqlite3 backups/history-v4-$(date +%F-%H%M%S).sqlite3
 ```
 
-看到 `Backup integrity_check: ok` 且命令退出码为 0 才算成功。脚本从只读源库执行 SQLite online backup，并检查目标完整性；不要在网页或 worker 运行时直接复制、删除或盲删数据库，也不要用备份脚本把源和目标写成同一路径。备份只包含 SQLite 历史，不包含 `data/jobs_v3/`、OIDC secrets 或证书；重要备份还应复制到受控的其他存储。
+看到 `Backup integrity_check: ok` 且命令退出码为 0 才算成功。脚本从只读源库执行 SQLite online backup，并检查目标完整性；不要在网页或 worker 运行时直接复制、删除或盲删数据库，也不要用备份脚本把源和目标写成同一路径。备份只包含 v4 SQLite 历史，不包含 `data/jobs_v4/` 暂存任务、保存失败的暂存 Trace、OIDC secrets 或证书；重要备份还应复制到受控的其他存储。
 
 ### 本地恢复历史
 
@@ -227,12 +236,12 @@ mkdir -p backups
 先保护当前库，再恢复选定备份（下面备份日期仅为示例，必须替换成实际文件名；每一步失败即停止）：
 
 ```bash
-.venv/bin/python scripts/backup_db.py data/history_v3.sqlite3 backups/pre-restore-v3-$(date +%F-%H%M%S).sqlite3
-.venv/bin/python scripts/backup_db.py backups/history-v3-2026-09-16-120000.sqlite3 data/history_v3.sqlite3
-.venv/bin/python -c "import sqlite3; c=sqlite3.connect('file:data/history_v3.sqlite3?mode=ro', uri=True); print(c.execute('PRAGMA integrity_check').fetchall()); c.close()"
+.venv/bin/python scripts/backup_db.py data/history_v4.sqlite3 backups/pre-restore-v4-$(date +%F-%H%M%S).sqlite3
+.venv/bin/python scripts/backup_db.py backups/history-v4-2026-09-16-120000.sqlite3 data/history_v4.sqlite3
+.venv/bin/python -c "import sqlite3; c=sqlite3.connect('file:data/history_v4.sqlite3?mode=ro', uri=True); print(c.execute('PRAGMA integrity_check').fetchall()); c.close()"
 ```
 
-备份/恢复须退出码 0、输出完整性检查成功；最后查询须为 `[('ok',)]`，才重新按第 2 节启动。检查历史并运行一次小模拟确认可写。当前库不存在时可以跳过第一步，不能跳过现有库的保护备份。使用自定义数据路径时，替换全部源/目标路径。恢复仅恢复备份时的数据库历史，不恢复未完成任务；结果 JSON 不是 SQLite 备份，不能拿来替换数据库。
+备份/恢复须退出码 0、输出完整性检查成功；最后查询须为 `[('ok',)]`，才重新按第 2 节启动。检查历史并运行一次小模拟确认可写。当前库不存在时可以跳过第一步，不能跳过现有库的保护备份。恢复只接受并恢复 v4 数据库历史，不迁移旧库，不恢复未完成任务或 `jobs_v4/` 暂存；结果 JSON 不是 SQLite 备份，不能拿来替换数据库。
 
 ## 8. 常见问题
 

@@ -43,6 +43,15 @@ def trace_rows(records: list[dict], reward_names: Sequence[str]) -> list[dict]:
             "六星硬保底触发": outcome["six_star_hard_pity_triggered"],
             "赠送事件": record["bonus_event"],
         }
+        # Records written by the multi-trial format carry both coordinates.  Keep
+        # the legacy projection usable for old in-memory callers that have no
+        # trial_index, while exposing the new coordinates whenever available.
+        if "trial_index" in record:
+            row = {
+                "轮次": record["trial_index"],
+                "轮内总抽次": record["draw_index"],
+                **row,
+            }
         rewards = outcome["rewards"]
         for name in reward_names:
             row[f"奖励：{name}"] = rewards.get(name, 0.0)

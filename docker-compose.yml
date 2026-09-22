@@ -8,7 +8,7 @@ services:
       ALLOWED_EMAILS: "${ALLOWED_EMAILS:?Set ALLOWED_EMAILS in .env}"
       STREAMLIT_SERVER_ADDRESS: 0.0.0.0
       LOTTERY_DATA_DIR: /app/data
-      LOTTERY_DB_PATH: /app/data/lottery_v3.sqlite3
+      LOTTERY_DB_PATH: /app/data/lottery_v4.sqlite3
     volumes: ["lottery_data:/app/data", "lottery_backups:/app/backups", "./.streamlit/secrets.toml:/app/.streamlit/secrets.toml:ro"]
   caddy:
     image: caddy:2.11.4-alpine

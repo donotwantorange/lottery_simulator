@@ -33,13 +33,10 @@ class DashboardModelsTest(unittest.TestCase):
                     JobState.from_dict(invalid)
 
     def test_parameters_validate_trace_and_limits(self):
-        with self.assertRaisesRegex(ValueError, "Trace"):
-            RunParameters("rule1", 10, 2, 0, 42, True).validate()
+        RunParameters("rule1", 10, 2, 0, 42, True).validate()
         with self.assertRaisesRegex(ValueError, "上限"):
             RunParameters("rule1", 10_000_001, 1, 0, 42, False).validate()
-        with self.assertRaisesRegex(ValueError, "Trace"):
-            RunParameters("rule1", 100_001, 1, 0, 42, True).validate()
-        RunParameters("rule1", 100_000, 1, 0, 42, True).validate()
+        RunParameters("rule1", 100_001, 1, 0, 42, True).validate()
 
     def test_parameters_append_five_star_pity_and_pool_snapshot_after_existing_positions(self):
         config = load_pool_config().to_dict()
@@ -59,7 +56,7 @@ class DashboardModelsTest(unittest.TestCase):
         self.assertEqual(json.loads(json.dumps(payload)), payload)
         self.assertEqual(set(payload["count_distribution"]), {"0"})
         self.assertNotIn("records", payload)
-        self.assertEqual(payload["result_format_version"], 1)
+        self.assertEqual(payload["result_format_version"], 2)
         self.assertEqual(payload["sampling_version"], 1)
         self.assertEqual(payload["rng_algorithm"], "python.random.Random")
         self.assertIsInstance(payload["python_implementation"], str)
@@ -69,15 +66,12 @@ class DashboardModelsTest(unittest.TestCase):
         self.assertAlmostEqual(payload["mean_count_error"], -0.096)
         self.assertEqual(payload["mean_count_relative_error"], -1.0)
 
-    def test_result_payload_trace_has_only_nested_draw_result(self):
+    def test_result_payload_trace_keeps_trace_summary_but_never_records(self):
         rule = Rule1()
         payload = result_payload(simulate(rule, 1, seed=42, collect_records=True), rule, 0.1)
-        record = payload["records"][0]
-        self.assertEqual(record["record_format_version"], 1)
-        self.assertEqual(record["draw_result"]["outcome"]["rarity"], 4)
-        self.assertEqual(record["draw_result"]["state_before"],
-                         {"misses_since_six_star": 0, "misses_since_five_or_higher": 0})
-        self.assertNotIn("is_six_star", record)
+        self.assertNotIn("records", payload)
+        self.assertIs(payload["trace_enabled"], True)
+        self.assertEqual(payload["record_count"], 1)
 
     def test_result_payload_uses_none_for_zero_theoretical_expected_count(self):
         rule = Rule1()

@@ -6,6 +6,7 @@ import tempfile
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, ClassVar
+from uuid import UUID
 
 from lottery_simulator.analysis import distribution_stats
 from lottery_simulator.formats import (
@@ -68,10 +69,6 @@ class RunParameters:
             raise ValueError("seed must be an integer or None")
         if not isinstance(self.trace, bool):
             raise ValueError("trace must be a boolean")
-        if self.trace and self.trials != 1:
-            raise ValueError("Trace runs require trials=1")
-        if self.trace and self.draws > 100_000:
-            raise ValueError("Trace draws 超过上限")
         return self
 
     def to_dict(self) -> dict[str, Any]:
@@ -92,6 +89,9 @@ class JobState:
     error: str | None = None
     result_path: str | None = None
     persistence_error: str | None = None
+    phase: str | None = None
+    history_saved: bool = False
+    run_id: str | None = None
     job_format_version: int = JOB_FORMAT_VERSION
     sampling_version: int = SAMPLING_VERSION
 
@@ -127,6 +127,17 @@ class JobState:
             RunParameters.from_dict(self.parameters)
         else:
             raise ValueError("parameters must be serialized run parameters")
+        if self.phase not in (None, "simulating", "saving"):
+            raise ValueError("phase must be simulating, saving or None")
+        if type(self.history_saved) is not bool:
+            raise ValueError("history_saved must be a boolean")
+        if self.run_id is not None:
+            try:
+                valid_run_id = type(self.run_id) is str and str(UUID(self.run_id)) == self.run_id
+            except (ValueError, AttributeError):
+                valid_run_id = False
+            if not valid_run_id:
+                raise ValueError("run_id must be a canonical UUID or None")
         return self
 
     def to_dict(self) -> dict[str, Any]:
@@ -135,8 +146,7 @@ class JobState:
 
 def result_payload(result: Any, rule: Any, duration_seconds: float) -> dict[str, Any]:
     payload = json.loads(json.dumps(asdict(result)))
-    if not result.records:
-        payload.pop("records")
+    payload.pop("records")
     payload["result_format_version"] = RESULT_FORMAT_VERSION
     payload.update(sampling_metadata())
     mean_count_error = result.mean_six_stars - result.theoretical_expected_count

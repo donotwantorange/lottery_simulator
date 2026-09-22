@@ -100,6 +100,12 @@ def pool_config_to_json(config: PoolConfig) -> bytes:
 
 def set_pool_config_editor_state(st, config: PoolConfig) -> None:
     characters, rewards = config_to_editor_rows(config)
+    # ``new_experiment_draft`` is deliberately independent from Streamlit's
+    # widget state.  Keep an explicit import/default/history reset visible to
+    # the page draft before a rerun removes the temporary editor widgets.
+    draft = st.session_state.get("new_experiment_draft")
+    if isinstance(draft, dict):
+        draft["pool_config"] = config.to_dict()
     st.session_state.update(
         pool_up_share=config.up_share,
         pool_five_star_probability=config.five_star.base_probability,

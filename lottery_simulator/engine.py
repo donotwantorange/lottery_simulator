@@ -36,6 +36,7 @@ class DrawResult:
 @dataclass(frozen=True, slots=True)
 class DrawRecord:
     record_format_version: int
+    trial_index: int
     draw_index: int
     source: str
     source_index: int
@@ -64,6 +65,8 @@ class SimulationResult:
     theoretical_expected_main_count: float
     theoretical_expected_bonus_count: float
     theoretical_expected_count: float
+    trace_enabled: bool
+    record_count: int
     records: tuple[DrawRecord, ...]
     initial_main_draws: int | None = None
     final_main_draws: int | None = None
@@ -175,14 +178,15 @@ def simulate(
     progress_interval: int = 1000,
     collect_records: bool = False,
     initial_five_star_pity: int = 0,
+    record_sink: Callable[[DrawRecord], None] | None = None,
 ) -> SimulationResult:
     _positive_integer(draws, "draws")
     _positive_integer(trials, "trials")
     _positive_integer(progress_interval, "progress_interval")
     if not isinstance(collect_records, bool):
         raise ValueError("collect_records must be a boolean")
-    elif collect_records and trials != 1:
-        raise ValueError("collect_records requires trials=1")
+    if record_sink is not None and not collect_records:
+        raise ValueError("record_sink requires collect_records=True")
     initial_state = DrawState(initial_pity, initial_five_star_pity)
     rule.probability(initial_state)
     total_units = draws * trials
@@ -212,11 +216,12 @@ def simulate(
         source: {name: 0 for name in rate_names} for source in sources
     }
     records: list[DrawRecord] = []
+    record_count = 0
     interval_sum = 0
     completed_intervals = 0
     bonus_draws_per_trial = 0
 
-    for trial in range(trials):
+    for trial_index in range(1, trials + 1):
         state = initial_state
         trial_counts = {source: _empty_counts(rule.config) for source in sources}
         main_draws_completed = initial_pity
@@ -237,19 +242,23 @@ def simulate(
                 interval_sum += pity_position
                 completed_intervals += 1
             if collect_records:
-                records.append(
-                    DrawRecord(
-                        record_format_version=RECORD_FORMAT_VERSION,
-                        draw_index=actual_draw_index,
-                        source="main",
-                        source_index=main_draw_index,
-                        bonus_event=None,
-                        main_draws_completed=main_draws_completed + 1,
-                        draw_result=draw_result,
-                        main_state_before=state,
-                        main_state_after=state_after,
-                    )
+                record = DrawRecord(
+                    record_format_version=RECORD_FORMAT_VERSION,
+                    trial_index=trial_index,
+                    draw_index=actual_draw_index,
+                    source="main",
+                    source_index=main_draw_index,
+                    bonus_event=None,
+                    main_draws_completed=main_draws_completed + 1,
+                    draw_result=draw_result,
+                    main_state_before=state,
+                    main_state_after=state_after,
                 )
+                record_count += 1
+                if record_sink is None:
+                    records.append(record)
+                else:
+                    record_sink(record)
             state = state_after
             main_draws_completed += 1
             completed_units += 1
@@ -261,7 +270,7 @@ def simulate(
             for event in bonus_events_after_main_draw(rule, main_draws_completed):
                 temporary_rule = rule.for_bonus(event)
                 temporary_state = DrawState()
-                for bonus_draw_index in range(1, event.draws + 1):
+                for _ in range(event.draws):
                     actual_draw_index += 1
                     trial_bonus_draws += 1
                     draw_result = draw_once(
@@ -272,20 +281,24 @@ def simulate(
                     _add_outcome(trial_counts["bonus"], outcome)
                     _add_outcome(trial_counts["total"], outcome)
                     if collect_records:
-                        records.append(
-                            DrawRecord(
-                                record_format_version=RECORD_FORMAT_VERSION,
-                                draw_index=actual_draw_index,
-                                source="bonus",
-                                source_index=bonus_draw_index,
-                                bonus_event=event.name,
-                                main_draws_completed=main_draws_completed,
-                                draw_result=draw_result,
-                                main_state_before=state,
-                                main_state_after=state,
-                            )
+                        record = DrawRecord(
+                            record_format_version=RECORD_FORMAT_VERSION,
+                            trial_index=trial_index,
+                            draw_index=actual_draw_index,
+                            source="bonus",
+                            source_index=trial_bonus_draws,
+                            bonus_event=event.name,
+                            main_draws_completed=main_draws_completed,
+                            draw_result=draw_result,
+                            main_state_before=state,
+                            main_state_after=state,
                         )
-        if trial == 0:
+                        record_count += 1
+                        if record_sink is None:
+                            records.append(record)
+                        else:
+                            record_sink(record)
+        if trial_index == 1:
             bonus_draws_per_trial = trial_bonus_draws
         for source in sources:
             counts = trial_counts[source]
@@ -398,6 +411,8 @@ def simulate(
         theoretical_expected_main_count=expectations["main"].rarity_counts["6"],
         theoretical_expected_bonus_count=expectations["bonus"].rarity_counts["6"],
         theoretical_expected_count=expectations["total"].rarity_counts["6"],
+        trace_enabled=collect_records,
+        record_count=record_count,
         records=tuple(records),
         source_summaries=source_summaries,
         source_distributions=source_distributions,

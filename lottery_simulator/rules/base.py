@@ -48,6 +48,8 @@ class LotterySubRule(Protocol):
         self, completed_main_draws: int
     ) -> tuple[BonusEvent, ...]: ...
 
+    def expected_draws(self, initial_main_draws: int, draws: int) -> int: ...
+
 
 class LotteryRule(Protocol):
     name: str
@@ -79,3 +81,30 @@ def bonus_events_after_main_draw(
         for subrule in rule.subrules
         for event in subrule.events_after_main_draw(completed_main_draws)
     )
+
+
+def _validate_expected_draw_inputs(initial_main_draws: int, draws: int) -> None:
+    if (
+        isinstance(initial_main_draws, bool)
+        or not isinstance(initial_main_draws, int)
+        or initial_main_draws < 0
+    ):
+        raise ValueError("initial_main_draws must be a non-negative integer")
+    if isinstance(draws, bool) or not isinstance(draws, int) or draws <= 0:
+        raise ValueError("draws must be a positive integer")
+
+
+def expected_bonus_draws(
+    rule: LotteryRule, initial_main_draws: int, draws: int
+) -> int:
+    """Return the deterministic bonus-draw count crossed by a main run."""
+    _validate_expected_draw_inputs(initial_main_draws, draws)
+    total = 0
+    for subrule in rule.subrules:
+        estimator = getattr(subrule, "expected_draws", None)
+        if not callable(estimator):
+            raise ValueError(
+                f"subrule {type(subrule).__name__} lacks expected_draws capability"
+            )
+        total += estimator(initial_main_draws, draws)
+    return total
