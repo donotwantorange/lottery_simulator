@@ -6,7 +6,7 @@
 
 部署目录以 `/opt/lottery-simulator` 为例；若位置不同，所有 `cd` 和备份 service 的 `WorkingDirectory` 都必须改成实际目录。以下命令在服务器上的项目根目录执行。Docker 命令需要有 Docker 权限的运维账号；该权限等价于高权限，不授予不可信账号。
 
-✅ 部署接口已实现、静态合同已验证：配置固定生产/OIDC，只有 Caddy 发布 80/443，且 Caddyfile 声明 `Strict-Transport-Security: max-age=31536000; includeSubDomains`。按用户最新范围，本轮只完成本地功能，服务器实际部署和测试暂缓。⚠️ 当前开发环境没有 Docker/Caddy，镜像构建、Compose 官方解析和运行、卷权限、自动证书、HSTS 实际响应与公网 OIDC 均为“服务器现场未验”；下面是未来部署时执行的步骤，不是本轮成功记录。
+✅ 部署接口已实现、静态合同已验证，并已随多轮Trace功能于2026-09-22本地合并到`master`；配置固定生产/OIDC，只有 Caddy 发布80/443，且Caddyfile声明 `Strict-Transport-Security: max-age=31536000; includeSubDomains`。本地合并不代表服务器已经升级，当前未在线推送，也未执行真实部署或旧数据切换。详见[本地合并记录](changes/2026-09-22-multi-trial-trace-ui-local-merge.md)。⚠️当前开发环境没有Docker/Caddy，镜像构建、Compose官方解析和运行、卷权限、自动证书、HSTS实际响应与公网OIDC均为“服务器现场未验”；下面是未来部署时执行的步骤，不是本轮成功记录。
 
 ## 1. 域名、端口和认证
 
