@@ -78,7 +78,7 @@ docker compose logs --tail=100 app caddy
 
 Compose 固定 production/OIDC；仅 Caddy 发布 80/443，并声明 HSTS。页面、worker 和每日备份统一使用 `LOTTERY_DB_PATH=/app/data/lottery_v3.sqlite3`，备份文件使用 `lottery-v3-` 前缀。旧库不迁移、不删除。数据、备份和证书在命名卷中，secrets 只读挂载；不要执行 `docker compose down -v`。
 
-✅ 本地功能和部署静态合同已验证。⚠️ Docker/Caddy 实际运行、卷权限、自动证书、真实公网 HTTPS/HSTS 与 OIDC 仍是服务器现场未验，不能由本地测试替代。完整操作与边界见[部署与运维手册](docs/deployment.md)及[本次变更记录](docs/changes/2026-09-14-rule1-expanded-outcomes.md)。
+✅ 本地功能和部署静态合同已验证。⚠️ Docker/Caddy 实际运行、卷权限、自动证书、真实公网 HTTPS/HSTS 与 OIDC 仍是服务器现场未验，不能由本地测试替代。完整操作与边界见[部署与运维手册](docs/deployment.md)、[概率核心重构实施记录](docs/changes/2026-09-17-probability-core.md)及[最新本地合并记录](docs/changes/2026-09-18-probability-core-local-merge.md)。
 
 ## 测试
 

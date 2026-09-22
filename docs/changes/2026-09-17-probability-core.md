@@ -2,7 +2,7 @@
 
 ## 状态与授权范围
 
-✅ 任务1～12已完成并独立审查通过。完整目标见[design](2026-09-17-probability-core-design.md)和[计划](2026-09-17-probability-core-plan.md)。下文保留各阶段当时事实，最终结果见文末。
+✅ 任务1～12已完成并独立审查通过，现已合并到本地 `master`，合并后311项测试通过。最新集成状态见[本地合并记录](2026-09-18-probability-core-local-merge.md)。完整目标见[design](2026-09-17-probability-core-design.md)和[计划](2026-09-17-probability-core-plan.md)。下文工作位置及各阶段记录保留当时事实。
 
 ## 工作位置
 
