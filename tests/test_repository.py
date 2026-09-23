@@ -740,6 +740,72 @@ os._exit(19)
         self.assertEqual(calls[-1], "guard")
         self.assertEqual(self.counts(), (0, 0))
 
+    def test_import_progress_includes_bonus_and_never_means_committed(self):
+        payload, trace_path = self.snapshot(draws=2, initial_pity=29)
+        progress = []
+
+        def report_progress(completed, total):
+            if completed == total:
+                with closing(sqlite3.connect(self.path)) as observer:
+                    self.assertEqual(observer.execute(
+                        "SELECT count(*) FROM simulation_runs"
+                    ).fetchone()[0], 0)
+            progress.append((completed, total))
+
+        with patch("dashboard.repository._IMPORT_BATCH_SIZE", 5):
+            self.repository.save_run(
+                self.run_id, payload, trace_path=trace_path,
+                progress_callback=report_progress,
+            )
+        self.assertEqual(progress, [(0, 12), (5, 12), (10, 12), (12, 12)])
+        self.assertEqual(self.counts(), (1, 12))
+
+    def test_import_cancellation_and_progress_failure_roll_back_everything(self):
+        payload, trace_path = self.snapshot(draws=2, initial_pity=29)
+
+        calls = 0
+
+        def cancel_during_import():
+            nonlocal calls
+            calls += 1
+            return calls == 2
+
+        with patch("dashboard.repository._IMPORT_BATCH_SIZE", 5), \
+                self.assertRaises(SimulationCancelled):
+            self.repository.save_run(
+                self.run_id, payload, trace_path=trace_path,
+                cancel_check=cancel_during_import,
+            )
+        self.assertEqual(self.counts(), (0, 0))
+
+        cancel_requested = False
+
+        def cancel_before_commit(completed, total):
+            nonlocal cancel_requested
+            if completed == total:
+                cancel_requested = True
+
+        with patch("dashboard.repository._IMPORT_BATCH_SIZE", 5), \
+                self.assertRaises(SimulationCancelled):
+            self.repository.save_run(
+                str(uuid4()), payload, trace_path=trace_path,
+                cancel_check=lambda: cancel_requested,
+                progress_callback=cancel_before_commit,
+            )
+        self.assertEqual(self.counts(), (0, 0))
+
+        def fail_on_first_batch(completed, total):
+            if completed == 5:
+                raise RuntimeError("progress failed")
+
+        with patch("dashboard.repository._IMPORT_BATCH_SIZE", 5), \
+                self.assertRaisesRegex(RuntimeError, "progress failed"):
+            self.repository.save_run(
+                str(uuid4()), payload, trace_path=trace_path,
+                progress_callback=fail_on_first_batch,
+            )
+        self.assertEqual(self.counts(), (0, 0))
+
     def test_commit_guard_contains_final_cancel_check_and_commit(self):
         events = []
 

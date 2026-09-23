@@ -4,6 +4,13 @@ import random
 import secrets
 
 from lottery_simulator.analysis import expected_simulation_results
+from lottery_simulator.control import (
+    CancelCheck,
+    PhaseCallback,
+    ProgressCallback,
+    SimulationCancelled,
+    check_cancelled,
+)
 from lottery_simulator.formats import RECORD_FORMAT_VERSION
 from lottery_simulator.probability import sample_distribution
 from lottery_simulator.rules.base import (
@@ -85,14 +92,6 @@ class SimulationResult:
         for name, value in defaults.items():
             if getattr(self, name) is None:
                 object.__setattr__(self, name, value)
-
-
-ProgressCallback = Callable[[int, int], None]
-CancelCheck = Callable[[], bool]
-
-
-class SimulationCancelled(RuntimeError):
-    pass
 
 
 def _empty_counts(config):
@@ -179,6 +178,7 @@ def simulate(
     collect_records: bool = False,
     initial_five_star_pity: int = 0,
     record_sink: Callable[[DrawRecord], None] | None = None,
+    phase_callback: PhaseCallback | None = None,
 ) -> SimulationResult:
     _positive_integer(draws, "draws")
     _positive_integer(trials, "trials")
@@ -189,6 +189,8 @@ def simulate(
         raise ValueError("record_sink requires collect_records=True")
     initial_state = DrawState(initial_pity, initial_five_star_pity)
     rule.probability(initial_state)
+    if phase_callback is not None:
+        phase_callback("simulating", None, None)
     total_units = draws * trials
     completed_units = 0
     if progress_callback is not None:
@@ -228,8 +230,7 @@ def simulate(
         trial_bonus_draws = 0
         actual_draw_index = 0
         for main_draw_index in range(1, draws + 1):
-            if cancel_check is not None and cancel_check():
-                raise SimulationCancelled("simulation cancelled")
+            check_cancelled(cancel_check)
             actual_draw_index += 1
             draw_result = draw_once(rule, state, rng)
             outcome = draw_result.outcome
@@ -271,6 +272,7 @@ def simulate(
                 temporary_rule = rule.for_bonus(event)
                 temporary_state = DrawState()
                 for _ in range(event.draws):
+                    check_cancelled(cancel_check)
                     actual_draw_index += 1
                     trial_bonus_draws += 1
                     draw_result = draw_once(
@@ -332,8 +334,10 @@ def simulate(
             for name, count in indicators.items():
                 at_least_one_counts[source][name] += int(count > 0)
 
+    if phase_callback is not None:
+        phase_callback("theory", None, None)
     expectations = expected_simulation_results(
-        rule, draws, initial_pity, initial_five_star_pity
+        rule, draws, initial_pity, initial_five_star_pity, cancel_check=cancel_check,
     )
     source_draws = {
         "main": draws,

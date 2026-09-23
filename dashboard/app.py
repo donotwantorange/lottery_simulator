@@ -18,7 +18,7 @@ from dashboard.repository import HistoryRepository
 from dashboard.views.history import apply_pending_reuse, render_history, reuse_parameters
 from dashboard.views.job_status import render_active_job
 from dashboard.views.new_experiment import render_new_experiment
-from dashboard.views.simulation import render_result
+from dashboard.views.simulation import render_result, render_summary_download
 from dashboard.views.trace_details import result_owner
 
 
@@ -82,8 +82,12 @@ def _render_selected_result(st, manager, repository):
     trace_enabled = False
     trace_reader = None
     saved_snapshot = kind == "history"
+    persistence_error = False
+    history_saved = saved_snapshot
     if kind == "job":
         state = manager.get(identifier)
+        if state is not None and state.cleanup_error:
+            st.warning("计算已停止，残次文件清理未完成")
         if state is not None and state.status == "cancelled":
             st.info("模拟已取消")
             return
@@ -98,6 +102,8 @@ def _render_selected_result(st, manager, repository):
         payload = manager.get_result(identifier)
         if state is not None:
             trace_enabled = bool(state.parameters.get("trace"))
+            persistence_error = bool(state.persistence_error)
+            history_saved = bool(state.history_saved)
         if payload is None and state is not None and state.status in ACTIVE_STATUSES:
             st.info("模拟运行中，请稍候")
             return
@@ -133,14 +139,34 @@ def _render_selected_result(st, manager, repository):
             st.warning("历史保存失败")
     st.subheader("实验结果")
     st.caption(f"结果来源：{'历史记录' if saved_snapshot else '当前任务'} · {identifier}")
-    st.caption(f"已完成 · Trace：{'启用' if trace_enabled else '关闭'} · 记录数：{payload.get('record_count', 0):,}")
+    draws = payload.get("draws", 0)
+    bonus_draws = payload.get("bonus_draws", 0)
+    trials = payload.get("trials", 0)
+    st.subheader("实验规模")
+    scale = st.columns(3)
+    scale[0].metric("实验轮数", f"{trials:,}")
+    scale[1].metric("每轮总抽数", f"{draws + bonus_draws:,}")
+    scale[2].metric("全实验总抽数", f"{(draws + bonus_draws) * trials:,}")
+    save_state = "已完成且已保存" if history_saved else (
+        "已完成但历史保存失败" if persistence_error else "已完成，未保存"
+    )
+    st.caption(
+        f"{save_state} · Trace：{'启用' if trace_enabled else '关闭'} · "
+        f"记录数：{payload.get('record_count', 0):,}"
+    )
+    actions = st.columns(2)
+    with actions[0]:
+        reuse_requested = st.button("复用参数", key=f"result-reuse-{kind}-{identifier}")
+    render_summary_download(
+        actions[1], payload, key=f"result-download-{kind}-{identifier}",
+    )
     with st.expander("参数与配置快照"):
         st.json({key: payload.get(key) for key in (
             "rule_name", "rule_version", "main_draws", "trials", "seed",
             "initial_pity", "initial_five_star_pity", "trace_enabled",
             "result_format_version", "sampling_version", "pool_config",
         )})
-    if st.button("复用参数", key=f"result-reuse-{kind}-{identifier}"):
+    if reuse_requested:
         if reuse_parameters(st, payload):
             st.rerun()
     render_result(st, payload, trace_reader, saved_snapshot=saved_snapshot)

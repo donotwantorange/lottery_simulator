@@ -1,8 +1,114 @@
 """Convert simulator and analyzer results into chart-ready numeric rows."""
 
+import math
+
+import altair as alt
+
 from lottery_simulator.analysis import distribution_stats, waiting_time_distribution
 from lottery_simulator.rules.base import DrawState
 from lottery_simulator.rules.pool_config import PoolConfig
+
+
+_COMPARISON_SERIES = ("模拟均值", "理论期望")
+_COMPARISON_COLORS = ("#4C78A8", "#F58518")
+
+
+def _comparison_value_domain(values: list[object]) -> list[float]:
+    numeric = []
+    for value in values:
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(number):
+            numeric.append(number)
+    minimum = min(numeric, default=0.0)
+    maximum = max(numeric, default=0.0)
+    if minimum >= 0:
+        if maximum == 0:
+            return [0.0, 1.0]
+        upper = maximum * 1.2
+        if upper <= maximum:
+            upper = math.nextafter(maximum, math.inf)
+        return [0.0, upper]
+    span = maximum - minimum
+    return [minimum - span * 0.05, maximum + span * 0.2]
+
+
+def format_comparison_value(value: float) -> str:
+    """Format a bar label without hiding small non-zero values."""
+    numeric = float(value)
+    if numeric == 0:
+        return "0"
+    formatted = f"{numeric:.4f}"
+    if float(formatted) == 0:
+        return f"{numeric:.4e}"
+    return formatted
+
+
+def comparison_bar_chart(
+    rows: list[dict], *, category_field: str, unit: str, horizontal: bool = False
+) -> alt.LayerChart:
+    """Build the shared grouped simulation/theory chart for a category."""
+    categories = [row[category_field] for row in rows]
+    long_rows = [
+        {
+            "类别": row[category_field],
+            "系列": series,
+            "值": row[series],
+            "标签": format_comparison_value(row[series]),
+        }
+        for row in rows
+        for series in _COMPARISON_SERIES
+    ]
+    data = alt.Data(values=long_rows)
+    value_domain = _comparison_value_domain([row["值"] for row in long_rows])
+    category = alt.SortArray(categories)
+    series_sort = list(_COMPARISON_SERIES)
+    color = alt.Color(
+        "系列:N",
+        scale=alt.Scale(domain=series_sort, range=list(_COMPARISON_COLORS)),
+        legend=alt.Legend(
+            title=None, orient="top", symbolType="square", values=series_sort,
+        ),
+    )
+    # Offset and legend carry the explicit display order; Vega-Lite's order
+    # channel accepts only ascending/descending in Altair 6.
+    order = alt.Order("系列:N", sort="ascending")
+    tooltip = [
+        alt.Tooltip("类别:N", title=category_field),
+        alt.Tooltip("系列:N", title="系列"),
+        alt.Tooltip("值:Q", title=unit, format=".12~g"),
+    ]
+    if horizontal:
+        value = alt.X(
+            "值:Q", title=unit, scale=alt.Scale(domain=value_domain, zero=True), stack=None,
+        )
+        group = alt.YOffset("系列:N", sort=alt.SortArray(series_sort))
+        category_axis = alt.Y(
+            "类别:N", sort=category, title=category_field, scale=alt.Scale(padding=0.15),
+        )
+        text_kwargs = {"dx": 5, "align": "left", "baseline": "middle"}
+        height = max(220, len(categories) * 34)
+    else:
+        category_axis = alt.X(
+            "类别:N", sort=category, title=category_field, scale=alt.Scale(padding=0.25),
+        )
+        group = alt.XOffset("系列:N", sort=alt.SortArray(series_sort))
+        value = alt.Y(
+            "值:Q", title=unit, scale=alt.Scale(domain=value_domain, zero=True), stack=None,
+        )
+        text_kwargs = {"dy": -5, "align": "center", "baseline": "bottom"}
+        height = 320
+
+    common = alt.Chart(data).encode(
+        color=color,
+        order=order,
+        tooltip=tooltip,
+    )
+    bars = common.mark_bar().encode(category_axis, group, value)
+    labels = common.mark_text(**text_kwargs).encode(category_axis, group, value, text="标签:N")
+    return (bars + labels).properties(height=height, width="container")
 
 
 def _theoretical_values(payload: dict, source: str, field: str) -> dict:

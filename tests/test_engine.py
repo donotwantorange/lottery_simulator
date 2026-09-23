@@ -11,6 +11,10 @@ from lottery_simulator.engine import (
     draw_once,
     simulate,
 )
+from lottery_simulator.control import (
+    SimulationCancelled as ControlSimulationCancelled,
+    check_cancelled,
+)
 from lottery_simulator.formats import SAMPLING_VERSION
 from lottery_simulator.rules.base import BonusEvent, DrawState, RarityProbabilities
 from lottery_simulator.rules.pool_config import PoolConfig, RewardRule, WeightedCharacter
@@ -51,6 +55,15 @@ class AlwaysSixRule(Rule1):
 class EngineTest(unittest.TestCase):
     def setUp(self):
         self.rule = Rule1()
+
+    def test_simulation_cancelled_is_shared_with_control_module(self):
+        self.assertIs(SimulationCancelled, ControlSimulationCancelled)
+
+    def test_check_cancelled_raises_shared_exception(self):
+        with self.assertRaises(ControlSimulationCancelled):
+            check_cancelled(lambda: True)
+        check_cancelled(lambda: False)
+        check_cancelled(None)
 
     def test_four_star_name_uses_common_result(self):
         raw = self.rule.config.to_dict()
@@ -810,6 +823,74 @@ class EngineTest(unittest.TestCase):
         self.assertEqual(instrumented, baseline)
         self.assertEqual(updates[0], (0, 60))
         self.assertEqual(updates[-1], (60, 60))
+
+    def test_phase_callback_can_cancel_when_theory_starts(self):
+        cancelled = False
+        phases = []
+
+        def phase_callback(name, completed, total):
+            nonlocal cancelled
+            phases.append((name, completed, total))
+            if name == "theory":
+                cancelled = True
+
+        with self.assertRaises(SimulationCancelled):
+            simulate(
+                self.rule, 2, seed=42, phase_callback=phase_callback,
+                cancel_check=lambda: cancelled,
+            )
+        self.assertEqual(phases, [("simulating", None, None), ("theory", None, None)])
+
+    def test_cancel_check_stops_during_bonus_draws(self):
+        checks = 0
+
+        def cancelled_on_second_bonus_draw():
+            nonlocal checks
+            checks += 1
+            return checks == 3
+
+        with self.assertRaises(SimulationCancelled):
+            simulate(
+                GuaranteedBonusRule(), 1, seed=42,
+                cancel_check=cancelled_on_second_bonus_draw,
+            )
+
+    def test_phase_callbacks_preserve_seeded_results_and_trace_records(self):
+        phases = []
+        progress_updates = []
+        phase_callback = lambda name, completed, total: phases.append((name, completed, total))
+        progress_callback = lambda completed, total: progress_updates.append((completed, total))
+        baseline = simulate(self.rule, 30, trials=2, seed=42, collect_records=True)
+        instrumented = simulate(
+            self.rule, 30, trials=2, seed=42,
+            phase_callback=phase_callback, progress_callback=progress_callback,
+            cancel_check=lambda: False,
+        )
+        memory = simulate(
+            self.rule, 30, trials=2, seed=42, collect_records=True,
+            phase_callback=phase_callback, progress_callback=progress_callback,
+            cancel_check=lambda: False,
+        )
+        streamed = []
+        sink = simulate(
+            self.rule, 30, trials=2, seed=42, collect_records=True,
+            record_sink=streamed.append, phase_callback=phase_callback,
+            progress_callback=progress_callback,
+            cancel_check=lambda: False,
+        )
+
+        def aggregate_summary(result):
+            # SimulationResult has no wall-clock field; omit Trace storage shape.
+            return replace(result, trace_enabled=False, record_count=0, records=())
+
+        self.assertEqual(aggregate_summary(instrumented), aggregate_summary(baseline))
+        self.assertEqual(aggregate_summary(memory), aggregate_summary(baseline))
+        self.assertEqual(baseline.records, memory.records)
+        self.assertEqual(len(memory.records), 80)
+        self.assertEqual(streamed, list(memory.records))
+        self.assertEqual(sink, replace(memory, records=()))
+        self.assertEqual(phases, [("simulating", None, None), ("theory", None, None)] * 3)
+        self.assertEqual(progress_updates, [(0, 60), (60, 60)] * 3)
 
     def test_cancel_check_stops_without_returning_partial_result(self):
         checks = 0
