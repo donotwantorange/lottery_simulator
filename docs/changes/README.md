@@ -29,6 +29,6 @@
 
 | 日期／主题 | 当前状态 | 设计 | 计划 | 实施／修改记录 | Git状态 |
 |---|---|---|---|---|---|
-| 2026-09-22 网页使用体验与任务控制 | 待本地合并（余下浏览器项目由用户自验） | [设计](2026-09-22-dashboard-usability-task-control-design.md) | [计划](2026-09-22-dashboard-usability-task-control-plan.md) | [实施记录](2026-09-22-dashboard-usability-task-control.md) | 待本地提交与合并，未推送 |
+| 2026-09-22 网页使用体验与任务控制 | 已合并（余下浏览器项目由用户自验） | [设计](2026-09-22-dashboard-usability-task-control-design.md) | [计划](2026-09-22-dashboard-usability-task-control-plan.md) | [实施记录](2026-09-22-dashboard-usability-task-control.md) | 功能提交 `9e33670`，本地合并 `b085d33`，未推送 |
 
 本表从新规则生效后的下一项改动开始登记；已有文档仍可在本目录按日期查找。
