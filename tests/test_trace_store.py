@@ -10,7 +10,7 @@ import unittest
 from unittest.mock import patch
 
 from dashboard.limits import TraceLimits
-from lottery_simulator.engine import simulate
+from lottery_simulator.engine import SimulationCancelled, simulate
 from lottery_simulator.rules.rule_1 import Rule1
 
 
@@ -296,6 +296,89 @@ class TraceStoreTest(unittest.TestCase):
             connection.execute("UPDATE records SET record_json=?", (json.dumps(value),))
         with self.assertRaises(ValueError):
             writer.finish(trials=1, draws=1, initial_main_draws=0, bonus_per_trial=0)
+        self.assertEqual(self.metadata()["complete"], 0)
+
+    def test_finish_reports_validation_progress_including_bonus_draws(self):
+        writer = self.writer(batch_size=5)
+        for record in self.records(draws=2, initial=29):
+            writer.append(record)
+        progress = []
+
+        writer.finish(
+            trials=1, draws=2, initial_main_draws=29, bonus_per_trial=10,
+            progress_callback=lambda completed, total: progress.append((completed, total)),
+        )
+
+        self.assertEqual(progress, [(0, 12), (5, 12), (10, 12), (12, 12)])
+        self.assertEqual(self.metadata()["complete"], 1)
+
+    def test_finish_cancellation_and_progress_failure_never_publish_metadata(self):
+        writer = self.writer(batch_size=2)
+        for record in self.records(draws=2, initial=29):
+            writer.append(record)
+        with self.assertRaises(SimulationCancelled):
+            writer.finish(
+                trials=1, draws=2, initial_main_draws=29, bonus_per_trial=10,
+                cancel_check=lambda: True,
+            )
+        self.assertEqual(self.metadata()["complete"], 0)
+
+        self.path = self.path.with_name("batch-cancel.sqlite3")
+        writer = self.writer(batch_size=2)
+        for record in self.records(draws=2, initial=29):
+            writer.append(record)
+        checks = 0
+        validated_progress = []
+
+        def cancel_during_validation():
+            nonlocal checks
+            checks += 1
+            return checks == 5
+
+        with self.assertRaises(SimulationCancelled):
+            writer.finish(
+                trials=1, draws=2, initial_main_draws=29, bonus_per_trial=10,
+                cancel_check=cancel_during_validation,
+                progress_callback=lambda completed, total: validated_progress.append(
+                    (completed, total)
+                ),
+            )
+        self.assertEqual(validated_progress, [(0, 12), (2, 12)])
+        self.assertEqual(self.metadata()["complete"], 0)
+
+        self.path = self.path.with_name("final-cancel.sqlite3")
+        writer = self.writer(batch_size=2)
+        for record in self.records(draws=2, initial=29):
+            writer.append(record)
+        cancel_requested = False
+
+        def cancel_after_final_progress(completed, total):
+            nonlocal cancel_requested
+            if completed == total:
+                cancel_requested = True
+
+        with self.assertRaises(SimulationCancelled):
+            writer.finish(
+                trials=1, draws=2, initial_main_draws=29, bonus_per_trial=10,
+                cancel_check=lambda: cancel_requested,
+                progress_callback=cancel_after_final_progress,
+            )
+        self.assertEqual(self.metadata()["complete"], 0)
+
+        self.path = self.path.with_name("callback-failure.sqlite3")
+        writer = self.writer(batch_size=2)
+        for record in self.records(draws=2, initial=29):
+            writer.append(record)
+
+        def fail_on_first_batch(completed, total):
+            if completed == 2:
+                raise RuntimeError("progress failed")
+
+        with self.assertRaisesRegex(RuntimeError, "progress failed"):
+            writer.finish(
+                trials=1, draws=2, initial_main_draws=29, bonus_per_trial=10,
+                progress_callback=fail_on_first_batch,
+            )
         self.assertEqual(self.metadata()["complete"], 0)
 
     def test_finish_rejects_invalid_parameters_and_empty_store(self):

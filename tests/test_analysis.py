@@ -12,6 +12,7 @@ from lottery_simulator.analysis import (
     expected_simulation_results,
     waiting_time_distribution,
 )
+from lottery_simulator.control import SimulationCancelled
 from lottery_simulator.rules.base import DrawState, RarityProbabilities
 from lottery_simulator.rules.pool_config import FiveStarPolicy, RewardRule, SixStarCharacter
 from lottery_simulator.rules.rule_1 import Rule1
@@ -92,6 +93,23 @@ class AnalysisTest(unittest.TestCase):
         self.assertEqual(len(probabilities), 80)
         self.assertAlmostEqual(sum(probabilities), 1.0, places=12)
         self.assertAlmostEqual(probabilities[-1], 0.00029933681818068074)
+
+    def test_pool_expectation_can_be_cancelled_deterministically(self):
+        with self.assertRaises(SimulationCancelled):
+            expected_pool_results(self.rule, 100, cancel_check=lambda: True)
+
+    def test_simulation_expectation_forwards_cancellation_to_main_pool(self):
+        checks = 0
+
+        def cancelled_after_the_simulation_entry():
+            nonlocal checks
+            checks += 1
+            return checks == 2
+
+        with self.assertRaises(SimulationCancelled):
+            expected_simulation_results(
+                self.rule, 100, cancel_check=cancelled_after_the_simulation_entry,
+            )
 
     def test_waiting_distribution_does_not_advance_five_star_state(self):
         class NoAdvanceRule(Rule1):

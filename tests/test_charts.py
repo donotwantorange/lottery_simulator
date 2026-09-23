@@ -2,7 +2,9 @@ import unittest
 
 from dashboard.charts import (
     character_rows,
+    comparison_bar_chart,
     count_distribution_rows,
+    format_comparison_value,
     pity_rows,
     probability_rows,
     rarity_comparison_rows,
@@ -217,6 +219,81 @@ class ChartDataTest(unittest.TestCase):
                 {"来源": "总计", "模拟均值": 1.75, "理论期望": 1.6},
             ],
         )
+
+    def test_format_comparison_value_keeps_zero_precision_and_tiny_values_visible(self):
+        self.assertEqual(format_comparison_value(0), "0")
+        self.assertEqual(format_comparison_value(1.25), "1.2500")
+        self.assertIn("e", format_comparison_value(0.000001))
+
+    def test_comparison_bar_chart_uses_long_rows_group_offsets_and_stable_labels(self):
+        rows = [
+            {"星级": "四星", "模拟均值": 0.0, "理论期望": 0.000001},
+            {"星级": "五星", "模拟均值": 1.25, "理论期望": 1.25},
+        ]
+
+        chart = comparison_bar_chart(
+            rows, category_field="星级", unit="每轮平均数量（主池）"
+        )
+        spec = chart.to_dict()
+        layers = spec["layer"]
+        bar_encoding = layers[0]["encoding"]
+        text_encoding = layers[1]["encoding"]
+        long_rows = spec["data"]["values"]
+
+        self.assertEqual(bar_encoding["xOffset"]["field"], "系列")
+        self.assertTrue(bar_encoding["y"]["scale"].get("zero"))
+        self.assertEqual(text_encoding["xOffset"]["field"], "系列")
+        self.assertEqual(
+            bar_encoding["color"]["scale"]["domain"], ["模拟均值", "理论期望"]
+        )
+        self.assertIn("每轮平均数量（主池）", bar_encoding["y"]["title"])
+        self.assertEqual(
+            [(row["类别"], row["系列"], row["标签"]) for row in long_rows],
+            [
+                ("四星", "模拟均值", "0"),
+                ("四星", "理论期望", "1.0000e-06"),
+                ("五星", "模拟均值", "1.2500"),
+                ("五星", "理论期望", "1.2500"),
+            ],
+        )
+
+    def test_horizontal_comparison_chart_uses_y_offset_and_preserves_all_categories(self):
+        names = ["一个很长的角色名称", "另一个很长的角色名称"]
+        chart = comparison_bar_chart(
+            [{"角色": name, "模拟均值": 1.0, "理论期望": 2.0} for name in names],
+            category_field="角色",
+            unit="每轮平均数量（总计）",
+            horizontal=True,
+        )
+        spec = chart.to_dict()
+        encoding = spec["layer"][0]["encoding"]
+        long_rows = spec["data"]["values"]
+
+        self.assertEqual(encoding["yOffset"]["field"], "系列")
+        self.assertIn("每轮平均数量（总计）", encoding["x"]["title"])
+        self.assertEqual(
+            {row["类别"] for row in long_rows},
+            set(names),
+        )
+
+    def test_comparison_chart_sets_domain_headroom_for_tiny_and_all_zero_values(self):
+        tiny_spec = comparison_bar_chart(
+            [{"星级": "六星", "模拟均值": 0.000001, "理论期望": 0.000001}],
+            category_field="星级",
+            unit="每轮平均数量",
+        ).to_dict()
+        zero_spec = comparison_bar_chart(
+            [{"星级": "六星", "模拟均值": 0.0, "理论期望": 0.0}],
+            category_field="星级",
+            unit="每轮平均数量",
+        ).to_dict()
+
+        tiny_domain = tiny_spec["layer"][0]["encoding"]["y"]["scale"]["domain"]
+        zero_domain = zero_spec["layer"][0]["encoding"]["y"]["scale"]["domain"]
+        self.assertEqual(tiny_domain[0], 0)
+        self.assertGreater(tiny_domain[1], 0.000001)
+        self.assertEqual(zero_domain[0], 0)
+        self.assertGreater(zero_domain[1], 0)
 
 
 if __name__ == "__main__":

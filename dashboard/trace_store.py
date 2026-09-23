@@ -6,6 +6,7 @@ from pathlib import Path
 import sqlite3
 
 from dashboard.limits import TraceLimits
+from lottery_simulator.control import ProgressCallback, check_cancelled
 from lottery_simulator.engine import DrawRecord
 from lottery_simulator.formats import (
     DATABASE_SCHEMA_VERSION, RECORD_FORMAT_VERSION, TRACE_STORE_FORMAT_VERSION, require_version,
@@ -379,7 +380,8 @@ class TraceWriter:
         self._buffer.clear()
 
     def finish(self, *, trials: int, draws: int,
-               initial_main_draws: int, bonus_per_trial: int) -> None:
+               initial_main_draws: int, bonus_per_trial: int,
+               cancel_check=None, progress_callback: ProgressCallback | None = None) -> None:
         self._ensure_writable()
         for label, value, minimum in (
             ("trials", trials, 1), ("draws", draws, 1),
@@ -387,7 +389,13 @@ class TraceWriter:
             ("bonus_per_trial", bonus_per_trial, 0),
         ):
             _integer(value, label, minimum)
+        total = trials * (draws + bonus_per_trial)
+        check_cancelled(cancel_check)
+        if progress_callback is not None:
+            progress_callback(0, total)
+        check_cancelled(cancel_check)
         self._flush()
+        check_cancelled(cancel_check)
         with self._connection:
             self._connection.execute("BEGIN IMMEDIATE")
             trial = draw_index = main = bonus = count = 0
@@ -395,6 +403,8 @@ class TraceWriter:
             for (record_json,) in self._connection.execute(
                 "SELECT record_json FROM records ORDER BY trial_index, draw_index"
             ):
+                if count % self.limits.batch_size == 0:
+                    check_cancelled(cancel_check)
                 record = json.loads(record_json)
                 validate_record(record)
                 if record["trial_index"] != trial:
@@ -429,9 +439,16 @@ class TraceWriter:
                 if record["main_draws_completed"] != initial_main_draws + main:
                     raise ValueError("Incorrect cumulative main draws")
                 previous_state = after
+                if (count < total and count % self.limits.batch_size == 0
+                        and progress_callback is not None):
+                    progress_callback(count, total)
             if (trial != trials or main != draws or bonus != bonus_per_trial
                     or count != self._count or count != trials * (draws + bonus_per_trial)):
                 raise ValueError("Incomplete trace")
+            check_cancelled(cancel_check)
+            if progress_callback is not None:
+                progress_callback(total, total)
+            check_cancelled(cancel_check)
             self._connection.execute(
                 "UPDATE metadata SET complete=1, record_count=?, trials=?, draws=?, "
                 "initial_main_draws=?, bonus_per_trial=? WHERE id=1",

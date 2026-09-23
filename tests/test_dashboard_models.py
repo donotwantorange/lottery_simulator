@@ -96,3 +96,58 @@ class DashboardModelsTest(unittest.TestCase):
     def test_job_state_uses_known_status(self):
         with self.assertRaisesRegex(ValueError, "status"):
             JobState("id", "unknown", {}, 0, 1).validate()
+
+    def test_job_state_reads_legacy_payload_without_control_fields(self):
+        parameters = RunParameters("rule1", 1, 1, 0, 42, False)
+        state = JobState("id", "queued", parameters.to_dict(), 0, 1)
+        raw = state.to_dict()
+        for field in ("phase_completed", "phase_total", "cancel_requested", "cleanup_error"):
+            raw.pop(field, None)
+
+        restored = JobState.from_dict(raw)
+
+        self.assertIsNone(getattr(restored, "phase_completed", None))
+        self.assertIsNone(getattr(restored, "phase_total", None))
+        self.assertFalse(getattr(restored, "cancel_requested", False))
+        self.assertIsNone(getattr(restored, "cleanup_error", None))
+
+    def test_job_state_round_trips_control_fields(self):
+        parameters = RunParameters("rule1", 1, 1, 0, 42, False)
+        state = JobState(
+            "id", "running", parameters.to_dict(), 0, 1,
+            phase="validating", phase_completed=1, phase_total=2,
+            cancel_requested=True, cleanup_error="cleanup pending",
+        )
+
+        restored = JobState.from_dict(state.to_dict())
+
+        self.assertEqual(restored, state)
+
+    def test_job_state_rejects_invalid_control_fields(self):
+        parameters = RunParameters("rule1", 1, 1, 0, 42, False)
+        base = JobState("id", "running", parameters.to_dict(), 0, 1)
+        cases = (
+            {"phase_completed": True, "phase_total": 1},
+            {"phase_completed": -1, "phase_total": 1},
+            {"phase_completed": 0, "phase_total": -1},
+            {"phase_completed": 2, "phase_total": 1},
+            {"phase_completed": 1, "phase_total": None},
+            {"phase_completed": None, "phase_total": 1},
+            {"phase_completed": 1, "phase_total": "2"},
+            {"phase_completed": 0, "phase_total": True},
+            {"cancel_requested": 1},
+            {"cleanup_error": 1},
+        )
+
+        for changes in cases:
+            with self.subTest(changes=changes), self.assertRaises(ValueError):
+                replace(base, **changes).validate()
+
+    def test_job_state_accepts_new_phases(self):
+        parameters = RunParameters("rule1", 1, 1, 0, 42, False)
+        for phase in ("theory", "validating", "committing"):
+            with self.subTest(phase=phase):
+                JobState(
+                    "id", "running", parameters.to_dict(), 0, 1,
+                    phase=phase,
+                ).validate()

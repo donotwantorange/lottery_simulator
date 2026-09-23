@@ -119,7 +119,9 @@ class JobManager:
                 except OSError:
                     logging.getLogger(__name__).exception("Could not launch job %s", state.job_id)
                     write_json(job_dir / "state.json", replace(
-                        state, status="failed", error="模拟任务失败", updated_at=timestamp()
+                        state, status="failed", phase=None,
+                        phase_completed=None, phase_total=None,
+                        error="模拟任务失败", updated_at=timestamp()
                     ).to_dict())
                     raise RuntimeError("模拟任务启动失败") from None
                 state = replace(state, pid=process.pid)
@@ -201,12 +203,16 @@ class JobManager:
                     saved = None
                 if saved is not None:
                     completed = replace(
-                        state, status="completed", phase=None, history_saved=True,
-                        run_id=job_id, result_path="result.json", updated_at=timestamp(),
+                        state, status="completed", phase=None,
+                        phase_completed=None, phase_total=None, history_saved=True,
+                        run_id=job_id, result_path="result.json", cancel_requested=False,
+                        updated_at=timestamp(),
                     )
                     write_json(self._job_dir(job_id) / "state.json", completed.to_dict())
                     return completed
                 (self._job_dir(job_id) / "cancel.request").touch()
+                state = replace(state, cancel_requested=True, updated_at=timestamp())
+                write_json(self._job_dir(job_id) / "state.json", state.to_dict())
             return state
 
     def _reap(self, process, job_id) -> None:
@@ -215,26 +221,19 @@ class JobManager:
             with self._locked():
                 current = self.get(job_id)
                 job_dir = self._job_dir(job_id)
-                if current is None or job_dir is None or current.status not in ACTIVE_STATUSES:
+                if current is None or job_dir is None:
                     return
-                committed = self._recover_committed(current, job_dir)
-                if committed is None:
-                    return
-                if committed:
-                    self._clean_stopped_files(job_dir)
-                    return
-                self._clean_stopped_files(job_dir, partial_result=True)
-                write_json(job_dir / "state.json", replace(
-                    current, status="failed", error="模拟任务失败", result_path=None,
-                    updated_at=timestamp(),
-                ).to_dict())
+                self._finish_exited(current, job_dir, "模拟任务失败")
         except FileNotFoundError:
             # The containing data directory was removed after the child exited.
             return
 
     def _recover_committed(self, state, job_dir):
         if not self.database_path.exists():
-            return False
+            logging.getLogger(__name__).warning(
+                "History database unavailable for job %s; retaining active state", state.job_id
+            )
+            return None
         try:
             saved = HistoryRepository(self.database_path).get_run(state.job_id)
         except (OSError, sqlite3.Error, ValueError):
@@ -245,44 +244,75 @@ class JobManager:
         if saved is None:
             return False
         write_json(job_dir / "state.json", replace(
-            state, status="completed", phase=None, history_saved=True,
+            state, status="completed", phase=None,
+            phase_completed=None, phase_total=None, history_saved=True,
             run_id=state.job_id, result_path="result.json", error=None,
-            persistence_error=None, updated_at=timestamp(),
+            persistence_error=None, cancel_requested=False, updated_at=timestamp(),
         ).to_dict())
         return True
 
+    def _finish_exited(self, current, job_dir, error):
+        if (current.status not in ACTIVE_STATUSES and not current.cleanup_error
+                and not (job_dir / "cancel.request").exists()):
+            return
+        if current.status in ACTIVE_STATUSES:
+            committed = self._recover_committed(current, job_dir)
+            if committed is None:
+                return
+            if committed:
+                current = self.get(current.job_id)
+            else:
+                cancelled = current.cancel_requested or (job_dir / "cancel.request").exists()
+                current = replace(
+                    current, status="cancelled" if cancelled else "failed",
+                    error=None if cancelled else error, result_path=None,
+                    phase=None, phase_completed=None, phase_total=None,
+                )
+        cleanup_error = self._clean_stopped_files(
+            job_dir, partial_result=current.status != "completed",
+        )
+        write_json(job_dir / "state.json", replace(
+            current, cleanup_error=cleanup_error, updated_at=timestamp(),
+        ).to_dict())
+
     def reconcile_after_restart(self):
         with self._locked():
-            for state in self._active_states():
-                current = self.get(state.job_id)
-                job_dir = self._job_dir(state.job_id)
-                if current is None or job_dir is None or current.status not in ACTIVE_STATUSES:
+            for path in self.root.glob("*/state.json"):
+                current = self.get(path.parent.name)
+                job_dir = self._job_dir(path.parent.name)
+                if (current is None or job_dir is None or
+                        (current.status not in ACTIVE_STATUSES and not current.cleanup_error
+                         and not (job_dir / "cancel.request").exists())):
                     continue
                 if not self._stop_worker(current.pid, job_dir):
                     logging.getLogger(__name__).warning(
-                        "Worker exit not confirmed for job %s; retaining active state", state.job_id
+                        "Worker exit not confirmed for job %s; retaining active state", current.job_id
                     )
                     continue
-                committed = self._recover_committed(current, job_dir)
-                if committed is None:
-                    continue
-                if committed:
-                    self._clean_stopped_files(job_dir)
-                    continue
-                self._clean_stopped_files(job_dir, partial_result=True)
-                write_json(job_dir / "state.json", replace(
-                    current, status="failed", error="服务重启，未完成任务已停止",
-                    updated_at=timestamp(), result_path=None, phase=None,
-                ).to_dict())
+                self._finish_exited(current, job_dir, "服务重启，未完成任务已停止")
 
     @staticmethod
     def _clean_stopped_files(job_dir, *, partial_result=False):
         names = ["trace.sqlite3" + suffix for suffix in ("", "-journal", "-wal", "-shm")]
-        names.append("cancel.request")
         if partial_result:
             names.append("result.json")
+        cleanup_error = None
         for name in names:
-            (job_dir / name).unlink(missing_ok=True)
+            try:
+                (job_dir / name).unlink(missing_ok=True)
+            except OSError:
+                logging.getLogger(__name__).exception("Could not clean job file %s", job_dir / name)
+                cleanup_error = "残次文件清理未完成"
+        # Keep the retry marker until every owned output has been removed.
+        try:
+            if cleanup_error:
+                (job_dir / "cancel.request").touch(exist_ok=True)
+            else:
+                (job_dir / "cancel.request").unlink(missing_ok=True)
+        except OSError:
+            logging.getLogger(__name__).exception("Could not update cleanup marker for %s", job_dir)
+            cleanup_error = "残次文件清理未完成"
+        return cleanup_error
 
     def _stop_worker(self, pid, job_dir):
         try:

@@ -33,26 +33,38 @@ def run(job_dir: Path, database_path: Path):
             logging.getLogger(__name__).exception(
                 "Invalid parameters for job %s", state.job_id
             )
-            result_path.unlink(missing_ok=True)
+            cleanup_error = manager._clean_stopped_files(job_dir, partial_result=True)
             write_json(state_path, replace(
                 state, status="failed", error="模拟任务失败", result_path=None,
-                updated_at=timestamp(),
+                phase=None, phase_completed=None, phase_total=None,
+                cleanup_error=cleanup_error, updated_at=timestamp(),
             ).to_dict())
             return
-        state = replace(state, status="running", phase="simulating", pid=os.getpid(),
+        state = replace(state, status="running", phase="simulating", phase_completed=None,
+                        phase_total=None, pid=os.getpid(),
                         started_at=timestamp(), updated_at=timestamp())
         write_json(state_path, state.to_dict())
     started = time.monotonic()
+    last_phase = None
+    last_notification = started
 
-    def progress(completed, total):
+    def publish_phase(phase, completed=None, total=None):
+        nonlocal last_phase, last_notification
+        now = time.monotonic()
+        final = total is not None and completed == total
+        if phase == last_phase and not final and now - last_notification < 0.5:
+            return
         with manager._locked():
             current = manager.get(state.job_id)
             if current is None or current.status not in ACTIVE_STATUSES:
                 raise SimulationCancelled()
+            if phase == "simulating" and completed is not None:
+                current = replace(current, completed_units=completed, total_units=total)
             write_json(state_path, replace(
-                current, completed_units=completed, total_units=total, updated_at=timestamp(),
-                duration_seconds=time.monotonic() - started,
+                current, phase=phase, phase_completed=completed, phase_total=total,
+                updated_at=timestamp(), duration_seconds=now - started,
             ).to_dict())
+        last_phase, last_notification = phase, now
 
     status, error = "completed", None
     writer = None
@@ -68,16 +80,20 @@ def run(job_dir: Path, database_path: Path):
             writer = TraceWriter(trace_path, limits=limits)
         result = simulate(
             rule, parameters.draws, parameters.trials, parameters.seed, parameters.initial_pity,
-            progress_callback=progress, cancel_check=cancel_path.exists,
+            progress_callback=lambda completed, total: publish_phase("simulating", completed, total),
+            cancel_check=cancel_path.exists,
             collect_records=parameters.trace,
             initial_five_star_pity=parameters.initial_five_star_pity,
             record_sink=writer.append if writer is not None else None,
+            phase_callback=publish_phase,
         )
         if writer is not None:
             writer.finish(
                 trials=parameters.trials, draws=parameters.draws,
                 initial_main_draws=parameters.initial_pity,
                 bonus_per_trial=expected_bonus_draws(rule, parameters.initial_pity, parameters.draws),
+                cancel_check=cancel_path.exists,
+                progress_callback=lambda completed, total: publish_phase("validating", completed, total),
             )
             writer.close()
             writer = None
@@ -99,7 +115,6 @@ def run(job_dir: Path, database_path: Path):
             return
         if status == "completed" and cancel_path.exists():
             status = "cancelled"
-        persistence_error = None
         if status == "completed":
             try:
                 write_json(result_path, payload)
@@ -107,15 +122,15 @@ def run(job_dir: Path, database_path: Path):
                 logging.getLogger(__name__).exception("Result write failed for job %s", state.job_id)
                 status, error = "failed", "模拟任务失败"
         if status != "completed":
-            result_path.unlink(missing_ok=True)
-            trace_path.unlink(missing_ok=True)
+            cleanup_error = manager._clean_stopped_files(job_dir, partial_result=True)
             write_json(state_path, replace(
-                current, status=status, phase=None, error=error,
-                result_path=None, updated_at=timestamp(),
+                current, status=status, phase=None, phase_completed=None,
+                phase_total=None, error=error,
+                result_path=None, cleanup_error=cleanup_error, updated_at=timestamp(),
                 duration_seconds=time.monotonic() - started,
             ).to_dict())
             return
-        current = replace(current, parameters=parameters.to_dict(), phase="saving",
+        current = replace(current, parameters=parameters.to_dict(),
                           result_path="result.json", updated_at=timestamp(),
                           duration_seconds=time.monotonic() - started)
         write_json(state_path, current.to_dict())
@@ -131,10 +146,17 @@ def run(job_dir: Path, database_path: Path):
                 raise SimulationCancelled()
             if cancel_path.exists():
                 raise SimulationCancelled()
+            current_state = replace(
+                current_state, phase="committing", phase_completed=None, phase_total=None,
+                updated_at=timestamp(), duration_seconds=time.monotonic() - started,
+            )
+            write_json(state_path, current_state.to_dict())
             yield
             write_json(state_path, replace(
-                current_state, status="completed", phase=None, history_saved=True,
-                run_id=state.job_id, result_path="result.json", updated_at=timestamp(),
+                current_state, status="completed", phase=None,
+                phase_completed=None, phase_total=None, history_saved=True,
+                run_id=state.job_id, result_path="result.json", cancel_requested=False,
+                updated_at=timestamp(),
                 duration_seconds=time.monotonic() - started,
             ).to_dict())
             published = True
@@ -142,43 +164,66 @@ def run(job_dir: Path, database_path: Path):
     try:
         repository = HistoryRepository(database_path)
         repository.initialize()
+        publish_phase("saving")
         repository.save_run(
             state.job_id, payload,
             trace_path=trace_path if parameters.trace else None,
             cancel_check=cancel_path.exists, commit_guard=commit_guard,
+            progress_callback=lambda completed, total: publish_phase("saving", completed, total),
         )
         if published:
-            trace_path.unlink(missing_ok=True)
+            with manager._locked():
+                cleanup_error = manager._clean_stopped_files(job_dir)
+                if cleanup_error:
+                    write_json(state_path, replace(
+                        manager.get(state.job_id), cleanup_error=cleanup_error,
+                    ).to_dict())
     except SimulationCancelled:
         with manager._locked():
             current = manager.get(state.job_id)
             if current is not None and current.status in ACTIVE_STATUSES:
-                result_path.unlink(missing_ok=True)
-                trace_path.unlink(missing_ok=True)
+                cleanup_error = manager._clean_stopped_files(job_dir, partial_result=True)
                 write_json(state_path, replace(
-                    current, status="cancelled", phase=None, result_path=None,
-                    updated_at=timestamp(), duration_seconds=time.monotonic() - started,
+                    current, status="cancelled", phase=None,
+                    phase_completed=None, phase_total=None, result_path=None,
+                    cleanup_error=cleanup_error, updated_at=timestamp(),
+                    duration_seconds=time.monotonic() - started,
                 ).to_dict())
     except Exception:
         logging.getLogger(__name__).exception("History save failed for job %s", state.job_id)
         try:
             history_committed = HistoryRepository(database_path).get_run(state.job_id) is not None
         except Exception:
-            history_committed = False
+            history_committed = None
         with manager._locked():
             current = manager.get(state.job_id)
             if current is not None and current.status in ACTIVE_STATUSES:
-                if history_committed:
+                if history_committed is None:
+                    # Neither failure nor success is proven: retain admission and all outputs.
                     write_json(state_path, replace(
-                        current, status="completed", phase=None, history_saved=True,
+                        current, persistence_error="历史提交状态无法确认", updated_at=timestamp(),
+                    ).to_dict())
+                elif history_committed:
+                    cleanup_error = manager._clean_stopped_files(job_dir)
+                    write_json(state_path, replace(
+                        current, status="completed", phase=None,
+                        phase_completed=None, phase_total=None, history_saved=True,
                         run_id=state.job_id, persistence_error=None,
-                        result_path="result.json", updated_at=timestamp(),
+                        result_path="result.json", cancel_requested=False,
+                        cleanup_error=cleanup_error, updated_at=timestamp(),
                         duration_seconds=time.monotonic() - started,
                     ).to_dict())
-                    trace_path.unlink(missing_ok=True)
+                elif cancel_path.exists():
+                    cleanup_error = manager._clean_stopped_files(job_dir, partial_result=True)
+                    write_json(state_path, replace(
+                        current, status="cancelled", phase=None, phase_completed=None,
+                        phase_total=None, result_path=None, cleanup_error=cleanup_error,
+                        updated_at=timestamp(), duration_seconds=time.monotonic() - started,
+                    ).to_dict())
                 else:
                     write_json(state_path, replace(
-                        current, status="completed", phase=None, history_saved=False,
+                        current, status="completed", phase=None,
+                        phase_completed=None, phase_total=None, history_saved=False,
                         run_id=None, persistence_error="历史保存失败",
                         result_path="result.json", updated_at=timestamp(),
                         duration_seconds=time.monotonic() - started,

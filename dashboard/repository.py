@@ -13,7 +13,7 @@ from lottery_simulator.formats import (
     CONFIG_FORMAT_VERSION, DATABASE_SCHEMA_VERSION,
     RESULT_FORMAT_VERSION, SAMPLING_VERSION, TRACE_STORE_FORMAT_VERSION, require_version,
 )
-from lottery_simulator.engine import SimulationCancelled
+from lottery_simulator.control import ProgressCallback, check_cancelled
 from lottery_simulator.rules.pool_config import PoolConfig
 from dashboard.trace_store import TraceReader, validate_record
 
@@ -126,11 +126,6 @@ def _validate_run_id(run_id):
         raise ValueError("run_id must be a canonical UUID string")
 
 
-def _cancel_if_requested(cancel_check):
-    if cancel_check is not None and cancel_check():
-        raise SimulationCancelled("simulation cancelled")
-
-
 def _trace_connection(path):
     uri = Path(path).resolve().as_uri() + "?mode=ro"
     connection = sqlite3.connect(uri, uri=True)
@@ -237,7 +232,8 @@ class HistoryRepository:
                     connection.execute(statement)
 
     def save_run(self, run_id: str, payload: dict, *, trace_path=None,
-                 cancel_check=None, commit_guard=None) -> str:
+                 cancel_check=None, progress_callback: ProgressCallback | None = None,
+                 commit_guard=None) -> str:
         _validate_run_id(run_id)
         _validate_payload(payload)
         trace_enabled = payload["trace_enabled"]
@@ -303,13 +299,15 @@ class HistoryRepository:
                     )
                     imported = 0
                     if trace is not None:
+                        if progress_callback is not None:
+                            progress_callback(0, payload["record_count"])
                         cursor = trace.execute(
                             "SELECT trial_index, draw_index, source, source_index, rarity, "
                             "character_name, record_json FROM records "
                             "ORDER BY trial_index, draw_index"
                         )
                         while batch := cursor.fetchmany(_IMPORT_BATCH_SIZE):
-                            _cancel_if_requested(cancel_check)
+                            check_cancelled(cancel_check)
                             values = []
                             for source_row in batch:
                                 record = json.loads(source_row["record_json"])
@@ -329,11 +327,13 @@ class HistoryRepository:
                                 "VALUES (?, ?, ?, ?, ?, ?, ?, ?)", values,
                             )
                             imported += len(values)
+                            if progress_callback is not None:
+                                progress_callback(imported, payload["record_count"])
                     if imported != payload["record_count"]:
                         raise ValueError("Imported Trace record count does not match result")
                     guard = commit_guard() if commit_guard is not None else nullcontext()
                     with guard:
-                        _cancel_if_requested(cancel_check)
+                        check_cancelled(cancel_check)
                         connection.commit()
                 except Exception:
                     connection.rollback()

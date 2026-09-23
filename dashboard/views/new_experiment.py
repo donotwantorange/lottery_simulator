@@ -113,7 +113,8 @@ def _preview(st, draft: dict, config: PoolConfig | None) -> None:
     trace_count = total_draws if draft["trace"] else 0
     st.subheader("启动预览")
     st.caption(
-        f"每轮主抽：{draws:,}；每轮赠送：{bonus:,}；每轮总抽：{total_per_trial:,}"
+        f"实验轮数：{trials:,}；每轮主抽：{draws:,}；每轮赠送：{bonus:,}；"
+        f"每轮总抽：{total_per_trial:,}"
     )
     st.caption(
         f"实验总主抽：{total_main:,}；实验总赠送：{total_bonus:,}；"
@@ -129,6 +130,26 @@ def _preview(st, draft: dict, config: PoolConfig | None) -> None:
             over_limit = True
         if over_limit:
             st.warning("Trace记录数超过上限，启动前会拒绝")
+
+
+def _validated_parameters(draft: dict, config: PoolConfig | None) -> RunParameters:
+    """Build parameters only from the configuration rendered in this run."""
+    if config is None:
+        raise ValueError("奖池配置无效，请修正后重试")
+    seed_text = draft["seed_text"]
+    if not isinstance(seed_text, str):
+        raise ValueError("随机种子必须为整数")
+    try:
+        seed = int(seed_text) if seed_text.strip() else None
+    except ValueError:
+        raise ValueError("随机种子必须为整数") from None
+    return validate_parameters_for_active_rule(
+        RunParameters(
+            draft["rule_name"], draft["draws"], draft["trials"],
+            draft["initial_pity"], seed, draft["trace"],
+            draft["initial_five_star_pity"], config.to_dict(),
+        )
+    )
 
 
 def _render_rule_preview(st, draft: dict, config: PoolConfig | None) -> None:
@@ -154,32 +175,35 @@ def render_new_experiment(st, manager, *, live: bool = False, synchronous: bool 
     _prepare_parameter_widgets(st, draft)
 
     st.header("新建实验")
-    st.selectbox(
-        "规则", tuple(RULES), key=_widget_key("rule_name"),
-        on_change=_sync_widget, args=(st, "rule_name"),
-    )
-    st.number_input(
-        "主池抽数", min_value=1, step=1, key=_widget_key("draws"),
-        on_change=_sync_widget, args=(st, "draws"),
-    )
-    st.number_input(
-        "实验轮数", min_value=1, step=1, key=_widget_key("trials"),
-        on_change=_sync_widget, args=(st, "trials"),
-    )
-    st.number_input(
-        _PITY_LABEL, min_value=0, step=1, key=_widget_key("initial_pity"),
-        help="该值同时初始化主池保底位置与累计主池抽数；累计抽数决定首次30抽赠送是已领取还是会在本次模拟中触发。",
-        on_change=_sync_widget, args=(st, "initial_pity"),
-    )
-    st.text_input(
-        "随机种子（留空自动生成）", key=_widget_key("seed_text"),
-        on_change=_sync_widget, args=(st, "seed_text"),
-    )
-    st.toggle(
-        "Trace", key=_widget_key("trace"),
-        help="按每轮主抽和赠送抽写入逐抽记录；多轮实验可用。",
-        on_change=_sync_widget, args=(st, "trace"),
-    )
+    parameters_column, summary_column = st.columns((2, 1))
+    with parameters_column:
+        st.selectbox(
+            "规则", tuple(RULES), key=_widget_key("rule_name"),
+            on_change=_sync_widget, args=(st, "rule_name"),
+        )
+        draws_column, trials_column = st.columns(2)
+        draws_column.number_input(
+            "主池抽数", min_value=1, step=1, key=_widget_key("draws"),
+            on_change=_sync_widget, args=(st, "draws"),
+        )
+        trials_column.number_input(
+            "实验轮数", min_value=1, step=1, key=_widget_key("trials"),
+            on_change=_sync_widget, args=(st, "trials"),
+        )
+        st.number_input(
+            _PITY_LABEL, min_value=0, step=1, key=_widget_key("initial_pity"),
+            help="该值同时初始化主池保底位置与累计主池抽数；累计抽数决定首次30抽赠送是已领取还是会在本次模拟中触发。",
+            on_change=_sync_widget, args=(st, "initial_pity"),
+        )
+        st.text_input(
+            "随机种子（留空自动生成）", key=_widget_key("seed_text"),
+            on_change=_sync_widget, args=(st, "seed_text"),
+        )
+        st.toggle(
+            "保存逐抽明细（Trace）", key=_widget_key("trace"),
+            help="按每轮主抽和赠送抽写入逐抽记录；多轮实验可用。",
+            on_change=_sync_widget, args=(st, "trace"),
+        )
     config = None
     try:
         _prepare_config_widgets(st, draft)
@@ -203,29 +227,20 @@ def render_new_experiment(st, manager, *, live: bool = False, synchronous: bool 
     # AppTest and custom Streamlit hosts which alter several cells together.
     for field in _parameter_keys():
         draft[field] = st.session_state[_widget_key(field)]
-    _preview(st, draft, config)
+    try:
+        parameters = _validated_parameters(draft, config)
+        start_error = None
+    except (AttributeError, TypeError, ValueError) as error:
+        parameters = None
+        start_error = str(error)
+    with summary_column:
+        _preview(st, draft, config)
+        if start_error:
+            st.error(start_error)
+        start_requested = st.button("开始模拟", disabled=live or start_error is not None)
     _render_rule_preview(st, draft, config)
 
-    if st.button("开始模拟", disabled=live):
-        try:
-            seed_text = draft["seed_text"].strip()
-            seed = int(seed_text) if seed_text else None
-        except (AttributeError, ValueError):
-            st.error("随机种子必须为整数")
-            return
-        try:
-            if config is None:
-                raise ValueError("奖池配置无效，请修正后重试")
-            parameters = validate_parameters_for_active_rule(
-                RunParameters(
-                    draft["rule_name"], draft["draws"], draft["trials"],
-                    draft["initial_pity"], seed, draft["trace"],
-                    draft["initial_five_star_pity"], config.to_dict(),
-                )
-            )
-        except (TypeError, ValueError) as error:
-            st.error(str(error))
-            return
+    if start_requested and parameters is not None:
         try:
             state = manager.start(parameters, synchronous=synchronous)
         except JobAlreadyRunning:

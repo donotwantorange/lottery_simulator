@@ -106,11 +106,34 @@ class JobManagerTest(unittest.TestCase):
         if parameters.pool_config is None:
             parameters = replace(parameters, pool_config=load_pool_config().to_dict())
         state = JobState(str(uuid4()), status, parameters, 0,
-                         parameters.draws * parameters.trials, pid=pid)
+                         parameters.draws * parameters.trials, pid=pid,
+                         phase=self._prepared_phase,
+                         phase_completed=self._prepared_phase_completed,
+                         phase_total=self._prepared_phase_total)
         job_dir = self.root / state.job_id
         write_json(job_dir / "parameters.json", parameters.to_dict())
         write_json(job_dir / "state.json", state.to_dict())
         return state, job_dir
+
+    _prepared_phase = None
+    _prepared_phase_completed = None
+    _prepared_phase_total = None
+
+    def prepare_controlled_job(self, status="queued", pid=None, parameters=None):
+        self._prepared_phase = "theory"
+        self._prepared_phase_completed = 1
+        self._prepared_phase_total = 2
+        try:
+            return self.prepare_job(status, pid, parameters)
+        finally:
+            self._prepared_phase = None
+            self._prepared_phase_completed = None
+            self._prepared_phase_total = None
+
+    def assert_phase_progress_cleared(self, state):
+        self.assertIsNone(state.phase)
+        self.assertIsNone(state.phase_completed)
+        self.assertIsNone(state.phase_total)
 
     def launch_worker(self, job_dir):
         process = subprocess.Popen(
@@ -146,6 +169,27 @@ class JobManagerTest(unittest.TestCase):
         self.assertEqual(list(job_dir.glob("*.tmp")), [])
         self.assertEqual(self.manager.cancel(state.job_id).status, "completed")
         self.assertEqual(self.counts(), (1, 12))
+
+    def test_cancel_after_history_commit_clears_phase_progress(self):
+        state, _ = self.prepare_controlled_job("running")
+        with patch.object(
+            HistoryRepository, "get_run", return_value={"id": state.job_id}
+        ):
+            completed = self.manager.cancel(state.job_id)
+
+        self.assertEqual(completed.status, "completed")
+        self.assert_phase_progress_cleared(completed)
+
+    def test_worker_launch_failure_clears_terminal_phase_progress(self):
+        with patch("dashboard.jobs.subprocess.Popen", side_effect=OSError("launch")):
+            with self.assertRaisesRegex(RuntimeError, "启动失败"):
+                self.manager.start(self.parameters)
+
+        states = [self.manager.get(path.parent.name)
+                  for path in self.root.glob("*/state.json")]
+        self.assertEqual(len(states), 1)
+        self.assertEqual(states[0].status, "failed")
+        self.assert_phase_progress_cleared(states[0])
 
     def test_edited_optional_rosters_bonus_trace_and_v4_history_round_trip(self):
         raw = load_pool_config().to_dict()
@@ -265,7 +309,7 @@ class JobManagerTest(unittest.TestCase):
         self.assertEqual(following.status, "completed")
 
     def test_worker_rejects_unversioned_parameters_before_running(self):
-        state, job_dir = self.prepare_job()
+        state, job_dir = self.prepare_controlled_job()
         raw = read_json(job_dir / "parameters.json")
         raw.pop("job_format_version", None)
         write_json(job_dir / "parameters.json", raw)
@@ -287,9 +331,34 @@ class JobManagerTest(unittest.TestCase):
         self.assertNotIn("running", written_statuses)
         failed = self.manager.get(state.job_id)
         self.assertEqual(failed.status, "failed")
+        self.assert_phase_progress_cleared(failed)
         self.assertIsNone(failed.result_path)
         self.assertFalse((job_dir / "result.json").exists())
         self.assertEqual(self.counts(), (0, 0))
+
+    def test_worker_terminal_states_clear_phase_progress(self):
+        from dashboard.worker import run
+        from lottery_simulator.engine import SimulationCancelled
+
+        cases = (
+            ("completed", None),
+            ("cancelled", SimulationCancelled()),
+            ("failed", ValueError("test failure")),
+        )
+        for expected_status, simulated_error in cases:
+            with self.subTest(status=expected_status):
+                state, job_dir = self.prepare_controlled_job()
+                if simulated_error is None:
+                    simulation = patch("dashboard.worker.simulate", wraps=simulate)
+                else:
+                    simulation = patch(
+                        "dashboard.worker.simulate", side_effect=simulated_error
+                    )
+                with simulation:
+                    run(job_dir, self.database)
+                terminal = self.manager.get(state.job_id)
+                self.assertEqual(terminal.status, expected_status)
+                self.assert_phase_progress_cleared(terminal)
 
     def test_progress_and_cancel_leave_no_result_or_history(self):
         parameters = replace(self.parameters, draws=10_000, trials=10_000, trace=False)
@@ -515,7 +584,7 @@ assert result.pool_config == config.to_dict()
         self.assertEqual(self.manager.get(states[-1].job_id).status, "running")
 
     def test_recovery_cleans_uncommitted_files_only_after_worker_exit(self):
-        state, job_dir = self.prepare_job("running", 123456)
+        state, job_dir = self.prepare_controlled_job("running", 123456)
         partials = [job_dir / name for name in (
             "result.json", "trace.sqlite3", "trace.sqlite3-wal",
             "trace.sqlite3-shm", "trace.sqlite3-journal",
@@ -534,7 +603,9 @@ assert result.pool_config == config.to_dict()
               patch("dashboard.jobs.os.kill")):
             self.manager.reconcile_after_restart()
         self.assertGreaterEqual(len(checks), 3)
-        self.assertEqual(self.manager.get(state.job_id).status, "failed")
+        failed = self.manager.get(state.job_id)
+        self.assertEqual(failed.status, "failed")
+        self.assert_phase_progress_cleared(failed)
         self.assertFalse(any(path.exists() for path in partials))
 
     def test_recovery_signal_denied_keeps_active_files_and_blocks_admission(self):
@@ -562,7 +633,9 @@ assert result.pool_config == config.to_dict()
         self.assertTrue((job_dir / "trace.sqlite3").exists())
         with patch.object(self.manager, "_is_worker", return_value=False):
             self.manager.reconcile_after_restart()
-        self.assertEqual(self.manager.get(completed.job_id).status, "completed")
+        recovered = self.manager.get(completed.job_id)
+        self.assertEqual(recovered.status, "completed")
+        self.assert_phase_progress_cleared(recovered)
         self.assertFalse((job_dir / "trace.sqlite3").exists())
 
     def test_reaper_cleans_uncommitted_result_and_trace_after_wait(self):
@@ -582,12 +655,14 @@ assert result.pool_config == config.to_dict()
         self.assertEqual(self.manager.get(state.job_id).status, "failed")
 
     def test_recovery_marks_queued_and_running_failed_without_a_live_pid(self):
-        states = [self.prepare_job("running", 2_147_483_647)[0], self.prepare_job()[0]]
+        states = [self.prepare_controlled_job("running", 2_147_483_647)[0],
+                  self.prepare_controlled_job()[0]]
         self.manager.reconcile_after_restart()
         for state in states:
             recovered = self.manager.get(state.job_id)
             self.assertEqual(recovered.status, "failed")
             self.assertEqual(recovered.error, "服务重启，未完成任务已停止")
+            self.assert_phase_progress_cleared(recovered)
         self.assertEqual(self.counts(), (0, 0))
 
     def test_recovery_terminates_verified_worker_and_keeps_failed_state(self):
@@ -631,6 +706,7 @@ assert result.pool_config == config.to_dict()
 
         failed = self.wait_for_status(state.job_id, "failed")
         self.assertEqual(failed.error, "模拟任务失败")
+        self.assert_phase_progress_cleared(failed)
         self.assertIsNone(self.manager.get_result(state.job_id))
         self.assertEqual(self.counts(), (0, 0))
 
@@ -665,6 +741,7 @@ assert result.pool_config == config.to_dict()
 
         recovered = self.manager.get(completed.job_id)
         self.assertEqual(recovered.status, "completed")
+        self.assert_phase_progress_cleared(recovered)
         self.assertTrue(recovered.history_saved)
         self.assertEqual(self.counts(), (1, 12))
         self.assertEqual([row["id"] for row in self.repository.list_runs({}, 10, 0)],
@@ -679,7 +756,7 @@ assert result.pool_config == config.to_dict()
         job_dir = self.root / completed.job_id
         write_json(job_dir / "state.json", replace(
             completed, status="running", history_saved=False, run_id=None,
-            result_path=None,
+            result_path=None, phase="theory", phase_completed=1, phase_total=2,
         ).to_dict())
 
         self.manager._reap(ExitedProcess(), completed.job_id)
@@ -714,6 +791,28 @@ assert result.pool_config == config.to_dict()
                 self.assertEqual((job_dir / "result.json").read_bytes(), before)
                 self.manager.reconcile_after_restart()
                 self.assertEqual(self.manager.get(completed.job_id).status, "completed")
+
+    def test_reaper_preserves_result_while_history_database_is_temporarily_missing(self):
+        class ExitedProcess:
+            def wait(self):
+                return 1
+
+        completed = self.manager.start(self.parameters, synchronous=True)
+        job_dir = self.root / completed.job_id
+        write_json(job_dir / "state.json", replace(
+            completed, status="running", history_saved=False, run_id=None,
+        ).to_dict())
+        original_result = (job_dir / "result.json").read_bytes()
+        offline_database = self.database.with_name("history.offline.sqlite3")
+        self.database.rename(offline_database)
+        try:
+            self.manager._reap(ExitedProcess(), completed.job_id)
+            self.assertEqual(self.manager.get(completed.job_id).status, "running")
+            self.assertEqual((job_dir / "result.json").read_bytes(), original_result)
+        finally:
+            offline_database.rename(self.database)
+        self.manager.reconcile_after_restart()
+        self.assertEqual(self.manager.get(completed.job_id).status, "completed")
 
     def test_persistence_failure_keeps_completed_result_and_safe_error(self):
         with closing(sqlite3.connect(self.database)) as connection:
@@ -777,6 +876,190 @@ assert result.pool_config == config.to_dict()
                 self.assertIsNone(self.manager.get(job_id))
                 self.assertIsNone(self.manager.cancel(job_id))
                 self.assertIsNone(self.manager.get_result(job_id))
+
+    def test_cancel_persists_request_even_when_history_read_is_unavailable(self):
+        state, job_dir = self.prepare_job("running")
+        (job_dir / "result.json").touch()
+        with patch.object(HistoryRepository, "get_run", side_effect=sqlite3.DatabaseError):
+            requested = self.manager.cancel(state.job_id)
+        self.assertTrue(requested.cancel_requested)
+        self.assertTrue(self.manager.get(state.job_id).cancel_requested)
+        self.assertTrue((job_dir / "cancel.request").exists())
+        self.assertTrue((job_dir / "result.json").exists())
+        self.assertEqual(requested.status, "running")
+
+    def test_main_progress_is_throttled_but_final_update_is_immediate(self):
+        clock = [100.0]
+        updates = []
+
+        def observed_write(path, value):
+            write_json(path, value)
+            if value.get("phase") == "simulating" and value.get("completed_units", 0):
+                updates.append(value["completed_units"])
+
+        def controlled_simulation(*args, **kwargs):
+            progress = kwargs["progress_callback"]
+
+            def advance(completed, total):
+                clock[0] = 100.0 + [0, 0.1, 0.4, 0.6, 0.7][completed]
+                progress(completed, total)
+
+            kwargs["progress_callback"] = advance
+            kwargs["progress_interval"] = 1
+            return simulate(*args, **kwargs)
+
+        with (patch("dashboard.worker.time.monotonic", side_effect=lambda: clock[0]),
+              patch("dashboard.worker.simulate", side_effect=controlled_simulation),
+              patch("dashboard.worker.write_json", side_effect=observed_write)):
+            state = self.manager.start(replace(self.parameters, draws=4), synchronous=True)
+        self.assertEqual(state.status, "completed")
+        self.assertEqual(updates, [3, 4])
+
+    def test_cancel_waiting_for_commit_lock_cannot_remove_committed_outputs(self):
+        from dashboard.worker import run
+        state, job_dir = self.prepare_job()
+        committed, cancelling, release = Event(), Event(), Event()
+
+        def pause_publication(path, value):
+            if value.get("status") == "completed":
+                committed.set()
+                self.assertTrue(release.wait(5))
+            write_json(path, value)
+
+        def late_cancel():
+            cancelling.set()
+            return self.manager.cancel(state.job_id)
+
+        with patch("dashboard.worker.write_json", side_effect=pause_publication):
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                worker = pool.submit(run, job_dir, self.database)
+                try:
+                    self.assertTrue(committed.wait(5))
+                    cancel = pool.submit(late_cancel)
+                    self.assertTrue(cancelling.wait(5))
+                    self.assertEqual(self.counts(), (1, 12))
+                    self.assertFalse((job_dir / "cancel.request").exists())
+                finally:
+                    release.set()
+                worker.result(timeout=5)
+                self.assertEqual(cancel.result(timeout=5).status, "completed")
+        self.assertIsNotNone(self.manager.get_result(state.job_id))
+        self.assertEqual(self.counts(), (1, 12))
+
+    def test_worker_keeps_active_files_when_save_and_commit_probe_fail(self):
+        with (patch.object(HistoryRepository, "save_run", side_effect=sqlite3.DatabaseError),
+              patch.object(HistoryRepository, "get_run", side_effect=sqlite3.DatabaseError)):
+            state = self.manager.start(self.parameters, synchronous=True)
+        self.assertEqual(state.status, "running")
+        self.assertTrue((self.root / state.job_id / "result.json").exists())
+        self.assertTrue((self.root / state.job_id / "trace.sqlite3").exists())
+        with self.assertRaises(JobAlreadyRunning):
+            self.manager.start(self.parameters, synchronous=True)
+
+    def test_committed_history_survives_terminal_write_failure_and_late_cancel(self):
+        failures = []
+
+        def fail_first_terminal(path, value):
+            if value.get("status") == "completed" and not failures:
+                failures.append(True)
+                raise OSError("state publication failed")
+            write_json(path, value)
+
+        with patch("dashboard.worker.write_json", side_effect=fail_first_terminal):
+            state = self.manager.start(self.parameters, synchronous=True)
+        self.assertTrue(failures)
+        self.assertEqual((state.status, state.history_saved), ("completed", True))
+        late = self.manager.cancel(state.job_id)
+        self.assertEqual(late.status, "completed")
+        self.assertEqual(self.counts(), (1, 12))
+        self.assertIsNotNone(self.manager.get_result(state.job_id))
+        self.assertFalse((self.root / state.job_id / "cancel.request").exists())
+
+    def test_cancel_cleanup_permission_failure_is_retryable_and_scoped(self):
+        from dashboard.worker import run
+        state, job_dir = self.prepare_job()
+        self.manager.cancel(state.job_id)
+        for name in ("result.json", "trace.sqlite3", "trace.sqlite3-wal", "trace.sqlite3-shm",
+                     "trace.sqlite3-journal", "worker.log", "unowned.tmp"):
+            (job_dir / name).touch()
+        other, other_dir = self.prepare_job("completed")
+        untouched = [job_dir / "worker.log", job_dir / "unowned.tmp",
+                     job_dir / "parameters.json", other_dir / "state.json",
+                     self.database.parent / "config.json", self.database.parent / "history.sqlite3.backup"]
+        for path in untouched[-2:]:
+            path.touch()
+        original_unlink = Path.unlink
+
+        def deny_trace(path, *args, **kwargs):
+            if path == job_dir / "trace.sqlite3":
+                raise PermissionError("private error detail")
+            return original_unlink(path, *args, **kwargs)
+
+        with patch.object(Path, "unlink", new=deny_trace):
+            run(job_dir, self.database)
+        stopped = self.manager.get(state.job_id)
+        self.assertEqual(stopped.status, "cancelled")
+        self.assertIsNotNone(stopped.cleanup_error)
+        self.assertNotIn("private error detail", stopped.cleanup_error)
+        self.assertTrue((job_dir / "cancel.request").exists())
+        self.assertTrue(all(path.exists() for path in untouched))
+        self.manager.reconcile_after_restart()
+        self.manager.reconcile_after_restart()
+        stopped = self.manager.get(state.job_id)
+        self.assertEqual(stopped.status, "cancelled")
+        self.assertIsNone(stopped.cleanup_error)
+        self.assertFalse((job_dir / "cancel.request").exists())
+        self.assertFalse((job_dir / "trace.sqlite3").exists())
+        self.assertTrue(all(path.exists() for path in untouched))
+
+    def test_reaper_honors_cancel_marker_and_is_idempotent(self):
+        class ExitedProcess:
+            def wait(self):
+                return 1
+
+        state, job_dir = self.prepare_job("running")
+        self.manager.cancel(state.job_id)
+        (job_dir / "result.json").touch()
+        self.manager._reap(ExitedProcess(), state.job_id)
+        self.manager._reap(ExitedProcess(), state.job_id)
+        self.assertEqual(self.manager.get(state.job_id).status, "cancelled")
+        self.assertFalse((job_dir / "result.json").exists())
+        self.assertFalse((job_dir / "cancel.request").exists())
+
+    def test_terminal_cleanup_marker_is_retried_only_after_worker_exit(self):
+        for via_reaper in (False, True):
+            with self.subTest(via_reaper=via_reaper):
+                state, job_dir = self.prepare_job("cancelled", 123456)
+                (job_dir / "cancel.request").touch()
+                (job_dir / "trace.sqlite3-wal").touch()
+                with patch.object(self.manager, "_stop_worker", return_value=False):
+                    self.manager.reconcile_after_restart()
+                self.assertTrue((job_dir / "trace.sqlite3-wal").exists())
+
+                class ExitedProcess:
+                    def wait(self):
+                        return 1
+
+                if via_reaper:
+                    self.manager._reap(ExitedProcess(), state.job_id)
+                else:
+                    with patch.object(self.manager, "_stop_worker", return_value=True):
+                        self.manager.reconcile_after_restart()
+                self.assertEqual(self.manager.get(state.job_id).status, "cancelled")
+                self.assertFalse((job_dir / "trace.sqlite3-wal").exists())
+                self.assertFalse((job_dir / "cancel.request").exists())
+
+    def test_invalid_parameters_cleanup_removes_trace_companions(self):
+        from dashboard.worker import run
+        state, job_dir = self.prepare_job()
+        parameters = read_json(job_dir / "parameters.json")
+        parameters.pop("job_format_version")
+        write_json(job_dir / "parameters.json", parameters)
+        (job_dir / "trace.sqlite3-wal").touch()
+        with self.assertLogs("dashboard.worker", level="ERROR"):
+            run(job_dir, self.database)
+        self.assertEqual(self.manager.get(state.job_id).status, "failed")
+        self.assertFalse((job_dir / "trace.sqlite3-wal").exists())
 
     def test_get_result_rejects_an_external_result_path(self):
         state, job_dir = self.prepare_job("completed")

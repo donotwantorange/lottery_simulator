@@ -40,30 +40,32 @@ def _reward_names(payload):
 
 def _filter_controls(st, payload):
     trials = max(1, int(payload.get("trials", 1)))
+    owner = result_owner(st, payload)
     trial_options = ("第1轮", "指定轮次", "轮次范围", "全部轮次") if trials > 1 else ("第1轮",)
-    trial_label = st.selectbox("轮次", trial_options, key=f"trace-trial-{result_owner(st, payload)}")
+    primary = st.columns(3)
+    trial_label = primary[0].selectbox("轮次", trial_options, key=f"trace-trial-{owner}")
     trial_from = None if trial_label == "全部轮次" else 1
     trial_to = None if trial_label == "全部轮次" else 1
     if trial_label == "指定轮次":
-        trial_from = trial_to = st.number_input(
+        trial_from = trial_to = primary[0].number_input(
             "指定轮次", min_value=1, max_value=trials, value=1, step=1,
-            key=f"trace-single-trial-{result_owner(st, payload)}",
+            key=f"trace-single-trial-{owner}",
         )
     elif trial_label == "轮次范围":
-        trial_from = st.number_input(
+        trial_from = primary[0].number_input(
             "轮次起", min_value=1, max_value=trials, value=1, step=1,
-            key=f"trace-trial-from-{result_owner(st, payload)}",
+            key=f"trace-trial-from-{owner}",
         )
-        trial_to = st.number_input(
+        trial_to = primary[0].number_input(
             "轮次止", min_value=trial_from, max_value=trials, value=trials, step=1,
-            key=f"trace-trial-to-{result_owner(st, payload)}",
+            key=f"trace-trial-to-{owner}",
         )
 
-    source_label = st.selectbox(
-        "来源", tuple(_SOURCE_LABELS), key=f"trace-source-{result_owner(st, payload)}"
+    source_label = primary[1].selectbox(
+        "来源", tuple(_SOURCE_LABELS), key=f"trace-source-{owner}"
     )
-    rarity = st.selectbox(
-        "星级", ("全部", 4, 5, 6), key=f"trace-rarity-{result_owner(st, payload)}"
+    rarity = primary[2].selectbox(
+        "星级", ("全部", 4, 5, 6), key=f"trace-rarity-{owner}"
     )
     rarity_value = None if rarity == "全部" else rarity
     catalog = _character_catalog(payload)
@@ -76,12 +78,14 @@ def _filter_controls(st, payload):
             "全部", "未配置角色名单",
             *(name for item_rarity, name in catalog if item_rarity == rarity_value),
         )
-    character_label = st.selectbox(
-        "角色", character_options, key=f"trace-character-{result_owner(st, payload)}"
+    secondary = st.columns(2)
+    character_label = secondary[0].selectbox(
+        "角色", character_options, key=f"trace-character-{owner}"
     )
-    restrict_range = st.checkbox(
-        "限制来源抽次区间", value=False, key=f"trace-range-{result_owner(st, payload)}"
-    )
+    with secondary[1].expander("来源抽次范围", expanded=False):
+        restrict_range = st.checkbox(
+            "限制来源抽次区间", value=False, key=f"trace-range-{owner}"
+        )
     source_from = source_to = None
     if restrict_range:
         source_from = st.number_input("来源抽次起", min_value=1, value=1, step=1)
@@ -153,8 +157,11 @@ def render_trace_details(st, payload, reader):
         state["trace-page"] = 1
         state.pop("trace-download", None)
 
-    page_size = st.selectbox("每页条数", (50, 100, 200), index=1,
-                             key=f"trace-page-size-{run_key}")
+    top = st.columns(3)
+    page_size = top[1].selectbox("每页条数", (50, 100, 200), index=1,
+                                 key=f"trace-page-size-{run_key}")
+    full = top[2].radio("明细列", ("基础列", "完整列"), horizontal=True,
+                        key=f"trace-columns-{run_key}") == "完整列"
     page = int(state.get("trace-page", 1))
     rows, total = reader.query_records(filters, limit=page_size, offset=(page - 1) * page_size)
     page_count = max(1, (total + page_size - 1) // page_size)
@@ -162,19 +169,21 @@ def render_trace_details(st, payload, reader):
         page = page_count
         state["trace-page"] = page
         rows, total = reader.query_records(filters, limit=page_size, offset=(page - 1) * page_size)
+    top[0].metric("匹配条数", f"{total:,}")
     st.caption(f"匹配 {total:,} 条 · 第 {page}/{page_count} 页")
-    full = st.radio("明细列", ("基础列", "完整列"), horizontal=True,
-                    key=f"trace-columns-{run_key}") == "完整列"
+    if full:
+        st.caption("完整列中的四星概率、五星概率、六星概率保持 0～1 数值尺度（0 表示 0%，1 表示 100%）。")
     st.dataframe(_display_rows(rows, _reward_names(payload), full), hide_index=True, width="stretch")
 
-    if page > 1 and st.button("上一页", key=f"trace-prev-{run_key}"):
+    actions = st.columns(3)
+    if page > 1 and actions[0].button("上一页", key=f"trace-prev-{run_key}"):
         state["trace-page"] = page - 1
         st.rerun()
-    if page < page_count and st.button("下一页", key=f"trace-next-{run_key}"):
+    if page < page_count and actions[1].button("下一页", key=f"trace-next-{run_key}"):
         state["trace-page"] = page + 1
         st.rerun()
 
-    if st.button("准备下载", key=f"trace-prepare-download-{run_key}"):
+    if actions[2].button("准备下载", key=f"trace-prepare-download-{run_key}"):
         _, matched = reader.query_records(filters, limit=50, offset=0)
         if matched > TraceLimits.from_env().max_download_records:
             state.pop("trace-download", None)
@@ -186,7 +195,7 @@ def render_trace_details(st, payload, reader):
             )
     download = state.get("trace-download")
     if download is not None:
-        st.download_button(
+        actions[2].download_button(
             "下载明细 JSONL", data=download,
             file_name="trace.jsonl", mime="application/x-ndjson",
             key=f"trace-download-{run_key}",
@@ -211,6 +220,10 @@ def render_position_analysis(st, payload, reader):
                                 max_value=min(source_from + 999, available),
                                 value=min(source_from + 199, available), step=1)
     mode = st.radio("统计口径", ("计数", "比例"), horizontal=True, key="position-mode")
+    st.caption(
+        "位置来源和轮次范围独立于逐抽明细筛选；横轴是每轮该来源的第几抽，不是保底进度。"
+        "比例的分母是所选轮次在该位置的实际观察次数。"
+    )
     rows = reader.position_counts(
         source=source, trial_from=trial_from, trial_to=trial_to,
         source_from=source_from, source_to=source_to,

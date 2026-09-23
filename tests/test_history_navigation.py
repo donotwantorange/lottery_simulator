@@ -4,6 +4,7 @@ from unittest.mock import patch
 
 from dashboard.views.history import (
     _clear_deleted_run_state,
+    _render_comparison,
     apply_pending_reuse,
     render_history,
 )
@@ -43,7 +44,7 @@ class FakeStreamlit:
         self.dataframes.append(value)
 
     def multiselect(self, label, options, **kwargs):
-        self.widgets.append(("multiselect", label, options))
+        self.widgets.append(("multiselect", label, options, kwargs))
         return self.session_state.get(kwargs.get("key"), [])
 
     def columns(self, count):
@@ -64,9 +65,12 @@ class FakeStreamlit:
     def text(self, value):
         self.widgets.append(("text", value))
 
+    def code(self, value, **kwargs):
+        self.widgets.append(("code", value))
+
     def button(self, label, **kwargs):
-        self.widgets.append(("button", label))
-        return label in self.buttons
+        self.widgets.append(("button", label, kwargs))
+        return not kwargs.get("disabled", False) and label in self.buttons
 
     def warning(self, value):
         self.warnings.append(value)
@@ -135,9 +139,26 @@ def run_row(run_id="run-1", *, trials=3, trace=True):
 
 
 class HistoryNavigationTest(unittest.TestCase):
+    def _buttons(self, st):
+        return {widget[1]: widget[2] for widget in st.widgets if widget[0] == "button"}
+
+    def test_zero_selection_disables_single_record_actions(self):
+        st = FakeStreamlit()
+        repository = FakeRepository([run_row()])
+
+        render_history(st, repository)
+
+        buttons = self._buttons(st)
+        self.assertIn("查看结果", buttons)
+        self.assertTrue(buttons["查看结果"]["disabled"])
+        self.assertTrue(buttons["复用参数"]["disabled"])
+        self.assertTrue(buttons["删除历史（不可撤销）"]["disabled"])
+        self.assertTrue(any("选择一条" in value for value in st.infos))
+
     def test_history_list_has_total_and_single_view_navigates_without_reader(self):
         row = run_row()
-        st = FakeStreamlit(buttons={"查看结果 run-1"})
+        st = FakeStreamlit(buttons={"查看结果"})
+        st.session_state["selected_history_ids"] = [row["id"]]
         repository = FakeRepository([row])
 
         with patch("dashboard.views.history._render_comparison") as comparison:
@@ -145,10 +166,57 @@ class HistoryNavigationTest(unittest.TestCase):
 
         self.assertTrue(any("共 1 条" in value for value in st.captions))
         self.assertEqual(st.dataframes[0][0].get("Trace记录数"), 6)
+        self.assertIn("查看结果", self._buttons(st))
         self.assertEqual(st.session_state["selected_result"], ("history", "run-1"))
         self.assertEqual(st.session_state["_pending_page"], "实验结果")
         comparison.assert_not_called()
         self.assertEqual(repository.readers, 0)
+
+    def test_one_selection_enables_reuse_and_delete_with_complete_id(self):
+        row = run_row("12345678-aaaa-bbbb-cccc-000000000001")
+        st = FakeStreamlit(buttons={"复用参数", "删除历史（不可撤销）"})
+        st.session_state["selected_history_ids"] = [row["id"]]
+
+        with patch("dashboard.views.history._render_comparison"):
+            render_history(st, FakeRepository([row]))
+
+        buttons = self._buttons(st)
+        self.assertIn("复用参数", buttons)
+        self.assertFalse(buttons["复用参数"]["disabled"])
+        self.assertFalse(buttons["删除历史（不可撤销）"]["disabled"])
+        self.assertIn(("code", row["id"]), st.widgets)
+        self.assertEqual(st.session_state["pending_reuse_id"], row["id"])
+        self.assertEqual(st.session_state["pending_delete_id"], row["id"])
+
+    def test_two_selections_keep_summary_comparison_and_disable_single_actions(self):
+        rows = [run_row("run-1"), run_row("run-2")]
+        st = FakeStreamlit()
+        st.session_state["selected_history_ids"] = [row["id"] for row in rows]
+
+        with patch("dashboard.views.history._render_overview") as overview, \
+                patch("dashboard.views.history._render_category") as category:
+            render_history(st, FakeRepository(rows))
+
+        buttons = self._buttons(st)
+        self.assertIn("查看结果", buttons)
+        self.assertTrue(buttons["查看结果"]["disabled"])
+        self.assertTrue(buttons["复用参数"]["disabled"])
+        self.assertTrue(buttons["删除历史（不可撤销）"]["disabled"])
+        self.assertTrue(any("只能比较" in value for value in st.infos))
+        self.assertEqual(overview.call_count, 2)
+        self.assertEqual(category.call_count, 2)
+
+    def test_more_than_two_selections_are_trimmed_before_rendering_comparison(self):
+        rows = [run_row(f"run-{number}") for number in range(1, 4)]
+        st = FakeStreamlit()
+        st.session_state["selected_history_ids"] = [row["id"] for row in rows]
+
+        with patch("dashboard.views.history._render_comparison") as comparison:
+            render_history(st, FakeRepository(rows))
+
+        self.assertEqual(st.session_state["selected_history_ids"], ["run-1", "run-2"])
+        self.assertTrue(any("最多选择两次" in value for value in st.errors))
+        self.assertEqual(comparison.call_count, 2)
 
     def test_comparison_keeps_summary_without_detail_reader(self):
         rows = [run_row("run-1"), run_row("run-2")]
@@ -163,6 +231,60 @@ class HistoryNavigationTest(unittest.TestCase):
         self.assertEqual(overview.call_count, 2)
         self.assertEqual(category.call_count, 2)
         self.assertEqual(repository.readers, 0)
+
+    def test_comparison_categories_use_each_run_as_widget_owner(self):
+        rows = [run_row("run-1"), run_row("run-2")]
+        st = FakeStreamlit()
+        st.session_state["selected_result"] = ("history", "run-1")
+
+        with patch("dashboard.views.history._render_overview"), \
+                patch("dashboard.views.history._render_config_summary"), \
+                patch("dashboard.views.history._render_saved_summary_download"), \
+                patch("dashboard.views.history._render_category") as category:
+            for row in rows:
+                _render_comparison(st, row)
+
+        self.assertEqual(
+            [call.kwargs["owner"] for call in category.call_args_list],
+            [("history", "run-1"), ("history", "run-2")],
+        )
+
+    def test_page_or_filter_trim_cancels_stale_delete_confirmation(self):
+        first, second = run_row("run-1"), run_row("run-2")
+        st = FakeStreamlit(buttons={"确认删除（不可撤销）"})
+        st.session_state.update(
+            selected_history_ids=[second["id"]], pending_delete_id=first["id"],
+        )
+        repository = FakeRepository([first, second])
+
+        with patch("dashboard.views.history._render_comparison"):
+            render_history(st, repository)
+
+        self.assertEqual(st.session_state["selected_history_ids"], [second["id"]])
+        self.assertNotIn("pending_delete_id", st.session_state)
+        self.assertEqual(repository.deleted, [])
+
+    def test_colliding_short_ids_are_selected_and_viewed_by_complete_id(self):
+        first = run_row("12345678-aaaa-bbbb-cccc-000000000001")
+        second = run_row("12345678-dddd-eeee-ffff-000000000002")
+        st = FakeStreamlit(buttons={"查看结果"})
+        st.session_state["selected_history_ids"] = [second["id"]]
+
+        with patch("dashboard.views.history._render_comparison") as comparison:
+            render_history(st, FakeRepository([first, second]))
+
+        multiselect = next(
+            widget for widget in st.widgets if widget[0] == "multiselect"
+        )
+        labels = [multiselect[3]["format_func"](run_id) for run_id in multiselect[2]]
+        self.assertEqual(len(set(labels)), 2)
+        self.assertTrue(
+            all(run_id in label for run_id, label in zip(multiselect[2], labels))
+        )
+        self.assertEqual(st.dataframes[0][0]["运行 ID"], "12345678")
+        self.assertEqual(st.dataframes[0][1]["运行 ID"], "12345678")
+        self.assertEqual(st.session_state["selected_result"], ("history", second["id"]))
+        comparison.assert_not_called()
 
     def test_reuse_accepts_multi_trial_trace_and_only_updates_draft(self):
         row = run_row(trials=3, trace=True)

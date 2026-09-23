@@ -94,6 +94,10 @@ class JobState:
     run_id: str | None = None
     job_format_version: int = JOB_FORMAT_VERSION
     sampling_version: int = SAMPLING_VERSION
+    phase_completed: int | None = None
+    phase_total: int | None = None
+    cancel_requested: bool = False
+    cleanup_error: str | None = None
 
     _STATUSES: ClassVar[frozenset[str]] = frozenset(
         ("queued", "running", "completed", "cancelled", "failed")
@@ -127,8 +131,33 @@ class JobState:
             RunParameters.from_dict(self.parameters)
         else:
             raise ValueError("parameters must be serialized run parameters")
-        if self.phase not in (None, "simulating", "saving"):
-            raise ValueError("phase must be simulating, saving or None")
+        if self.phase not in (
+            None, "simulating", "theory", "validating", "saving", "committing"
+        ):
+            raise ValueError(
+                "phase must be simulating, theory, validating, saving, committing or None"
+            )
+        if (self.phase_completed is None) != (self.phase_total is None):
+            raise ValueError("phase_completed and phase_total must be provided together")
+        if self.phase_completed is not None:
+            if (
+                isinstance(self.phase_completed, bool)
+                or not isinstance(self.phase_completed, int)
+                or self.phase_completed < 0
+            ):
+                raise ValueError("phase_completed must be a non-negative integer")
+            if (
+                isinstance(self.phase_total, bool)
+                or not isinstance(self.phase_total, int)
+                or self.phase_total < 0
+            ):
+                raise ValueError("phase_total must be a non-negative integer")
+            if self.phase_completed > self.phase_total:
+                raise ValueError("phase_completed cannot exceed phase_total")
+        if type(self.cancel_requested) is not bool:
+            raise ValueError("cancel_requested must be a boolean")
+        if self.cleanup_error is not None and not isinstance(self.cleanup_error, str):
+            raise ValueError("cleanup_error must be a string or None")
         if type(self.history_saved) is not bool:
             raise ValueError("history_saved must be a boolean")
         if self.run_id is not None:

@@ -1,6 +1,7 @@
 from dataclasses import dataclass, fields
 from math import sqrt
 
+from lottery_simulator.control import CancelCheck, check_cancelled
 from lottery_simulator.rules.base import (
     DrawState,
     LotteryRule,
@@ -30,9 +31,11 @@ class PoolExpectations:
 
 
 def expected_pool_results(
-    rule: LotteryRule, draws: int, initial_state: DrawState = DrawState()
+    rule: LotteryRule, draws: int, initial_state: DrawState = DrawState(), *,
+    cancel_check: CancelCheck | None = None,
 ) -> PoolExpectations:
     """Finite-draw expectations over reachable double-pity states only."""
+    check_cancelled(cancel_check)
     if isinstance(draws, bool) or not isinstance(draws, int) or draws <= 0:
         raise ValueError("draws must be a positive integer")
     states = {initial_state: 1.0}
@@ -42,8 +45,11 @@ def expected_pool_results(
     # reached state's transitions, while retaining only current nonzero masses.
     transitions = {}
     for _ in range(draws):
+        check_cancelled(cancel_check)
         next_states: dict[DrawState, float] = {}
-        for state, mass in states.items():
+        for state_index, (state, mass) in enumerate(states.items()):
+            if state_index % 1000 == 0:
+                check_cancelled(cancel_check)
             if state not in transitions:
                 _probability(rule, state)
                 probabilities = rule.rarity_probabilities(state)
@@ -97,6 +103,7 @@ def expected_pool_results(
         )
         for reward in rule.config.rewards
     }
+    check_cancelled(cancel_check)
     return PoolExpectations(rarity_counts, categories, character_counts, rewards, pity_triggers)
 
 
@@ -114,18 +121,27 @@ def _add_pool_expectations(
 
 def expected_simulation_results(
     rule: LotteryRule, draws: int, initial_pity: int = 0,
-    initial_five_star_pity: int = 0,
+    initial_five_star_pity: int = 0, *, cancel_check: CancelCheck | None = None,
 ) -> dict[str, PoolExpectations]:
-    main = expected_pool_results(rule, draws, DrawState(initial_pity, initial_five_star_pity))
+    check_cancelled(cancel_check)
+    main = expected_pool_results(
+        rule, draws, DrawState(initial_pity, initial_five_star_pity),
+        cancel_check=cancel_check,
+    )
     bonus = PoolExpectations(**{
         field.name: {name: 0.0 for name in getattr(main, field.name)}
         for field in fields(PoolExpectations)
     })
     for completed_main_draws in range(initial_pity + 1, initial_pity + draws + 1):
+        check_cancelled(cancel_check)
         for event in bonus_events_after_main_draw(rule, completed_main_draws):
+            check_cancelled(cancel_check)
             bonus = _add_pool_expectations(
-                bonus, expected_pool_results(rule.for_bonus(event), event.draws)
+                bonus, expected_pool_results(
+                    rule.for_bonus(event), event.draws, cancel_check=cancel_check,
+                )
             )
+    check_cancelled(cancel_check)
     return {"main": main, "bonus": bonus, "total": _add_pool_expectations(main, bonus)}
 
 
