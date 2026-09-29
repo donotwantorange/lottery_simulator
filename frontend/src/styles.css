@@ -67,7 +67,13 @@ input:focus { border-color: #7188ee; box-shadow: 0 0 0 3px #4568e81c; }
 .metric-card { display: grid; gap: 7px; padding: 15px; border: 1px solid #e5eaf1; border-radius: 10px; background: #f9faff; }
 .metric-card span { color: #77849a; font-size: 12px; }
 .metric-card strong { font-size: 20px; overflow-wrap: anywhere; }
-.chart-box { width: 100%; min-height: 320px; overflow-x: auto; }
+.chart-box { width: 100%; min-width: 0; min-height: 320px; overflow-x: auto; }
+.chart-box.vega-embed { display: block; padding: 0; }
+.chart-box svg { display: block; }
+.position-values { min-width: 0; }
+.position-values summary { cursor: pointer; padding: 12px 0; }
+.position-values summary:focus-visible { outline: 2px solid #4568e8; outline-offset: 3px; }
+.position-values .button-row { align-items: center; margin-top: 12px; }
 .management-editor { margin: 16px 0; padding: 18px; border: 1px solid #e5eaf1; border-radius: 10px; background: #f9faff; }
 .management-editor h3 { margin-top: 0; }
 .management-actions { display: flex; gap: 6px; }

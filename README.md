@@ -1,42 +1,44 @@
 # 抽奖模拟器
 
-项目由 Python 模拟核心、Django 5.2/DRF API 和 React/Vite 网页组成。新网页使用本地账号登录；账号、角色池、实验配置、历史和 Django 会话保存在 `data/history_v5.sqlite3`。规则 1 仍由 Python 核心实现。
+用于本地多轮抽奖模拟、理论概率分析和逐抽结果查看。Python实现模拟核心，React提供网页，Django负责本地账号、角色池、实验配置和历史记录管理。
 
-## 本地开发
+## 日常启动
 
-Python 3.11+ 与 Node.js 22.12+。从项目目录安装后，用两个终端分别启动 API 和前端：
+本机主项目已完成依赖安装、v5数据库和首个管理员初始化。已有环境直接启动，不必重复安装或运行初始化命令。
 
-```bash
-python3 -m venv .venv
-.venv/bin/python -m pip install -r requirements.txt
-npm --prefix frontend ci
-.venv/bin/python manage.py migrate
-.venv/bin/python manage.py init_admin --username 管理员用户名
-```
+在两个终端分别执行：
 
-终端一：`.venv/bin/python manage.py runserver 127.0.0.1:8000`；终端二：`npm --prefix frontend run dev`。浏览器访问 `http://127.0.0.1:5173`，只在本机开发时使用此服务。`init_admin` 交互创建首个管理员，不回显密码。
-
-运行 CLI 示例：
+终端一：
 
 ```bash
-.venv/bin/python -m lottery_simulator analyze --format json
-.venv/bin/python -m lottery_simulator simulate --pool-config configs/pools/default.json --draws 100 --trials 1000 --seed 42
+cd /home/qykj/202607/test/lottery_simulator
+.venv/bin/python manage.py runserver 127.0.0.1:8000
 ```
 
-更多本地路径、登录和备份说明见[本地使用手册](docs/local-usage.md)，网页操作见[网页页面指南](docs/dashboard-guide.md)。
-
-## 数据保护
-
-新网页默认使用 `data/history_v5.sqlite3`、`data/jobs_v5/` 和 `data/exports_v5/`；路径可用 `LOTTERY_DATA_DIR`、`LOTTERY_DB_PATH`、`LOTTERY_JOBS_DIR`、`LOTTERY_EXPORTS_DIR` 设置。2026-09-29已本地合并到主项目，按授权删除主目录的旧历史库和旧任务文件，迁移生成空v5库。旧 Streamlit 入口与依赖已移除，不支持旧历史导入。
-
-数据库包含账号、密码哈希及会话。备份应限制访问，脚本创建的目标文件权限为 `0600`：
+终端二：
 
 ```bash
-.venv/bin/python scripts/backup_db.py data/history_v5.sqlite3 backups/lottery-v5-$(date +%F-%H%M%S).sqlite3
+cd /home/qykj/202607/test/lottery_simulator
+npm --prefix frontend run dev
 ```
 
-恢复和生产服务配置见[部署说明](docs/deployment.md)。这里只描述接口，不代表已经进行真实服务器部署。
+访问 [本地网页](http://127.0.0.1:5173)，使用已有账号登录。选择默认角色池即可模拟，不必先创建池或保存实验配置。若端口已占用，先确认是否已有服务运行，不要盲目启动第二份服务。
 
-## 迁移状态
+以上服务仅供本机开发使用，不用于公网。新机器安装请从[首次安装](docs/local-usage.md#首次安装仅新环境需要)开始。
 
-React/Django 是唯一网页入口；本地双账号浏览器验收结果见[记录](docs/changes/2026-09-29-user-pool-browser-acceptance.md)。旧 UI 清理依据见[覆盖审计](docs/changes/2026-09-29-legacy-ui-coverage-audit.md)，本地合并及真实数据清理见[任务15实施记录](docs/changes/2026-09-24-user-pool-experiment.md)。主目录依赖、前端构建及v5迁移已完成，用户已交互创建首个管理员；真实库登录、小型模拟、历史和Trace读取验收通过。已有账号不要再次运行 `init_admin`。未推送GitHub、未做公网部署。
+## 文档导航
+
+| 文档 | 解决的问题 |
+|---|---|
+| [本地使用手册](docs/local-usage.md) | 安装、启动、CLI、常见问题、本地备份与恢复 |
+| [网页页面指南](docs/dashboard-guide.md) | 角色池、实验配置、结果图表、Trace和权限管理 |
+| [部署接口与运维说明](docs/deployment.md) | 生产配置、发布顺序、服务生命周期和服务器备份 |
+| [修改记录](docs/changes/README.md) | 设计、计划、实施及验收证据 |
+
+## 当前支持范围
+
+- 按抽次分析支持自适应折线图、共享悬停读数和分页数值表；已有Trace记录可直接使用，无需重新模拟。操作见[网页指南](docs/dashboard-guide.md#按抽次分析)，本次验证及尚未提交的修改见[图表修改记录](docs/changes/2026-09-29-position-chart-usability.md)。
+- React＋Django是唯一网页入口，旧Streamlit已移除；新版不支持旧历史导入。
+- 网页数据默认保存在私有的 `data/history_v5.sqlite3`，包含账号、配置、会话和历史，不能公开或提交Git。
+- 本机CLI可独立分析和模拟，但不会自动写入网页历史。
+- React＋Django基础版本已本地验收并合并；后续图表及文档修改已验证但尚未提交或合并。未推送GitHub、未做公网部署。基础版本证据见[实施记录](docs/changes/2026-09-24-user-pool-experiment.md)，后续状态见[修改台账](docs/changes/README.md)，本地验收不等于生产部署通过。

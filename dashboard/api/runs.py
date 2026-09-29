@@ -96,17 +96,59 @@ def _position_chart(request, reader, payload):
             source_to=_optional_int(request, "source_to", min(maximum, source_from + 999)))
     labels = payload["pool_config"].get("rarity_labels", {})
     fields = {4: "four", 5: "five", 6: "six"}
-    values = [{"position": row["source_index"], "rarity": labels.get(str(rarity), f"{rarity}星"),
-               "value": row[f"{fields[rarity]}_{mode}"] if mode == "rate" else row[f"{fields[rarity]}_count"]}
-              for row in rows for rarity in sorted(rarities)]
-    if any(abs(item["position"]) > 9007199254740991 or abs(item["value"]) > 9007199254740991 for item in values):
+    # One aggregate feeds the lines, shared hover readout and accessible table.
+    table_rows = [{"position": row["source_index"], "observations": row["observations"],
+                   **{f"{fields[rarity]}_{metric}": row[f"{fields[rarity]}_{metric}"]
+                      for rarity in sorted(rarities) for metric in ("count", "rate")}}
+                  for row in rows]
+    if any(abs(value) > 9007199254740991 for row in table_rows for value in row.values()):
         raise RunError("该计数超过图表可安全呈现范围，请缩小筛选窗口")
-    specification = {"$schema": "https://vega.github.io/schema/vega-lite/v6.json",
-        "data": {"values": values}, "mark": "line", "encoding": {
-            "x": {"field": "position", "type": "quantitative", "title": "抽次"},
-            "y": {"field": "value", "type": "quantitative", "title": "比例" if mode == "rate" else "计数"},
-            "color": {"field": "rarity", "type": "nominal", "title": "稀有度"}}}
-    return {"spec": specification, "rarity_labels": labels}
+    values = [{**row, "rarity": labels.get(str(rarity), f"{rarity}星"),
+               "value": row[f"{fields[rarity]}_{mode}"]}
+              for row in table_rows for rarity in sorted(rarities)]
+    tooltip = [
+        {"field": "position", "type": "quantitative", "title": "来源内抽次", "format": ",.0f"},
+        {"field": "observations", "type": "quantitative", "title": "有效轮数", "format": ",.0f"},
+    ]
+    for rarity in sorted(rarities):
+        label = labels.get(str(rarity), f"{rarity}星")
+        tooltip.extend([
+            {"field": f"{fields[rarity]}_count", "type": "quantitative", "title": f"{label}次数", "format": ",.0f"},
+            {"field": f"{fields[rarity]}_rate", "type": "quantitative", "title": f"{label}比例", "format": ".2%"},
+        ])
+    specification = {
+        "$schema": "https://vega.github.io/schema/vega-lite/v6.json",
+        "width": "container", "height": 420,
+        "autosize": {"type": "fit", "contains": "padding"},
+        "encoding": {"x": {"field": "position", "type": "quantitative",
+                            "title": "主池抽次" if source == "main" else "赠送抽次",
+                            "scale": {"domain": [table_rows[0]["position"], table_rows[-1]["position"]]
+                                      if len(table_rows) > 1 else
+                                      [table_rows[0]["position"] - .5, table_rows[0]["position"] + .5]
+                                      if table_rows else [0, 1], "nice": False},
+                            "axis": {"format": "d", "tickMinStep": 1}}},
+        "layer": [
+            {"data": {"values": values}, "mark": {"type": "line", "strokeWidth": 2,
+                                                   "point": len(table_rows) <= 40},
+             "encoding": {
+                 "y": {"field": "value", "type": "quantitative",
+                       "title": "模拟观察比例" if mode == "rate" else "出现轮数",
+                       "axis": {"format": ".0%" if mode == "rate" else ",.0f"}},
+                 "color": {"field": "rarity", "type": "nominal", "title": "稀有度"}}},
+            {"data": {"values": table_rows},
+             "params": [{"name": "hover_position", "select": {
+                 "type": "point", "fields": ["position"], "nearest": True,
+                 "on": "pointerover", "clear": "pointerout"}}],
+             "mark": {"type": "point", "opacity": 0},
+             "encoding": {"tooltip": tooltip}},
+            {"data": {"values": table_rows},
+             "transform": [{"filter": {"param": "hover_position", "empty": False}}],
+             "mark": {"type": "rule", "color": "#77849a", "strokeDash": [4, 4]},
+             "encoding": {"tooltip": tooltip}},
+        ],
+    }
+    return {"spec": specification, "rows": table_rows, "rarity_labels": labels}
+
 
 
 @require_GET

@@ -1,65 +1,116 @@
-# 本地开发与使用
+# 本地使用手册
 
-本文描述主项目中已本地合并的 Django API、React 前端和命令行入口。项目目录为 `/home/qykj/202607/test/lottery_simulator`。旧 Streamlit 页面入口、依赖以及已授权旧历史和任务文件已清理。
+本手册负责安装、启动与本机维护。页面操作见[网页页面指南](dashboard-guide.md)，服务器配置见[部署接口与运维说明](deployment.md)，项目入口见[README](../README.md)。
 
-## 环境与首次初始化
+项目目录为 `/home/qykj/202607/test/lottery_simulator`。本机已完成依赖、数据库和管理员初始化，日常使用从下一节开始；新机器才需要“首次安装”。本文命令均在项目根目录执行。
 
-在项目根目录使用 Python 3.11+、Node.js 22.12+：
+## 日常启动与停止
 
-```bash
-python3 -m venv .venv
-.venv/bin/python -m pip install -r requirements.txt
-npm --prefix frontend ci
-```
-
-数据库默认是 `data/history_v5.sqlite3`，任务目录和导出临时目录分别是 `data/jobs_v5/`、`data/exports_v5/`。第一次启动前迁移并交互创建首个管理员：
+两个终端先分别进入项目目录：
 
 ```bash
-.venv/bin/python manage.py migrate
-.venv/bin/python manage.py init_admin --username 管理员用户名
+cd /home/qykj/202607/test/lottery_simulator
 ```
 
-创建过程要求输入用户名和密码，密码不会回显。没有网页注册或默认账号。
-
-2026-09-29本地切换已完成依赖安装、前端构建和v5库迁移，用户已交互创建首个管理员，真实库的小型模拟及历史验收通过。不必重复安装、迁移或初始化账号；`init_admin`仅适用于尚未初始化的新库。不要将密码发到聊天或写进命令参数。
-
-## 启动开发服务
-
-开两个终端，均在项目根目录运行：
+终端一启动API：
 
 ```bash
 .venv/bin/python manage.py runserver 127.0.0.1:8000
 ```
 
+终端二启动网页：
+
 ```bash
 npm --prefix frontend run dev
 ```
 
-访问 `http://127.0.0.1:5173`。Vite 将 `/api` 请求代理至 `127.0.0.1:8000`，浏览器使用同源 Cookie 和 CSRF 流程。停止时分别在两个终端按 `Ctrl+C`。Django 开发服务器仅监听回环地址，不用于公网服务。
+访问 [http://127.0.0.1:5173](http://127.0.0.1:5173)。前端将API请求转发到8000端口；两个服务都要运行。它们仅监听本机，不用于公网。
 
-修改后端代码需重启 Django；前端开发服务器通常会热更新。Django 服务重启不等于主动停止已接受的模拟任务；任务以独立 worker 执行。正常退出网页登录不会取消 worker。
+停止模拟请在网页点击“停止任务”并等待取消完成。退出登录、关闭网页或停止Web服务不会自动取消独立worker。准备完整停机时，先等待模拟完成或明确取消，再分别在两个服务终端按 `Ctrl+C`。
 
-## 登录后的基本流程
+Django默认开发模式通常会自动重载Python代码，Vite通常会热更新前端；修改环境变量、依赖或需要确认新配置生效时，应重新启动相应服务。
 
-1. 首个管理员登录后可在管理员页面创建普通账号。管理员设置的初始密码会要求用户首次登录时修改。
-2. 在“角色池”创建或导入角色池；公共池由管理员管理，私有池按所有者和公开/隐藏状态授权。
-3. 在“新建实验”选择有权使用的池，保存实验配置并填写轮数、主抽数、初始保底进度、种子及 Trace 选项，然后显式提交模拟。
-4. 在“实验结果”查看任务状态、汇总、图表和逐抽记录；在“历史记录”查看已完成运行、按当前角色池确认重跑或删除记录。
-5. 管理员页面提供账号、实验配置和任务管理。前端按钮不是授权边界，服务端会再次校验权限。
+## 首次安装（仅新环境需要）
 
-Trace 默认关闭。逐抽记录下载由历史页面提供，使用 JSONL；具体页面行为和稀有度映射见[网页页面指南](dashboard-guide.md)。
+需要Python 3.11+、Node.js 22.12+。安装前确认当前目录和数据路径，已有环境不要重复初始化账号。
 
-## 数据路径隔离
-
-默认路径为：
-
-```text
-data/history_v5.sqlite3
-data/jobs_v5/
-data/exports_v5/
+```bash
+python3 -m venv .venv
+.venv/bin/python -m pip install -r requirements.txt
+npm --prefix frontend ci
+.venv/bin/python manage.py migrate
+.venv/bin/python manage.py init_admin --username 你的管理员用户名
 ```
 
-可以在启动两个进程前设置绝对路径；以下示例只使用独立临时目录：
+将用户名占位内容替换为实际用户名。密码交互输入、不回显，至少6个字符，建议使用更长的密码；不要把密码写入命令或聊天。初始化同时创建默认公共池，不提供默认密码或网页注册。已有账号/池的数据库会拒绝重复初始化。
+
+完成后按“日常启动”打开网页。管理员创建的其他账号首次登录需修改初始密码。
+
+## 完成一次小型实验
+
+已有开启Trace的历史也可直接用于查看新版图表，无需重跑。按前节启动后端和前端、刷新页面即可加载修改；不用迁移数据库或重新初始化管理员。生产静态资源的更新方式另见[部署说明](deployment.md#本次图表修改的发布范围)。
+
+登录后直接使用默认角色池，设置每轮30主抽、2轮、两种初始保底均为0、种子42、开启Trace。无需先保存实验配置。
+
+点击“开始模拟”，等待完成并确认已写入历史。默认赠送规则下，每轮30主抽加10赠送，两轮共60主抽、20赠送、80条Trace。在“历史记录”可再次查看、下载或删除。具体结果页解释见[网页指南](dashboard-guide.md)。
+
+在“按抽次分析”中缩放窗口检查图表联动，将鼠标移到某个抽次附近查看各星级次数/比例及有效轮数；也可展开“查看数值表”精确读取。这里展示模拟观察比例，不是理论条件概率。
+
+## 常见问题
+
+### 虚拟环境不存在或缺少pip
+
+先确认位于主项目目录，而不是已删除的工作树。若首次创建环境提示缺少ensurepip，Debian/Ubuntu通常需安装与Python版本匹配的venv包；例如Python 3.12对应 `sudo apt install python3.12-venv`。安装后重新执行首次安装步骤，不要删除数据库。
+
+### 端口已占用、网页打不开或API不可用
+
+先尝试访问已有网页并检查两个终端日志。确认8000为本项目API、5173为本项目前端；Vite若自动改用其他端口，不要直接将它视为等价配置，先解决端口冲突。不要随意终止不明进程。只有前端运行时，登录和模拟仍不可用。
+
+### 忘记管理员密码或账号被锁
+
+本机受信任维护者可交互重置已有管理员密码：
+
+```bash
+.venv/bin/python manage.py reset_admin_password --username 你的管理员用户名
+```
+
+重置会撤销旧会话，并要求登录后改密。普通账号可由管理员在网页重置密码。
+
+清除账号登录失败计数：
+
+```bash
+.venv/bin/python manage.py unlock_login --username 要解锁的用户名
+```
+
+这不会启用被禁用的账号，也不会清除来源限制。维护命令必须使用正确的数据路径，不能靠重新初始化或删除库找回账号。
+
+### 登录后看不到原来的账号或历史
+
+检查终端是否遗留 `LOTTERY_*` 路径变量，是否启动了临时目录中的另一套数据库。先核对路径，不要立即创建新管理员或清空数据。
+
+## CLI：独立分析与模拟
+
+CLI不需要网页登录，也不会自动写入网页历史；角色池来自配置文件，不是网页数据库中的池。
+
+```bash
+.venv/bin/python -m lottery_simulator analyze --format json
+.venv/bin/python -m lottery_simulator simulate --pool-config configs/pools/default.json --draws 30 --trials 1000 --seed 42
+.venv/bin/python -m lottery_simulator simulate --help
+```
+
+`--draws`为每轮新增主抽数，`--trials`为轮数，`--seed`为种子，`--trace`开启逐抽记录。`--format text`输出便于阅读的中文文本，`--format json`输出结构化JSON，不改变概率或模拟规则。输出和文件配置的完整选项以中文 `--help` 为准；`configs/pools/`、`configs/experiments/`提供示例。需要网页历史管理时，请从网页提交模拟。
+
+## 数据路径与隔离
+
+默认使用以下位置：
+
+| 位置 | 用途 |
+|---|---|
+| `data/history_v5.sqlite3` | 账号、会话、角色池、实验配置、历史及Trace |
+| `data/jobs_v5/` | 任务状态及暂存文件 |
+| `data/exports_v5/` | 下载临时文件 |
+
+仅在确实需要独立试验环境时设置以下变量：
 
 ```bash
 export LOTTERY_DATA_DIR=/tmp/lottery-local
@@ -68,35 +119,22 @@ export LOTTERY_JOBS_DIR=/tmp/lottery-local/jobs_v5
 export LOTTERY_EXPORTS_DIR=/tmp/lottery-local/exports_v5
 ```
 
-这些变量由 Django/worker 读取；CLI 的独立模拟不写网页历史。新网页不自动导入或迁移旧数据库。启动主目录新版前检查旧终端是否仍设置了历史 `LOTTERY_*` 路径，确认它们指向预期v5目录，不要沿用旧库或临时验收目录。
+**切换路径就是使用另一套数据，不会自动带入原账号或历史。** 空库需在相同环境变量下执行迁移和初始化，再启动后端；worker继承后端环境。`/tmp`不是长期存储。返回主项目时应恢复预期路径并重启后端，不要将新代码指向旧版数据库。
 
-生产环境必须通过 `LOTTERY_ENV=production` 并设置高熵 `SECRET_KEY`；缺失密钥会拒绝启动。不要使用 `VITE_` 前缀存放任何密钥，因为该变量会进入浏览器可见的构建产物。
+## 本地备份与恢复
 
-## CLI
+备份含密码哈希、会话和历史，必须私有保存，不得提交Git或公开下载。在线SQLite备份包含已提交数据，不包含任务/导出目录；重要备份应另存受控异机位置。
 
-CLI 是本机命令行模拟/分析工具，不会写入网页登录的历史：
-
-```bash
-.venv/bin/python -m lottery_simulator analyze --format json
-.venv/bin/python -m lottery_simulator simulate --pool-config configs/pools/default.json --draws 30 --trials 1000 --seed 42
-```
-
-配置格式和更多参数以当前 `python -m lottery_simulator --help`、子命令 `--help` 及 `configs/` 示例为准。网页运行使用用户有权访问的数据库角色池快照，不是 CLI 文件路径。
-
-## 备份与恢复
-
-数据库内含用户资料、密码哈希、会话、配置和历史。备份目录应为受控私有目录，备份文件权限为 `0600`，不得公开或提交：
+以下命令针对默认库；使用自定义路径时须替换为实际源库：
 
 ```bash
 install -d -m 700 backups
 .venv/bin/python scripts/backup_db.py data/history_v5.sqlite3 backups/lottery-v5-$(date +%F-%H%M%S).sqlite3
 ```
 
-成功时脚本打印 `Backup integrity_check: ok` 并以状态码0退出。SQLite 在线备份包含已提交数据；它不包含 `jobs_v5/` 中的运行状态/暂存文件或 `exports_v5/` 临时文件。重要备份应存放在访问受控的异机位置。
+成功输出 `Backup integrity_check: ok`，退出码0，文件权限0600。每次使用新的备份文件名。
 
-恢复会替换数据库。先停 Django 与相关 worker，保护当前库，然后将选定备份恢复到目标路径并检查完整性：
-
-正式覆盖前，建议先在独立临时目录演练备份、恢复、历史与Trace读取和小规模写入；数据库和任务目录都必须隔离。此前的[v4隔离演练记录](changes/2026-09-23-backup-restore-drill.md)仅为历史参考，新版应按v5结构验证。临时副本不是长期备份。
+恢复会覆盖目标库。先停止接收新任务，等待或取消worker并确认退出，停止Web及定时备份；核对源和目标，再保留当前库副本。建议先在独立目录验证选定备份，不能直接把恢复当作排障试探。
 
 ```bash
 .venv/bin/python scripts/backup_db.py data/history_v5.sqlite3 backups/pre-restore-v5-$(date +%F-%H%M%S).sqlite3
@@ -104,8 +142,8 @@ install -d -m 700 backups
 .venv/bin/python -c "import sqlite3; c=sqlite3.connect('file:data/history_v5.sqlite3?mode=ro', uri=True); print(c.execute('PRAGMA integrity_check').fetchall()); c.close()"
 ```
 
-每一步都必须成功；完整性结果应为 `[('ok',)]`。随后启动服务并用登录、历史读取和小型模拟确认可用。任务状态目录不随 SQLite 备份恢复，不要因此盲目删除。详细的生产恢复流程见[部署说明](deployment.md)。
+将示例备份名替换为实际文件，每一步成功后才继续；完整性结果应为 `[('ok',)]`。恢复后启动服务，确认登录、历史读取和小型模拟写入。恢复不会同步任务目录；若状态不一致，保留现场调查，不要递归删除数据目录。服务器定时备份和容器路径见[运维说明](deployment.md)。
 
-## 当前未覆盖
+## 验证范围与历史记录
 
-本地双账号浏览器验收已完成，观察记录见[任务14浏览器验收](changes/2026-09-29-user-pool-browser-acceptance.md)。旧入口测试替代关系见[覆盖审计](changes/2026-09-29-legacy-ui-coverage-audit.md)。真实旧数据已按授权清理，主目录v5库已迁移并完成管理员交互初始化、登录、模拟、历史及Trace读取验收。保留1条30主抽×2轮/80条Trace的小型验收记录，详见[实施记录](changes/2026-09-24-user-pool-experiment.md)。未做真实生产部署。
+本地功能和真实v5库切换已完成，证据见[实施记录](changes/2026-09-24-user-pool-experiment.md)及[浏览器验收](changes/2026-09-29-user-pool-browser-acceptance.md)。旧数据清理是已完成的历史操作，不是日常使用步骤；未进行真实公网部署。此前[v4恢复演练](changes/2026-09-23-backup-restore-drill.md)仅为历史参考。
