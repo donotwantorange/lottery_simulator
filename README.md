@@ -27,7 +27,7 @@ npm --prefix frontend ci
 
 ## 数据保护
 
-新网页默认使用 `data/history_v5.sqlite3`、`data/jobs_v5/` 和 `data/exports_v5/`；路径可用 `LOTTERY_DATA_DIR`、`LOTTERY_DB_PATH`、`LOTTERY_JOBS_DIR`、`LOTTERY_EXPORTS_DIR` 设置。旧 Streamlit 代码入口已从本工作树移除，但原稳定目录及其旧数据库和任务目录仍保持原状。不得把旧数据路径直接交给新版程序。
+新网页默认使用 `data/history_v5.sqlite3`、`data/jobs_v5/` 和 `data/exports_v5/`；路径可用 `LOTTERY_DATA_DIR`、`LOTTERY_DB_PATH`、`LOTTERY_JOBS_DIR`、`LOTTERY_EXPORTS_DIR` 设置。2026-09-29已本地合并到主项目，按授权删除主目录的旧历史库和旧任务文件，迁移生成空v5库。旧 Streamlit 入口与依赖已移除，不支持旧历史导入。
 
 数据库包含账号、密码哈希及会话。备份应限制访问，脚本创建的目标文件权限为 `0600`：
 
@@ -39,4 +39,4 @@ npm --prefix frontend ci
 
 ## 迁移状态
 
-React/Django 是唯一网页入口；本地双账号浏览器验收结果见[记录](docs/changes/2026-09-29-user-pool-browser-acceptance.md)。旧 UI 清理依据见[覆盖审计](docs/changes/2026-09-29-legacy-ui-coverage-audit.md)。真实服务器部署与旧数据切换未执行；不要把本工作树当作真实数据迁移步骤。
+React/Django 是唯一网页入口；本地双账号浏览器验收结果见[记录](docs/changes/2026-09-29-user-pool-browser-acceptance.md)。旧 UI 清理依据见[覆盖审计](docs/changes/2026-09-29-legacy-ui-coverage-audit.md)，本地合并及真实数据清理见[任务15实施记录](docs/changes/2026-09-24-user-pool-experiment.md)。主目录依赖、前端构建及v5迁移已完成，用户已交互创建首个管理员；真实库登录、小型模拟、历史和Trace读取验收通过。已有账号不要再次运行 `init_admin`。未推送GitHub、未做公网部署。

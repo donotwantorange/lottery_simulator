@@ -1,6 +1,6 @@
 # 本地开发与使用
 
-本文描述工作树中已实现的 Django API、React 前端和命令行入口。旧 Streamlit 页面入口及依赖已从本工作树移除；原稳定目录和旧数据没有因此被修改。
+本文描述主项目中已本地合并的 Django API、React 前端和命令行入口。项目目录为 `/home/qykj/202607/test/lottery_simulator`。旧 Streamlit 页面入口、依赖以及已授权旧历史和任务文件已清理。
 
 ## 环境与首次初始化
 
@@ -20,6 +20,8 @@ npm --prefix frontend ci
 ```
 
 创建过程要求输入用户名和密码，密码不会回显。没有网页注册或默认账号。
+
+2026-09-29本地切换已完成依赖安装、前端构建和v5库迁移，用户已交互创建首个管理员，真实库的小型模拟及历史验收通过。不必重复安装、迁移或初始化账号；`init_admin`仅适用于尚未初始化的新库。不要将密码发到聊天或写进命令参数。
 
 ## 启动开发服务
 
@@ -66,7 +68,7 @@ export LOTTERY_JOBS_DIR=/tmp/lottery-local/jobs_v5
 export LOTTERY_EXPORTS_DIR=/tmp/lottery-local/exports_v5
 ```
 
-这些变量由 Django/worker 读取；CLI 的独立模拟不写网页历史。新网页不自动导入或迁移旧数据库。使用旧 Streamlit 程序的稳定目录和数据时，保持其原环境与路径，不要把旧数据库路径传给新工作树。
+这些变量由 Django/worker 读取；CLI 的独立模拟不写网页历史。新网页不自动导入或迁移旧数据库。启动主目录新版前检查旧终端是否仍设置了历史 `LOTTERY_*` 路径，确认它们指向预期v5目录，不要沿用旧库或临时验收目录。
 
 生产环境必须通过 `LOTTERY_ENV=production` 并设置高熵 `SECRET_KEY`；缺失密钥会拒绝启动。不要使用 `VITE_` 前缀存放任何密钥，因为该变量会进入浏览器可见的构建产物。
 
@@ -106,4 +108,4 @@ install -d -m 700 backups
 
 ## 当前未覆盖
 
-本地双账号浏览器验收已完成，观察记录见[任务14浏览器验收](changes/2026-09-29-user-pool-browser-acceptance.md)。旧入口测试替代关系见[覆盖审计](changes/2026-09-29-legacy-ui-coverage-audit.md)。真实生产部署和真实旧数据切换仍未执行。
+本地双账号浏览器验收已完成，观察记录见[任务14浏览器验收](changes/2026-09-29-user-pool-browser-acceptance.md)。旧入口测试替代关系见[覆盖审计](changes/2026-09-29-legacy-ui-coverage-audit.md)。真实旧数据已按授权清理，主目录v5库已迁移并完成管理员交互初始化、登录、模拟、历史及Trace读取验收。保留1条30主抽×2轮/80条Trace的小型验收记录，详见[实施记录](changes/2026-09-24-user-pool-experiment.md)。未做真实生产部署。

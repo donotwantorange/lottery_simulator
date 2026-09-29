@@ -191,3 +191,46 @@ Node v24.20.0、npm 11.19.0。默认沙箱网络/写权限下首次npm操作未�
 
 独立清理复核发现旧`test_dashboard_models.py`同时含现用任务载荷契约；补建`tests/test_job_models.py`六项（严格版本、池快照/五星进度、状态控制字段、结果不含逐抽、零理论期望、JSON写入可读及无临时文件），定向运行六项exit 0。上述289项全组运行在该补测写入前，补测没有修改生产代码，故不把两次结果混写为“295项同次全组”。
 跨任务核对未发现阻断问题。后续运行迁移或自动测试前仍须核对解析后的`LOTTERY_DB_PATH`及符号链接是否指向真实历史库；目前仅以显式`/tmp`路径操作，不能因此宣称所有未来测试路径都已自动受保护。
+
+## 任务15：本地合并与真实目录切换（2026-09-29）
+
+当前状态：任务15已完成。本地合并、旧数据精确清理、主目录依赖准备、v5库迁移、用户交互初始化及真实库登录/模拟/历史/Trace读取均完成。
+
+### 授权、合并和文档保护
+
+用户明确选择本地合并，并授权清理旧数据库及不必要文件。主目录为`/home/qykj/202607/test/lottery_simulator`，原master与功能工作树基点均为`e3c9bd8`。功能提交`0ced297`已通过`git merge --ff-only feature/user-pool-experiment`合入master，没有拉取或推送远端。
+
+主目录原有未提交文档包括修改台账、本地恢复提示、备份演练记录、设计和计划。设计/计划与功能工作树逐字相同；演练记录逐字纳入新版，恢复提示按v5语义保留并链接原记录，台账更新为当前状态。原修改另存安全stash，对象为`bb30b2be86144e955dd9eaef02d64b511107ed6c`，不作为数据库备份。不直接pop，以免将旧版启动/恢复说明覆盖到新版；既有其它stash不变。
+
+本次`user-pool-experiment`工作树及已合并分支已正常移除（未使用force），重复虚拟环境、node_modules和dist随之移除。当前计划执行台账先移至主目录`.superpowers/sdd/2026-09-24-user-pool-experiment-plan/`。其它工作树、分支及历史记录文档没有擅自清理。
+
+### 真实清理清单和数据边界
+
+删除前使用宿主机进程列表确认没有旧Streamlit、Gunicorn、Django服务、worker或导出进程；沙箱内进程列表不作为停机证据。新版定向测试使用显式`/tmp`路径，待测试退出后再做最终进程核对。真实data目录无符号链接，文件总数51；四个库的只读sqlite_master均只含simulation_runs/draw_records，无账号表。未发现SQLite附属文件或独立backups目录；之前演练的临时副本早已清理，本次不承诺旧历史可恢复。
+
+已精确删除（所有路径位于主目录，不清空整个data）：
+
+- `data/history.sqlite3`、`history_v2.sqlite3`、`history_v3.sqlite3`、`history_v4.sqlite3`：共436,039,680字节。
+- `data/jobs/`：6个任务目录（`6f91b66b-3739-4e30-b033-a8e46c60bc7d`、`23925704-7458-44fc-9402-a6dfcd0bcdcb`、`d3485b61-6834-42c2-a0b3-0959ca435846`、`7b6a66c1-155c-42a1-8563-d93f4e35e614`、`850fd74f-2d96-48eb-ab41-fc00422b4058`、`6e0fa8fe-0219-400e-ac1f-c556c7e9a375`），共24个任务文件及active.lock。
+- `data/jobs_v3/`：2个任务目录（`460d6a4b-f1be-48ec-b014-f73071343a4e`、`3ac25455-1a0c-48f2-a9ff-4bfb729debb3`），共8个任务文件及active.lock。
+- `data/jobs_v4/`：3个任务目录（`c02ba448-36e9-40ff-a44c-3ccf27b79996`、`988e7588-e4e8-4085-9e44-d6d8581fbfa1`、`110443bc-158e-404c-86de-f364de91a2d2`），共12个任务文件及active.lock。
+- 上述每个任务目录含parameters.json、state.json、result.json、worker.log。合计47个旧任务文件，不存在临时Trace残留。
+- 精确移除dashboard/views、dashboard、tests、lottery_simulator及lottery_simulator/rules下的5个旧__pycache__目录；旧views空目录已移除，.streamlit目录已随Git合并消失。清理命令尝试rmdir已消失的.streamlit时非零停止，因此后续迁移另行执行并确认成功，没有忽略该退出状态。
+
+没有删除配置、代码、文档、备份或新版账号。主虚拟环境保留，安装requirements.txt锁定依赖并卸载已废弃Streamlit；未批量卸载其它依赖或修改系统Python。
+
+### 新版初始化与验证
+
+主目录`data/`、`jobs_v5/`、`exports_v5/`权限0700。显式设置所有LOTTERY路径后执行主目录`.venv/bin/python manage.py migrate --noinput`成功，`history_v5.sqlite3`权限0600。只读核对users、pools、simulation_runs、draw_records均为0，没有代设或输出密码。
+
+- 合并前定向`tests.test_job_models tests.web.test_end_to_end`：11项通过；合并后用主目录解释器及另一组显式临时路径再运行11项通过，exit0。覆盖物理临时v5库小型账户/模拟/历史流程，不冒充真实库登录验收。
+- 主目录`npm --prefix frontend ci --no-audit --no-fund`成功；前端14文件29项测试通过；`npm --prefix frontend run build`包含TypeScript检查，681模块构建成功。仅保留既有bundle大于500KB提示。
+- 主目录真实v5路径`manage.py check`通过；migrate保留既有RawSQL models.W045提醒，迁移本身成功。
+
+用户首次尝试因--username缺少值被argparse拒绝，没有创建账号；解释正确命令后，用户交互完成首个管理员和默认公共池初始化。只读核对users=1、pools=1、initialized标记=1，未读取密码或密码哈希。
+
+随后主目录启动Django（127.0.0.1:8000，--noreload）及Vite（127.0.0.1:5173，--strictPort），使用上述真实v5库。用户在Codex内浏览器自行登录，API日志login=200、CSRF轮换=200，页面显示管理员和默认池。
+
+通过页面显式运行默认池、30主抽×2轮、初始双保底0、种子42、Trace开启，未保存额外实验配置。任务`dd2ec152-6f1c-4ff7-bac4-9e68cbd08403`completed，history_saved=true，persistence_error=null。真实库计数simulation_runs=1、draw_records=80；历史页面列出30主抽/2轮/80条Trace，查看快照显示主抽60、赠送20、总抽80，逐抽表第1轮40条含主池与赠送、角色及奖励。页面刷新后仍可进入历史读取，未修改账号或密码。
+
+保留这1条小型验收运行及对应80条Trace/任务文件，不擅自删除新版历史。浏览器验收页面保留，本地双服务仍运行供用户查看；仅监听回环，不是公网部署。任务15至此闭合。未做公网部署、容器实跑或服务器服务切换，未推送GitHub。

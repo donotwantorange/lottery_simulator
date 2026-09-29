@@ -32,7 +32,7 @@ LOTTERY_EXPORTS_DIR=<私有持久路径>/exports_v5
 
 ## 数据库与备份
 
-本版本使用 Django migration 管理 v5 schema。迁移前先验证目标 `LOTTERY_DB_PATH` 是预期的 v5 路径；不要将新版本指向旧 Streamlit 数据库，也不要自动迁移旧历史。任务14尚未完成真实切换，因此不要把下方接口当作旧数据清理许可。
+本版本使用 Django migration 管理 v5 schema。迁移前先验证目标 `LOTTERY_DB_PATH` 是预期的 v5 路径；不要将新版本指向旧 Streamlit 数据库，也不要自动迁移旧历史。2026-09-29已完成主目录本地合并、授权旧数据清理及空v5库迁移；以下部署接口不构成其它目录或服务器的数据删除许可。
 
 备份脚本可对运行中的 SQLite 源库执行在线备份：
 
@@ -48,4 +48,4 @@ python3 scripts/backup_db.py /srv/lottery/data/history_v5.sqlite3 /srv/lottery/b
 
 ## 未验证事项
 
-本地双账号浏览器验收已完成，记录于[浏览器验收记录](changes/2026-09-29-user-pool-browser-acceptance.md)，覆盖登录、账号隔离、池复制、Trace/非Trace模拟、刷新、图表、筛选、CSRF原生下载请求和实际取消。该记录不证明公网反向代理、HTTPS/域名、生产容器、Gunicorn/worker systemd 生命周期或真实数据切换已经验证。旧 Streamlit 入口及依赖已从本工作树移除；旧数据仍留在原稳定目录。
+本地双账号浏览器验收已完成，记录于[浏览器验收记录](changes/2026-09-29-user-pool-browser-acceptance.md)，覆盖登录、账号隔离、池复制、Trace/非Trace模拟、刷新、图表、筛选、CSRF原生下载请求和实际取消。该记录不证明公网反向代理、HTTPS/域名、生产容器或Gunicorn/worker systemd生命周期已经验证。主项目已移除旧Streamlit及授权旧数据，v5库迁移及首个管理员交互初始化完成，真实库登录/模拟/历史/Trace读取验收通过，详见[实施记录](changes/2026-09-24-user-pool-experiment.md)。
