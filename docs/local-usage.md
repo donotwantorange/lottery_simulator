@@ -1,256 +1,109 @@
-# 本地使用手册
+# 本地开发与使用
 
-本文只覆盖本机开发和使用。服务器 Docker/Caddy/OIDC、域名、证书和公网验收请看[部署与运维手册](deployment.md)，两套流程不要混用。
+本文描述工作树中已实现的 Django API、React 前端和命令行入口。旧 Streamlit 页面入口及依赖已从本工作树移除；原稳定目录和旧数据没有因此被修改。
 
-想逐项了解三页面、四种结果视图、图表和历史记录，请看[网页页面详细说明](dashboard-guide.md)。本文负责安装、启动及数据管理；页面说明负责界面操作和统计口径。
+## 环境与首次初始化
 
-## 1. 唯一主目录与虚拟环境
-
-本项目本地使用的唯一入口是：
-
-```bash
-cd /home/qykj/202607/test/lottery_simulator
-```
-
-所有下面的相对路径都以这个目录为当前目录。这里已经合并到 `master`，不需要进入旧 worktree；旧 worktree 中的 `data/` 也不会自动搬过来。
-
-先确认 Python 版本和环境：
-
-```bash
-python3 --version
-.venv/bin/python --version
-```
-
-已有可用 `.venv` 时直接复用。首次安装或环境不完整时执行：
+在项目根目录使用 Python 3.11+、Node.js 22.12+：
 
 ```bash
 python3 -m venv .venv
 .venv/bin/python -m pip install -r requirements.txt
+npm --prefix frontend ci
 ```
 
-如果 Debian/Ubuntu 报 `ensurepip` 缺失，先看 `python3 --version` 的实际版本，再安装匹配的 venv 包。例如实际是 3.12 才使用：
+数据库默认是 `data/history_v5.sqlite3`，任务目录和导出临时目录分别是 `data/jobs_v5/`、`data/exports_v5/`。第一次启动前迁移并交互创建首个管理员：
 
 ```bash
-sudo apt install python3.12-venv
-python3 -m venv .venv
+.venv/bin/python manage.py migrate
+.venv/bin/python manage.py init_admin --username 管理员用户名
 ```
 
-实际版本不是 3.12 时，把包名中的版本替换为实际版本。不要盲目删除已有 `.venv`；先确认其中没有要保留的环境或依赖，确有损坏再由用户决定备份、移走或重建。本文命令只供用户执行，本次文档更新不安装软件、不重建环境。
+创建过程要求输入用户名和密码，密码不会回显。没有网页注册或默认账号。
 
-## 2. 启动本地网页
+## 启动开发服务
 
-在主目录执行以下命令。它显式使用开发环境和免登录模式，只监听回环地址：
+开两个终端，均在项目根目录运行：
 
 ```bash
-APP_ENVIRONMENT=development APP_AUTH_MODE=disabled STREAMLIT_SERVER_ADDRESS=127.0.0.1 .venv/bin/python -m streamlit run dashboard/app.py --server.address=127.0.0.1
+.venv/bin/python manage.py runserver 127.0.0.1:8000
 ```
-
-浏览器打开 `http://127.0.0.1:8501`。按 `Ctrl+C` 停止；再次执行启动命令即可重启，浏览器刷新后读取新页面。不要为了本地免登录把地址改成公网地址，也不要把 8501 对公网开放。
-
-侧栏用于导航和任务状态；选择“新建实验”后，在主区域设置参数。参数含义和网页校验如下：
-
-- `规则`：当前可选 `rule1`。
-- `主池抽数`：每轮主池抽多少次；必须为正整数，网页上限为 10,000,000。
-- `实验轮数`：重复多少轮；网页上限为 1,000,000，且 `主池抽数 × 实验轮数` 不得超过 100,000,000。
-- `假设主池已累计多少抽仍未出6星`：同时初始化六星连续未出状态和已完成的主池抽数，范围 0–79；它还决定首次 30 主抽赠送是否已领取。
-- `随机种子（留空自动生成）`：留空自动生成；复现还要求参数、配置、规则版本、抽样版本和 Python 实现/版本相同。
-- `保存逐抽明细（Trace）`：保存逐抽记录，支持多轮；每条记录包含轮次和轮内总抽次，赠送抽也计入总记录数。网页总实际记录上限默认 1,000,000，单次明细下载默认 10,000。
-- `高级设置` 中的 `假设主池已连续多少抽未出5星及以上`：五星保底开启时范围为 0 到硬保底减 1；关闭时只能是 0。
-
-运行中侧栏显示阶段、进度、耗时和“停止模拟”。主抽进度达到100%只表示主抽循环结束；理论统计阶段总量未知，Trace校验和保存阶段的计数达到100%也不等于历史事务已提交，需等状态变为完成并查看保存状态。停止会请求取消整项任务，不保存部分进度，也不能续算；若历史提交已经完成，停止操作会保留该历史。保存失败时计算已完整完成，结果页仍可查看完整汇总，开启Trace时还可查看和导出完整暂存明细，但结果未进入历史库。取消、服务重启或计算失败产生的不完整结果不会保存为历史。
-
-建议先做小模拟，确认页面和数据目录正常，再扩大规模：
 
 ```bash
-.venv/bin/python -m lottery_simulator simulate --draws 30 --trials 1000 --seed 42
+npm --prefix frontend run dev
 ```
 
-网页中相同含义的是主池抽数 30、实验轮数 1000、随机种子 42。CLI 的参数校验和网页的 `RunParameters` 校验不是同一层；不要把 CLI 能接受的范围当成网页上限，也不要声称两者限制完全相同。
+访问 `http://127.0.0.1:5173`。Vite 将 `/api` 请求代理至 `127.0.0.1:8000`，浏览器使用同源 Cookie 和 CSRF 流程。停止时分别在两个终端按 `Ctrl+C`。Django 开发服务器仅监听回环地址，不用于公网服务。
 
-## 3. 奖池、奖励和 JSON
+修改后端代码需重启 Django；前端开发服务器通常会热更新。Django 服务重启不等于主动停止已接受的模拟任务；任务以独立 worker 执行。正常退出网页登录不会取消 worker。
 
-在“新建实验”中展开“奖池与奖励设置”，可编辑并增删六星角色和奖励，也可“恢复默认配置”、导入 UTF-8 JSON 或“导出配置 JSON”。四、五星名单通过 JSON 编辑，网页显示人数并保留导入的名单。网页编辑器的真实列名是：
+## 登录后的基本流程
 
-- 角色：`角色名称`、`是否UP`、`是否限定`、`UP权重`。
-- 奖励：`奖励名称`、`四星`、`五星`、`六星`。
+1. 首个管理员登录后可在管理员页面创建普通账号。管理员设置的初始密码会要求用户首次登录时修改。
+2. 在“角色池”创建或导入角色池；公共池由管理员管理，私有池按所有者和公开/隐藏状态授权。
+3. 在“新建实验”选择有权使用的池，保存实验配置并填写轮数、主抽数、初始保底进度、种子及 Trace 选项，然后显式提交模拟。
+4. 在“实验结果”查看任务状态、汇总、图表和逐抽记录；在“历史记录”查看已完成运行、按当前角色池确认重跑或删除记录。
+5. 管理员页面提供账号、实验配置和任务管理。前端按钮不是授权边界，服务端会再次校验权限。
 
-编辑表格单元格后按 `Enter` 确认，再检查启动预览。页面间切换会保留当前会话的草稿；浏览器刷新不应作为保存草稿的方式，需长期保留时使用“导出配置 JSON”。无效配置会在网页显示中文提示，修正后才能开始模拟。
+Trace 默认关闭。逐抽记录下载由历史页面提供，使用 JSONL；具体页面行为和稀有度映射见[网页页面指南](dashboard-guide.md)。
 
-`up_share` 必须大于 0 且不超过 1，不是百分数：`0.5` 表示六星结果中 UP 合计 50%。至少要有一个 UP；UP 必须同时是限定角色，且 `is_up: true` 时 `up_weight` 必须是有限、严格为正的数，支持小数。非 UP 角色在剩余份额内等概率；网页中非 UP 的 `UP权重` 可留空，导出的 JSON 应为 `null`。`up_share < 1` 时必须存在非 UP 角色；全部角色均为 UP 时只能设为 1。角色名和奖励名必须非空且各自唯一，各星级奖励值必须有限且非负；可以删除全部奖励。
+## 数据路径隔离
 
-多个 UP 按权重归一化。例如权重 1 和 3、`up_share: 0.5` 时，两名 UP 在全部六星中的占比分别是 12.5% 和 37.5%；非 UP 角色平分剩余 50%。`up_share` 是概率值，不能填写 `50` 表示 50%。
-
-下面是可直接复制的完整小配置（配置格式 `1`；四星名单权重 `1:3`，五星名单仅 1 人；六星含 1 个 UP 和 2 个非 UP）。它包含 `PoolConfig.from_dict` 所需的全部字段：
-
-```json
-{
-  "format_version": 1,
-  "up_share": 0.5,
-  "five_star": {
-    "base_probability": 0.08,
-    "pity_enabled": true,
-    "hard_pity": 10
-  },
-  "six_star_characters": [
-    {"name": "UP角色", "is_up": true, "is_limited": true, "up_weight": 1},
-    {"name": "限定角色", "is_up": false, "is_limited": true, "up_weight": null},
-    {"name": "常驻角色", "is_up": false, "is_limited": false, "up_weight": null}
-  ],
-  "four_star_characters": [
-    {"name": "四星角色A", "weight": 1},
-    {"name": "四星角色B", "weight": 3}
-  ],
-  "five_star_characters": [
-    {"name": "五星角色", "weight": 1}
-  ],
-  "rewards": [
-    {"name": "奖励A", "four_star": 1, "five_star": 5, "six_star": 25},
-    {"name": "奖励B", "four_star": 0, "five_star": 2, "six_star": 10}
-  ]
-}
-```
-
-用文本编辑器修改 JSON 后，先用下面的绝对解释器验证格式和名单，再运行模拟；不要把模拟 JSON 输出重定向回同一个配置文件。建议复制默认文件到新文件后修改，不要直接改默认配置。以下复制命令仅在 `configs/my-pool.json` 不存在时使用，已有文件应另选名字，避免覆盖：
-
-```bash
-cp configs/rule1_default.json configs/my-pool.json
-/home/qykj/202607/test/lottery_simulator/.venv/bin/python -c 'import json; from lottery_simulator.rules.pool_config import PoolConfig; PoolConfig.from_dict(json.load(open("configs/my-pool.json", encoding="utf-8")))'
-.venv/bin/python -m lottery_simulator simulate --draws 30 --trials 1000 --seed 42 --pool-config configs/my-pool.json
-```
-
-主池和由它派生的赠送池都会做配置合法性校验。五星开关只控制主池；赠送池固定为六星概率 0.8%、五星硬保底 10 抽，并使用角色、奖励和五星基础概率。所有可达到的普通抽（未触发五星或六星硬保底）都必须满足五星基础概率与六星概率之和不超过 1；强制保底抽使用保底分配规则，由程序统一校验，不要手动截断概率。
-
-## 4. 保底与首次赠送的边界
-
-六星主池保底状态是 0–79 个连续未出六星，抽到第 80 抽必出六星。概率曲线的关键点是：第 65 抽仍为 0.8%，第 66 抽为 5.8%，第 79 抽为 70.8%，第 80 抽为 100%。五星初始进度同样从 0 开始，五星保底开启时必须小于配置的 `hard_pity`；关闭五星保底只能为 0。
-
-`initial_pity` 同时代表“连续未出六星抽数”和“已经完成的主池抽数”：
-
-- 初始值 0–79 均可用。
-- 初始累计主抽数至少为 30 时，首次 30 抽赠送已领，不会再发。
-- 初始为 29 时，再完成 1 次主池抽即可到 30，并触发 10 抽赠送。
-- 每轮最多触发这一次首次赠送；赠送池从独立 `(0, 0)` 双保底状态开始，固定六星率 0.8%，不会推进或重置主池，也不会递归触发赠送。
-
-## 5. CLI、输出格式与结果解读
-
-命令行统一使用 `.venv/bin/python`：
-
-```bash
-# 分析 80 抽主池概率曲线
-.venv/bin/python -m lottery_simulator analyze --format text
-
-# JSON 分析结果（另选输出文件名）
-.venv/bin/python -m lottery_simulator analyze --format json > analysis.json
-
-# 批量模拟、固定种子、指定自定义奖池
-.venv/bin/python -m lottery_simulator simulate --draws 30 --trials 1000 --seed 42 --pool-config configs/my-pool.json
-
-# 多轮逐抽 Trace（赠送抽也计入每轮记录数）
-.venv/bin/python -m lottery_simulator simulate --draws 30 --trials 3 --seed 42 --trace
-
-# 从历史主抽29/五星进度9开始，完成1主抽后触发送10抽
-.venv/bin/python -m lottery_simulator simulate --draws 1 --trials 1 \
-  --initial-pity 29 --initial-five-star-pity 9 --seed 42 --trace --format json
-
-# 将批量结果保存为文件（同名文件会被覆盖）
-.venv/bin/python -m lottery_simulator simulate --draws 30 --trials 1000 \
-  --seed 42 --format json > simulation.json
-```
-
-`simulate` 的 `--draws` 必填；`--trials` 默认 1，`--seed` 省略时自动生成，两个初始保底参数默认 0。`--pool-config` 省略时加载默认文件，`--rule` 当前只能为 `rule1`。可用 `.venv/bin/python -m lottery_simulator simulate --help` 查看全部选项。
-
-`--format text|json` 只改变输出形式，不改变概率或随机过程，默认 `text`。使用 `>` 重定向 JSON 前要确认目标文件名；Shell 会先覆盖目标，尤其不要把 `--pool-config my-pool.json > my-pool.json` 写成同名，否则配置会先被清空。
-
-`--trace` 默认关闭且可用于多轮。CLI 不会自动写网页历史库；CLI Trace 将全部记录保存在内存中，大规模多轮实验可能占用大量内存。完整记录可将网页 Trace 保存后用 `export-trace` 本地导出；CLI 和网页分别遵守各自边界。CLI 的非 Trace JSON 不含 `records`。固定随机种子、相同规则/配置/参数、相同 `sampling_version`、Python 实现及版本才是可复现条件；改动任一项都不要把输出当作同一实验。
-
-对已保存的网页历史 Trace 做本地完整导出（把 `<RUN_ID>` 替换为历史运行 UUID；目标文件不能已存在）：
-
-```bash
-.venv/bin/python -m lottery_simulator export-trace \
-  --database data/history_v4.sqlite3 --run-id <RUN_ID> --output trace.jsonl
-```
-
-该命令按批次读取，不受网页单次 10,000 条下载上限影响；只读历史数据库，不导出 `jobs_v4/` 中尚未保存到历史库的暂存任务。
-
-网页固定为三个页面：“新建实验”“实验结果”“历史记录”。实验结果页有四种结果视图：“实验概览”“分类统计”“按抽次分析”“逐抽明细”；“分类统计”中再选择星级、六星构成、六星具体角色、奖励或保底，并可在“主池”（`main`）、“赠送”（`bonus`）、“总计”（`total`）间切换。批量角色图和角色统计只包含六星；四星、五星名单只在单抽结果和 Trace 中显示。
-
-Trace JSON 的唯一单抽结构是 `draw_result` 嵌套对象：`draw_result.outcome` 保存星级、角色、UP/限定、奖励和保底触发，`draw_result.probabilities` 保存四/五/六星概率，`draw_result.state_before`/`state_after` 保存来源池双保底状态；记录本身的 `main_state_before`/`main_state_after` 独立保存主池状态。多轮记录另有 `trial_index`（从1开始的轮次）和 `draw_index`（该轮内主池与赠送合并后的抽次，从1开始）；`source_index` 是各来源自己的序号。网页将其只读展开为中文列：
-
-| 中文列 | JSON 路径 |
-|---|---|
-| 轮次、轮内总抽次、来源、来源内序号、主池累计抽数、赠送事件 | `trial_index`、`draw_index`、`source`、`source_index`、`main_draws_completed`、`bonus_event` |
-| 星级、角色、是否UP、是否限定 | `draw_result.outcome.rarity`、`character_name`、`is_up`、`is_limited` |
-| 四星概率、五星概率、六星概率 | `draw_result.probabilities.four_star/five_star/six_star` |
-| 来源池抽前/后未出六星、未出五星及以上 | `draw_result.state_before/state_after.*` |
-| 主池抽前/后未出六星、未出五星及以上 | `main_state_before/main_state_after.*` |
-| 五星保底触发、六星硬保底触发、各奖励数量 | `draw_result.outcome.*` |
-
-概率在原始 JSON 和当前网页完整列表格中都保持 `0..1`，例如 `0.008` 表示0.8%；没有角色名单时显示“未配置角色名单”，不会伪装成未出六星。Trace 默认 `False`；历史和明细下载保留上述嵌套 JSON，不用展开后的中文表格替代原始记录。Trace 记录数按每轮主抽加赠送抽计算，网页在启动前和 worker 冷启动时都会检查总量上限。
-
-- “每轮均值”是每轮平均数量，不是 1000 轮的总数量；总计等于主池和赠送合并后的来源。
-- 理论期望按有限保底状态动态规划计算；完整周期理论平均间隔是长期周期量，可能与有限模拟中已完成周期的平均间隔不同。
-- “至少一个”是各轮中至少命中一次的比率，包含五星及以上、六星、UP 六星和限定六星口径；没有六星时，角色的六星内实际占比和占比误差不可用（显示为空），不能据此判断角色概率。
-- 保底触发表示抽到了保底位置；该位置仍可能先命中六星，因此不保证“触发五星保底”就一定恰好得到五星。
-- 角色结果区显示角色类型、模拟均值、理论期望、六星内实际/理论占比及占比误差；零六星时实际占比不可用。
-- 网页“奖励”分类仅展示均值和理论期望；奖励分布保留在汇总 JSON 的 `source_distributions` 中，键为每轮奖励总量，值为达到该总量的实验轮数，不是单抽概率。至少一个命中率、周期统计也应查看汇总 JSON，不是当前概览的独立图表。
-- “新建实验”的“主池规则预览”曲线展示完整保底周期（最多 80 抽）；“按抽次分析”使用已保存的 Trace，可显示第 81 抽及以后的实际来源位置，两者不是同一图。
-
-## 6. 历史记录
-
-“历史记录”页面使用实际网页标签“历史规则”“历史 Trace”“历史开始日期（UTC）”“历史结束日期（UTC）”“历史页码”。日期按 UTC 过滤；每页最多 20 条，创建时间倒序；改变筛选后如需从头查看，请手动将页码设为 1。点击“查看结果 <运行ID>”进入该实验的四种结果视图。“选择历史运行”可选择当前页最多两条记录，展示汇总、配置摘要及分类统计，供并排比较。
-
-“复用参数”恢复当次的参数和配置快照，并跳转到“新建实验”，不会直接重新运行；需要重新模拟时再点击“开始模拟”。删除流程分两次：第一次点击“删除历史 …”只进入确认，随后选择“确认删除”才执行；删除不可撤销，并会连同该运行的 `draw_records` 明细一起删除。选择“取消删除”则保留记录。
-
-结果页“下载汇总 JSON”不包含逐抽记录。下载明细时，进入“逐抽明细”，设置轮次等筛选，点击“准备下载”，再点击“下载明细 JSONL”；下载覆盖全部匹配记录，不仅是当前页。默认超过 10,000 条时需缩小筛选范围，不会静默截断。JSONL 首行为元数据（含参数、配置、筛选条件和匹配记录数），后续每行一条抽取记录。完整已入库 Trace 可使用上面的 `export-trace` 命令导出。
-
-## 7. 数据目录与本地备份
-
-未设置环境变量时，数据位于主目录：
+默认路径为：
 
 ```text
-data/history_v4.sqlite3
-data/jobs_v4/
+data/history_v5.sqlite3
+data/jobs_v5/
+data/exports_v5/
 ```
 
-可用绝对路径自定义：`LOTTERY_DATA_DIR` 控制数据目录（数据库默认是其中的 `history_v4.sqlite3` 和 `jobs_v4/`），`LOTTERY_DB_PATH` 单独覆盖数据库路径。例如：
+可以在启动两个进程前设置绝对路径；以下示例只使用独立临时目录：
 
 ```bash
-LOTTERY_DATA_DIR=/srv/lottery-data LOTTERY_DB_PATH=/srv/lottery-data/history_v4.sqlite3 \
-APP_ENVIRONMENT=development APP_AUTH_MODE=disabled STREAMLIT_SERVER_ADDRESS=127.0.0.1 \
-.venv/bin/python -m streamlit run dashboard/app.py --server.address=127.0.0.1
+export LOTTERY_DATA_DIR=/tmp/lottery-local
+export LOTTERY_DB_PATH=/tmp/lottery-local/history_v5.sqlite3
+export LOTTERY_JOBS_DIR=/tmp/lottery-local/jobs_v5
+export LOTTERY_EXPORTS_DIR=/tmp/lottery-local/exports_v5
 ```
 
-启动目录和数据目录都要确认清楚：旧 worktree 的 `data/` 不会自动迁移到主目录。历史库只接受数据库 schema v4；旧 v1/v2/v3 库不会迁移、覆盖或自动删除，程序会拒绝不兼容 schema。仅在开启 Trace 且历史保存失败时，`jobs_v4/<job_id>/` 会保留完整 `trace.sqlite3` 和 `result.json`，当前结果仍可分页查看并导出；未开启 Trace 时没有暂存明细，只保留 `result.json` 汇总。上述任务目录文件均不在历史备份中。
+这些变量由 Django/worker 读取；CLI 的独立模拟不写网页历史。新网页不自动导入或迁移旧数据库。使用旧 Streamlit 程序的稳定目录和数据时，保持其原环境与路径，不要把旧数据库路径传给新工作树。
 
-SQLite 在线备份使用项目已有脚本，源库必须存在：
+生产环境必须通过 `LOTTERY_ENV=production` 并设置高熵 `SECRET_KEY`；缺失密钥会拒绝启动。不要使用 `VITE_` 前缀存放任何密钥，因为该变量会进入浏览器可见的构建产物。
+
+## CLI
+
+CLI 是本机命令行模拟/分析工具，不会写入网页登录的历史：
 
 ```bash
-mkdir -p backups
-.venv/bin/python scripts/backup_db.py data/history_v4.sqlite3 backups/history-v4-$(date +%F-%H%M%S).sqlite3
+.venv/bin/python -m lottery_simulator analyze --format json
+.venv/bin/python -m lottery_simulator simulate --pool-config configs/pools/default.json --draws 30 --trials 1000 --seed 42
 ```
 
-看到 `Backup integrity_check: ok` 且命令退出码为 0 才算成功。脚本从只读源库执行 SQLite online backup，并检查目标完整性；不要在网页或 worker 运行时直接复制、删除或盲删数据库，也不要用备份脚本把源和目标写成同一路径。备份只包含 v4 SQLite 历史，不包含 `data/jobs_v4/` 暂存任务、保存失败的暂存 Trace、OIDC secrets 或证书；重要备份还应复制到受控的其他存储。
+配置格式和更多参数以当前 `python -m lottery_simulator --help`、子命令 `--help` 及 `configs/` 示例为准。网页运行使用用户有权访问的数据库角色池快照，不是 CLI 文件路径。
 
-### 本地恢复历史
+## 备份与恢复
 
-恢复会覆盖当前新版历史库，只用于已知成功的备份。先在网页停止模拟并等任务结束，再用 `Ctrl+C` 停止网页，确认没有其他实例/worker 使用同一个库。不要删除 WAL 或任务目录。
-
-先保护当前库，再恢复选定备份（下面备份日期仅为示例，必须替换成实际文件名；每一步失败即停止）：
+数据库内含用户资料、密码哈希、会话、配置和历史。备份目录应为受控私有目录，备份文件权限为 `0600`，不得公开或提交：
 
 ```bash
-.venv/bin/python scripts/backup_db.py data/history_v4.sqlite3 backups/pre-restore-v4-$(date +%F-%H%M%S).sqlite3
-.venv/bin/python scripts/backup_db.py backups/history-v4-2026-09-16-120000.sqlite3 data/history_v4.sqlite3
-.venv/bin/python -c "import sqlite3; c=sqlite3.connect('file:data/history_v4.sqlite3?mode=ro', uri=True); print(c.execute('PRAGMA integrity_check').fetchall()); c.close()"
+install -d -m 700 backups
+.venv/bin/python scripts/backup_db.py data/history_v5.sqlite3 backups/lottery-v5-$(date +%F-%H%M%S).sqlite3
 ```
 
-备份/恢复须退出码 0、输出完整性检查成功；最后查询须为 `[('ok',)]`，才重新按第 2 节启动。检查历史并运行一次小模拟确认可写。当前库不存在时可以跳过第一步，不能跳过现有库的保护备份。恢复只接受并恢复 v4 数据库历史，不迁移旧库，不恢复未完成任务或 `jobs_v4/` 暂存；结果 JSON 不是 SQLite 备份，不能拿来替换数据库。
+成功时脚本打印 `Backup integrity_check: ok` 并以状态码0退出。SQLite 在线备份包含已提交数据；它不包含 `jobs_v5/` 中的运行状态/暂存文件或 `exports_v5/` 临时文件。重要备份应存放在访问受控的异机位置。
 
-## 8. 常见问题
+恢复会替换数据库。先停 Django 与相关 worker，保护当前库，然后将选定备份恢复到目标路径并检查完整性：
 
-- **找不到 `.venv/bin/python`**：通常是当前目录不对；回到 `/home/qykj/202607/test/lottery_simulator`，或使用绝对解释器路径 `/home/qykj/202607/test/lottery_simulator/.venv/bin/python`。运行 `dashboard/app.py` 仍应在项目主目录。若环境不存在，按第 1 节创建。
-- **`No module named streamlit`**：当前 `.venv` 未安装网页依赖；执行 `.venv/bin/python -m pip install -r requirements.txt`。
-- **8501 端口占用**：先停止自己已启动的服务；确认无需旧服务后，也可用 `--server.port 8502` 启动并打开 `http://127.0.0.1:8502`。
-- **编辑值没有生效**：编辑单元格后按 `Enter` 确认，检查当前配置与启动预览；不要在未确认编辑时立即开始模拟，也不要依赖刷新保存草稿。
-- **配置无效**：查看网页中文错误，重点检查 `up_share` 是否大于 0 且不超过 1、UP 是否为限定且权重为正、非 UP 权重是否为 `null`、名称是否重复，以及普通抽的五星/六星概率之和是否合规。
-- **历史不见了**：核对启动时的 `LOTTERY_DATA_DIR`、`LOTTERY_DB_PATH` 和主目录；CLI 本身不会写网页历史库。
-- **看到 `Deploy`**：那是 Streamlit 云部署入口，本地使用无需点击；本地只执行第 2 节命令。
+正式覆盖前，建议先在独立临时目录演练备份、恢复、历史与Trace读取和小规模写入；数据库和任务目录都必须隔离。此前的[v4隔离演练记录](changes/2026-09-23-backup-restore-drill.md)仅为历史参考，新版应按v5结构验证。临时副本不是长期备份。
+
+```bash
+.venv/bin/python scripts/backup_db.py data/history_v5.sqlite3 backups/pre-restore-v5-$(date +%F-%H%M%S).sqlite3
+.venv/bin/python scripts/backup_db.py backups/lottery-v5-YYYY-MM-DD-HHMMSS.sqlite3 data/history_v5.sqlite3
+.venv/bin/python -c "import sqlite3; c=sqlite3.connect('file:data/history_v5.sqlite3?mode=ro', uri=True); print(c.execute('PRAGMA integrity_check').fetchall()); c.close()"
+```
+
+每一步都必须成功；完整性结果应为 `[('ok',)]`。随后启动服务并用登录、历史读取和小型模拟确认可用。任务状态目录不随 SQLite 备份恢复，不要因此盲目删除。详细的生产恢复流程见[部署说明](deployment.md)。
+
+## 当前未覆盖
+
+本地双账号浏览器验收已完成，观察记录见[任务14浏览器验收](changes/2026-09-29-user-pool-browser-acceptance.md)。旧入口测试替代关系见[覆盖审计](changes/2026-09-29-legacy-ui-coverage-audit.md)。真实生产部署和真实旧数据切换仍未执行。

@@ -1,407 +1,213 @@
-from __future__ import annotations
+"""v5 history adapter. Main database schema belongs exclusively to migrations."""
 
 from contextlib import closing, nullcontext
-from datetime import datetime, timezone
 import json
 from pathlib import Path
-import shutil
 import sqlite3
-from tempfile import TemporaryDirectory, mkdtemp
 from uuid import UUID
 
-from lottery_simulator.formats import (
-    CONFIG_FORMAT_VERSION, DATABASE_SCHEMA_VERSION,
-    RESULT_FORMAT_VERSION, SAMPLING_VERSION, TRACE_STORE_FORMAT_VERSION, require_version,
-)
-from lottery_simulator.control import ProgressCallback, check_cancelled
-from lottery_simulator.rules.pool_config import PoolConfig
+from django.conf import settings
+from django.db import connection, transaction
+
+from dashboard.models import SimulationRun, User
 from dashboard.trace_store import TraceReader, validate_record
-
-
-_SCHEMA = f"""
-CREATE TABLE simulation_runs (
-    id TEXT PRIMARY KEY,
-    created_at TEXT NOT NULL,
-    rule_name TEXT NOT NULL,
-    rule_version TEXT NOT NULL,
-    main_draws INTEGER NOT NULL,
-    trials INTEGER NOT NULL,
-    initial_pity INTEGER NOT NULL,
-    initial_five_star_pity INTEGER NOT NULL,
-    seed TEXT NOT NULL,
-    trace_enabled INTEGER NOT NULL CHECK (trace_enabled IN (0, 1)),
-    record_count INTEGER NOT NULL CHECK (
-        typeof(record_count) = 'integer' AND record_count >= 0),
-    pool_config_json TEXT NOT NULL,
-    result_json TEXT NOT NULL,
-    schema_version INTEGER NOT NULL CHECK (schema_version = {DATABASE_SCHEMA_VERSION}),
-    CHECK ((trace_enabled = 0 AND record_count = 0)
-        OR (trace_enabled = 1 AND record_count > 0))
-);
-CREATE TABLE draw_records (
-    run_id TEXT NOT NULL REFERENCES simulation_runs(id) ON DELETE CASCADE,
-    trial_index INTEGER NOT NULL CHECK (typeof(trial_index) = 'integer' AND trial_index > 0),
-    draw_index INTEGER NOT NULL,
-    source TEXT NOT NULL CHECK (source IN ('main', 'bonus')),
-    source_index INTEGER NOT NULL CHECK (typeof(source_index) = 'integer' AND source_index > 0),
-    rarity INTEGER NOT NULL CHECK (typeof(rarity) = 'integer' AND rarity IN (4, 5, 6)),
-    character_name TEXT,
-    record_json TEXT NOT NULL CHECK (json_valid(record_json)),
-    PRIMARY KEY (run_id, trial_index, draw_index),
-    CHECK (json_type(record_json, '$') IS 'object'),
-    CHECK (trial_index IS json_extract(record_json, '$.trial_index')),
-    CHECK (draw_index IS json_extract(record_json, '$.draw_index')),
-    CHECK (source IS json_extract(record_json, '$.source')),
-    CHECK (source_index IS json_extract(record_json, '$.source_index')),
-    CHECK (rarity IS json_extract(record_json, '$.draw_result.outcome.rarity')),
-    CHECK (character_name IS json_extract(record_json, '$.draw_result.outcome.character_name'))
-);
-CREATE INDEX draw_records_run_source_position_rarity
-ON draw_records(run_id, source, source_index, rarity);
-PRAGMA user_version = {DATABASE_SCHEMA_VERSION};
-"""
-
-_FILTERS = {
-    "rule_name": "rule_name = ?",
-    "trace_enabled": "trace_enabled = ?",
-    "created_from": "created_at >= ?",
-    "created_to": "created_at <= ?",
-}
-
-_COMPONENT_SUFFIXES = ("", "-journal", "-wal", "-shm")
-_IMPORT_BATCH_SIZE = 1000
-_SNAPSHOT_COLUMNS = (
-    "rule_name", "rule_version", "main_draws", "trials", "initial_pity",
-    "initial_five_star_pity", "seed", "trace_enabled", "record_count",
-    "pool_config_json", "result_json", "schema_version",
+from lottery_simulator.control import check_cancelled
+from lottery_simulator.formats import (
+    CONFIG_FORMAT_VERSION, DATABASE_SCHEMA_VERSION, RESULT_FORMAT_VERSION,
+    SAMPLING_VERSION, TRACE_STORE_FORMAT_VERSION, require_version,
 )
+from lottery_simulator.rules.pool_config import PoolConfig
 
 
-def _object(value, label):
-    if not isinstance(value, dict):
-        raise ValueError(f"{label} must be an object")
-    return value
+_IMPORT_BATCH_SIZE = 1000
+_FILTERS = {"rule_name": "rule_name", "trace_enabled": "trace_enabled",
+            "created_from": "created_at__gte", "created_to": "created_at__lte",
+            "owner_id": "owner_id"}
 
 
-def _validate_payload(value):
-    payload = _object(value, "result")
+def _validate_payload(payload):
+    if not isinstance(payload, dict):
+        raise ValueError("结果必须是对象")
     require_version(payload.get("result_format_version"), RESULT_FORMAT_VERSION, "结果")
     require_version(payload.get("sampling_version"), SAMPLING_VERSION, "抽样")
-    if not isinstance(payload.get("rule_version"), str) or payload["rule_version"] != "2.0":
-        raise ValueError("rule_version must be the supported string 2.0")
-    config = _object(payload.get("pool_config"), "pool_config")
+    if payload.get("rule_version") != "2.0":
+        raise ValueError("规则版本不受支持")
+    config = payload.get("pool_config")
+    if not isinstance(config, dict):
+        raise ValueError("池快照无效")
     require_version(config.get("format_version"), CONFIG_FORMAT_VERSION, "配置")
     PoolConfig.from_dict(config)
-    if "records" in payload:
-        raise ValueError("result summary must not contain records")
-    if type(payload.get("trace_enabled")) is not bool:
-        raise ValueError("trace_enabled must be a boolean")
-    for key, minimum in (
-        ("main_draws", 1), ("trials", 1), ("initial_pity", 0),
-        ("initial_five_star_pity", 0), ("record_count", 0), ("bonus_draws", 0),
-    ):
-        value = payload.get(key)
-        if type(value) is not int or value < minimum:
-            raise ValueError(f"{key} must be an integer >= {minimum}")
-    if payload.get("draws") != payload["main_draws"]:
-        raise ValueError("draws and main_draws do not match")
-    if payload.get("initial_main_draws") != payload["initial_pity"]:
-        raise ValueError("initial draw configuration does not match")
-    if payload.get("total_draws") != payload["main_draws"] + payload["bonus_draws"]:
-        raise ValueError("draw configuration does not match")
-    expected_count = payload["trials"] * payload["total_draws"]
-    if payload["trace_enabled"]:
-        if payload["record_count"] != expected_count:
-            raise ValueError("Trace record_count does not match configuration")
-    elif payload["record_count"] != 0:
-        raise ValueError("Non-Trace result must have record_count=0")
-
-
-def _validate_run_id(run_id):
-    try:
-        valid = type(run_id) is str and str(UUID(run_id)) == run_id
-    except (ValueError, AttributeError):
-        valid = False
-    if not valid:
-        raise ValueError("run_id must be a canonical UUID string")
+    if "records" in payload or type(payload.get("trace_enabled")) is not bool:
+        raise ValueError("结果摘要格式无效")
+    for key, minimum in (("main_draws", 1), ("trials", 1), ("initial_pity", 0),
+                         ("initial_five_star_pity", 0), ("record_count", 0), ("bonus_draws", 0)):
+        if type(payload.get(key)) is not int or not minimum <= payload[key] <= 2**63 - 1:
+            raise ValueError(f"{key}超过存储可表示范围或类型无效")
+    if (payload.get("draws") != payload["main_draws"]
+            or payload.get("initial_main_draws") != payload["initial_pity"]
+            or payload.get("total_draws") != payload["main_draws"] + payload["bonus_draws"]):
+        raise ValueError("结果抽数与参数不一致")
+    expected = payload["trials"] * payload["total_draws"] if payload["trace_enabled"] else 0
+    if payload["record_count"] != expected:
+        raise ValueError("Trace条数与结果参数不一致")
+    if type(payload.get("seed")) is not int:
+        raise ValueError("种子必须是整数")
+    UUID(payload["owner_id"])
+    source = payload["pool_source"]
+    UUID(source["id"])
+    if type(source["revision"]) is not int or source["revision"] < 1:
+        raise ValueError("池来源版本无效")
 
 
 def _trace_connection(path):
-    uri = Path(path).resolve().as_uri() + "?mode=ro"
-    connection = sqlite3.connect(uri, uri=True)
-    connection.row_factory = sqlite3.Row
-    return connection
+    database = sqlite3.connect(Path(path).resolve().as_uri() + "?mode=ro", uri=True)
+    database.row_factory = sqlite3.Row
+    return database
 
 
 class HistoryRepository:
-    """Persist immutable summaries and transactionally import complete traces."""
+    """Internal trusted adapter; web callers authorize through services.runs."""
 
-    def __init__(self, path: str | Path):
-        self.path = Path(path)
-
-    def _connect(self):
-        connection = sqlite3.connect(self.path)
-        connection.row_factory = sqlite3.Row
-        connection.execute("PRAGMA foreign_keys=ON")
-        return connection
-
-    @staticmethod
-    def _require_database_version(connection):
-        version = connection.execute("PRAGMA user_version").fetchone()[0]
-        if version != DATABASE_SCHEMA_VERSION:
-            raise ValueError(
-                f"历史数据库版本不兼容：当前版本 {version}，需要版本 {DATABASE_SCHEMA_VERSION}"
-            )
-
-    @staticmethod
-    def _has_user_schema(connection):
-        return connection.execute(
-            "SELECT 1 FROM sqlite_master WHERE name NOT GLOB 'sqlite_*' LIMIT 1"
-        ).fetchone() is not None
-
-    def _inspect_schema(self, path):
-        # Callers pass a private TemporaryDirectory snapshot; recovery may write there.
-        with closing(sqlite3.connect(path)) as connection:
-            version = connection.execute("PRAGMA user_version").fetchone()[0]
-            return version, version == 0 and self._has_user_schema(connection)
-
-    def _read_components(self):
-        components = []
-        for suffix in _COMPONENT_SUFFIXES:
-            try:
-                components.append(Path(str(self.path) + suffix).read_bytes())
-            except FileNotFoundError:
-                components.append(None)
-        return tuple(components)
-
-    def _stable_snapshot(self, directory):
-        for _ in range(3):
-            snapshot = Path(mkdtemp(dir=directory)) / self.path.name
-            copied = []
-            for suffix in _COMPONENT_SUFFIXES:
-                source = Path(str(self.path) + suffix)
-                destination = Path(str(snapshot) + suffix)
-                try:
-                    shutil.copyfile(source, destination)
-                except FileNotFoundError:
-                    copied.append(None)
-                else:
-                    copied.append(destination.read_bytes())
-            first = self._read_components()
-            second = self._read_components()
-            if tuple(copied) == first == second:
-                return snapshot, first
-        raise ValueError("历史数据库状态不稳定，无法安全初始化")
+    def __init__(self, path=None):
+        self.path = Path(path or settings.DATABASES["default"]["NAME"]).resolve()
+        configured = Path(settings.DATABASES["default"]["NAME"]).resolve()
+        if self.path != configured:
+            raise ValueError("历史路径必须与Django数据库设置一致")
 
     def initialize(self):
-        try:
-            self.path.stat()
-        except FileNotFoundError:
-            pass
-        else:
-            with TemporaryDirectory() as directory:
-                snapshot, components = self._stable_snapshot(directory)
-                version, has_user_schema = self._inspect_schema(snapshot)
-                if version == DATABASE_SCHEMA_VERSION:
-                    return
-                if version != 0 or has_user_schema:
-                    raise ValueError(
-                        f"历史数据库版本不兼容：当前版本 {version}，需要版本 {DATABASE_SCHEMA_VERSION}"
-                    )
-                confirmation, confirmed_components = self._stable_snapshot(directory)
-                confirmed_version, confirmed_user_schema = self._inspect_schema(confirmation)
-                if confirmed_version == DATABASE_SCHEMA_VERSION:
-                    return
-                if confirmed_version != 0 or confirmed_user_schema:
-                    raise ValueError(
-                        f"历史数据库版本不兼容：当前版本 {confirmed_version}，需要版本 {DATABASE_SCHEMA_VERSION}"
-                    )
-                if confirmed_components != components:
-                    raise ValueError("历史数据库状态不稳定，无法安全初始化")
-        with closing(self._connect()) as connection, connection:
-            connection.execute("BEGIN IMMEDIATE")
-            version = connection.execute("PRAGMA user_version").fetchone()[0]
-            if version == DATABASE_SCHEMA_VERSION:
-                return
-            if version != 0 or self._has_user_schema(connection):
-                raise ValueError(
-                    f"历史数据库版本不兼容：当前版本 {version}，需要版本 {DATABASE_SCHEMA_VERSION}"
-                )
-            for statement in _SCHEMA.split(";"):
-                if statement.strip():
-                    connection.execute(statement)
+        if not self.path.is_file():
+            raise ValueError("历史数据库尚未建立，请先运行migrate")
+        with connection.cursor() as cursor:
+            cursor.execute("PRAGMA user_version")
+            require_version(cursor.fetchone()[0], DATABASE_SCHEMA_VERSION, "数据库")
 
-    def save_run(self, run_id: str, payload: dict, *, trace_path=None,
-                 cancel_check=None, progress_callback: ProgressCallback | None = None,
-                 commit_guard=None) -> str:
-        _validate_run_id(run_id)
+    def save_run(self, run_id, payload, *, trace_path=None, cancel_check=None,
+                 progress_callback=None, commit_guard=None, authorize=None):
+        if type(run_id) is not str or str(UUID(run_id)) != run_id:
+            raise ValueError("运行ID必须是标准UUID")
+        self.initialize()
         _validate_payload(payload)
-        trace_enabled = payload["trace_enabled"]
-        if trace_enabled != (trace_path is not None):
-            raise ValueError("Trace result requires exactly one completed trace_path")
-        seed = payload["seed"]
-        if isinstance(seed, bool) or not isinstance(seed, int):
-            raise ValueError("seed must be an integer")
-        summary = dict(payload)
-        row = {
-            "id": run_id,
-            "created_at": datetime.now(timezone.utc).isoformat(),
-            "rule_name": payload["rule_name"],
-            "rule_version": payload["rule_version"],
-            "main_draws": payload["main_draws"],
-            "trials": payload["trials"],
-            "initial_pity": payload["initial_pity"],
-            "initial_five_star_pity": payload["initial_five_star_pity"],
-            "seed": str(seed),
-            "trace_enabled": int(trace_enabled),
-            "record_count": payload["record_count"],
-            "pool_config_json": json.dumps(payload["pool_config"], sort_keys=True, allow_nan=False),
-            "result_json": json.dumps(summary, sort_keys=True, allow_nan=False),
-            "schema_version": DATABASE_SCHEMA_VERSION,
+        if payload["trace_enabled"] != (trace_path is not None):
+            raise ValueError("Trace结果必须提供完整明细")
+        source = payload["pool_source"]
+        values = {
+            "owner_id": UUID(payload["owner_id"]),
+            "pool_id_snapshot": UUID(source["id"]),
+            "pool_revision_snapshot": source["revision"],
+            "pool_name_snapshot": source["name"],
+            "original_author_snapshot": source["original_author"],
+            **{key: payload[key] for key in ("rule_name", "rule_version", "main_draws", "trials",
+                "initial_pity", "initial_five_star_pity", "trace_enabled", "record_count")},
+            "seed": str(payload["seed"]), "pool_config_json": payload["pool_config"],
+            "result_json": payload, "schema_version": DATABASE_SCHEMA_VERSION,
         }
-        columns = ", ".join(row)
-        placeholders = ", ".join("?" for _ in row)
-        trace = _trace_connection(trace_path) if trace_enabled else None
+        trace = _trace_connection(trace_path) if trace_path is not None else None
         try:
             if trace is not None:
                 trace.execute("BEGIN")
                 metadata = trace.execute("SELECT * FROM metadata WHERE id=1").fetchone()
-                expected = {
-                    "format_version": TRACE_STORE_FORMAT_VERSION,
-                    "complete": 1,
-                    "record_count": payload["record_count"],
-                    "trials": payload["trials"],
-                    "draws": payload["main_draws"],
-                    "initial_main_draws": payload["initial_main_draws"],
-                    "bonus_per_trial": payload["bonus_draws"],
-                }
+                expected = {"format_version": TRACE_STORE_FORMAT_VERSION, "complete": 1,
+                    "record_count": payload["record_count"], "trials": payload["trials"],
+                    "draws": payload["main_draws"], "initial_main_draws": payload["initial_pity"],
+                    "bonus_per_trial": payload["bonus_draws"]}
                 if metadata is None or any(metadata[key] != value for key, value in expected.items()):
-                    raise ValueError("Trace metadata does not match result configuration")
-            with closing(self._connect()) as connection:
-                self._require_database_version(connection)
-                connection.execute("BEGIN IMMEDIATE")
-                try:
-                    existing = connection.execute(
-                        "SELECT * FROM simulation_runs WHERE id=?", (run_id,)
-                    ).fetchone()
+                    raise ValueError("Trace元数据与结果不一致")
+            # Acquire the job lock BEFORE the database write transaction.
+            guard = commit_guard() if commit_guard else nullcontext()
+            with guard:
+                with transaction.atomic():
+                    if authorize is not None:
+                        authorize()
+                    owner = User.objects.filter(pk=values["owner_id"], deleting=False).first()
+                    if owner is None:
+                        raise ValueError("所属账号已删除或正在删除，拒绝保存")
+                    existing = SimulationRun.objects.filter(pk=run_id).first()
                     if existing is not None:
-                        same = all(existing[key] == row[key] for key in _SNAPSHOT_COLUMNS)
-                        stored_count = connection.execute(
-                            "SELECT count(*) FROM draw_records WHERE run_id=?", (run_id,)
-                        ).fetchone()[0]
-                        if not same or stored_count != payload["record_count"]:
-                            raise ValueError("run_id already has a different snapshot")
-                        connection.rollback()
-                        return run_id
-                    connection.execute(
-                        f"INSERT INTO simulation_runs ({columns}) VALUES ({placeholders})",
-                        tuple(row.values()),
-                    )
-                    imported = 0
-                    if trace is not None:
-                        if progress_callback is not None:
-                            progress_callback(0, payload["record_count"])
-                        cursor = trace.execute(
-                            "SELECT trial_index, draw_index, source, source_index, rarity, "
-                            "character_name, record_json FROM records "
-                            "ORDER BY trial_index, draw_index"
-                        )
-                        while batch := cursor.fetchmany(_IMPORT_BATCH_SIZE):
-                            check_cancelled(cancel_check)
-                            values = []
-                            for source_row in batch:
-                                record = json.loads(source_row["record_json"])
-                                validate_record(record)
-                                projected = (
-                                    record["trial_index"], record["draw_index"], record["source"],
-                                    record["source_index"],
-                                    record["draw_result"]["outcome"]["rarity"],
-                                    record["draw_result"]["outcome"]["character_name"],
-                                )
-                                if tuple(source_row[:6]) != projected:
-                                    raise ValueError("Trace query columns do not match record JSON")
-                                values.append((run_id, *projected, source_row["record_json"]))
-                            connection.executemany(
-                                "INSERT INTO draw_records (run_id, trial_index, draw_index, source, "
-                                "source_index, rarity, character_name, record_json) "
-                                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)", values,
-                            )
-                            imported += len(values)
-                            if progress_callback is not None:
-                                progress_callback(imported, payload["record_count"])
-                    if imported != payload["record_count"]:
-                        raise ValueError("Imported Trace record count does not match result")
-                    guard = commit_guard() if commit_guard is not None else nullcontext()
-                    with guard:
-                        check_cancelled(cancel_check)
-                        connection.commit()
-                except Exception:
-                    connection.rollback()
-                    raise
+                        if (any(getattr(existing, key) != value for key, value in values.items())
+                                or existing.draw_records.count() != payload["record_count"]):
+                            raise ValueError("运行ID已有不同快照")
+                    else:
+                        SimulationRun.objects.create(id=run_id, **values)
+                        imported = 0
+                        if trace is not None:
+                            source_cursor = trace.execute(
+                                "SELECT trial_index, draw_index, source, source_index, rarity, "
+                                "character_name, record_json FROM records ORDER BY trial_index, draw_index")
+                            with connection.cursor() as cursor:
+                                while batch := source_cursor.fetchmany(_IMPORT_BATCH_SIZE):
+                                    check_cancelled(cancel_check)
+                                    records = []
+                                    for row in batch:
+                                        record = json.loads(row["record_json"])
+                                        validate_record(record)
+                                        projected = (record["trial_index"], record["draw_index"],
+                                            record["source"], record["source_index"],
+                                            record["draw_result"]["outcome"]["rarity"],
+                                            record["draw_result"]["outcome"]["character_name"])
+                                        if tuple(row[:6]) != projected:
+                                            raise ValueError("Trace索引与JSON不一致")
+                                        records.append((UUID(run_id).hex, *projected, row["record_json"]))
+                                    cursor.executemany(
+                                        "INSERT INTO draw_records (run_id, trial_index, draw_index, source, "
+                                        "source_index, rarity, character_name, record_json) "
+                                        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s)", records)
+                                    imported += len(records)
+                                    if progress_callback:
+                                        progress_callback(imported, payload["record_count"])
+                        if imported != payload["record_count"]:
+                            raise ValueError("导入Trace条数不一致")
+                    check_cancelled(cancel_check)
         finally:
             if trace is not None:
                 trace.close()
         return run_id
 
     @staticmethod
-    def _summary(row):
-        result = json.loads(row["result_json"])
+    def summary(run):
+        result = dict(run.result_json)
         _validate_payload(result)
-        require_version(row["schema_version"], DATABASE_SCHEMA_VERSION, "数据库记录")
-        result.update({key: row[key] for key in row.keys()
-                       if key not in ("result_json", "pool_config_json")})
-        result["seed"] = int(row["seed"])
-        result["trace_enabled"] = bool(row["trace_enabled"])
-        result["pool_config"] = json.loads(row["pool_config_json"])
-        _validate_payload(result)
+        require_version(run.schema_version, DATABASE_SCHEMA_VERSION, "数据库记录")
+        result.update(id=str(run.pk), owner_id=str(run.owner_id),
+                      created_at=run.created_at.isoformat(), seed=int(run.seed),
+                      pool_id_snapshot=str(run.pool_id_snapshot),
+                      pool_revision_snapshot=run.pool_revision_snapshot,
+                      pool_name_snapshot=run.pool_name_snapshot,
+                      original_author_snapshot=run.original_author_snapshot)
         return result
 
-    def get_run(self, id: str) -> dict | None:
-        with closing(_trace_connection(self.path)) as connection:
-            self._require_database_version(connection)
-            row = connection.execute("SELECT * FROM simulation_runs WHERE id = ?", (id,)).fetchone()
-            if row is None:
-                return None
-            return self._summary(row)
+    def get_run(self, id):
+        self.initialize()
+        try:
+            run = SimulationRun.objects.filter(pk=id).first()
+        except (ValueError, TypeError):
+            return None
+        return self.summary(run) if run else None
 
-    def get_trace_reader(self, run_id: str) -> TraceReader:
-        return TraceReader.for_history(self.path, run_id)
+    def get_trace_reader(self, run_id):
+        self.initialize()
+        return TraceReader.for_history(self.path, str(run_id))
 
-    def list_runs(self, filters: dict, limit: int, offset: int) -> list[dict]:
-        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 100:
-            raise ValueError("limit must be an integer in 1–100")
-        if isinstance(offset, bool) or not isinstance(offset, int) or offset < 0:
-            raise ValueError("offset must be a nonnegative integer")
+    def _query(self, filters):
+        self.initialize()
         if filters.keys() - _FILTERS.keys():
-            raise ValueError("Unsupported history filter")
-        where = " AND ".join(_FILTERS[key] for key in filters)
-        query = "SELECT * FROM simulation_runs"
-        if where:
-            query += " WHERE " + where
-        query += " ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?"
-        with closing(self._connect()) as connection:
-            self._require_database_version(connection)
-            return [self._summary(row) for row in connection.execute(
-                query, (*filters.values(), limit, offset)
-            )]
+            raise ValueError("不支持的历史筛选")
+        return SimulationRun.objects.filter(**{_FILTERS[key]: value for key, value in filters.items()})
 
-    def count_runs(self, filters: dict) -> int:
-        if filters.keys() - _FILTERS.keys():
-            raise ValueError("Unsupported history filter")
-        where = " AND ".join(_FILTERS[key] for key in filters)
-        query = "SELECT count(*) FROM simulation_runs"
-        if where:
-            query += " WHERE " + where
-        with closing(self._connect()) as connection:
-            self._require_database_version(connection)
-            return connection.execute(query, tuple(filters.values())).fetchone()[0]
+    def list_runs(self, filters, limit=50, offset=0):
+        if type(limit) is not int or not 1 <= limit <= 200 or type(offset) is not int or offset < 0:
+            raise ValueError("历史分页参数无效")
+        return [self.summary(run) for run in self._query(filters).order_by("-created_at", "-id")[offset:offset+limit]]
 
-    def delete_run(self, id: str):
-        with closing(self._connect()) as connection, connection:
-            self._require_database_version(connection)
-            connection.execute("DELETE FROM simulation_runs WHERE id = ?", (id,))
+    def count_runs(self, filters):
+        return self._query(filters).count()
 
-    def backup_to(self, path: str | Path):
-        with closing(self._connect()) as connection, closing(sqlite3.connect(path)) as destination:
-            self._require_database_version(connection)
-            connection.backup(destination)
+    def delete_run(self, id):
+        self.initialize()
+        with transaction.atomic():
+            SimulationRun.objects.filter(pk=id).delete()
+
+    def backup_to(self, path):
+        self.initialize()
+        connection.ensure_connection()
+        with closing(sqlite3.connect(path)) as destination:
+            connection.connection.backup(destination)

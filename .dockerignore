@@ -3,6 +3,8 @@
 .env.*
 .streamlit/secrets.toml
 .venv
+frontend/node_modules
+frontend/dist
 .worktrees
 .superpowers
 __pycache__

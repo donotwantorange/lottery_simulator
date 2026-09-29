@@ -1,7 +1,6 @@
 """Immutable, validated lottery pool configuration."""
 
 from dataclasses import dataclass
-import json
 import math
 from numbers import Real
 from pathlib import Path
@@ -112,6 +111,7 @@ class PoolConfig:
     rewards: tuple[RewardRule, ...]
     four_star_characters: tuple[WeightedCharacter, ...] = ()
     five_star_characters: tuple[WeightedCharacter, ...] = ()
+    rarity_labels: tuple[tuple[str, str], ...] = (("4", "四星"), ("5", "五星"), ("6", "六星"))
 
     def __post_init__(self) -> None:
         up_share = _probability(self.up_share, "up_share")
@@ -159,6 +159,8 @@ class PoolConfig:
         if not isinstance(raw, Mapping):
             raise ValueError("pool config must be an object")
         require_version(raw.get("format_version"), CONFIG_FORMAT_VERSION, "配置格式")
+        from lottery_simulator.config_documents import normalize_rarity_labels
+        labels = normalize_rarity_labels(raw.get("rarity_labels", {}))
         try:
             up_share = raw["up_share"]
             five_star_raw = raw["five_star"]
@@ -241,11 +243,13 @@ class PoolConfig:
             four_star_characters=four_star_characters,
             five_star_characters=five_star_characters,
             rewards=tuple(rewards),
+            rarity_labels=tuple(labels.items()),
         )
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "format_version": CONFIG_FORMAT_VERSION,
+            "rarity_labels": dict(self.rarity_labels),
             "up_share": self.up_share,
             "five_star": {
                 "base_probability": self.five_star.base_probability,
@@ -322,7 +326,5 @@ class PoolConfig:
 
 
 def load_pool_config(path: str | Path | None = None) -> PoolConfig:
-    if path is None:
-        path = Path(__file__).resolve().parents[2] / "configs" / "rule1_default.json"
-    with Path(path).open(encoding="utf-8") as config_file:
-        return PoolConfig.from_dict(json.load(config_file))
+    from lottery_simulator.config_documents import DEFAULT_POOL_PATH, load_pool_document, read_config_json
+    return load_pool_document(read_config_json(DEFAULT_POOL_PATH if path is None else path)).to_pool_config()

@@ -1,222 +1,206 @@
-from __future__ import annotations
+"""Persistent v5 business objects. Job-file contracts remain in job_models."""
 
-import json
-import os
-import tempfile
-from dataclasses import asdict, dataclass
-from pathlib import Path
-from typing import Any, ClassVar
-from uuid import UUID
+import uuid
 
-from lottery_simulator.analysis import distribution_stats
-from lottery_simulator.formats import (
-    JOB_FORMAT_VERSION,
-    RESULT_FORMAT_VERSION,
-    SAMPLING_VERSION,
-    require_version,
-    sampling_metadata,
-)
+from django.conf import settings
+from django.contrib.auth.models import AbstractUser
+from django.db import models
+from django.db.models import F, Q, Value
+from django.db.models.expressions import RawSQL
+from django.db.models.functions import Length, Trim
+from django.db.models.lookups import GreaterThan
+
+from lottery_simulator.formats import DATABASE_SCHEMA_VERSION, RECORD_FORMAT_VERSION
 
 
-@dataclass(frozen=True, slots=True)
-class RunParameters:
-    rule_name: str
-    draws: int
-    trials: int
-    initial_pity: int
-    seed: int | None
-    trace: bool
-    initial_five_star_pity: int = 0
-    pool_config: dict[str, Any] | None = None
-    job_format_version: int = JOB_FORMAT_VERSION
-    sampling_version: int = SAMPLING_VERSION
-
-    @classmethod
-    def from_dict(cls, raw: dict[str, Any]) -> "RunParameters":
-        if not isinstance(raw, dict):
-            raise ValueError("任务参数必须是对象")
-        require_version(raw.get("job_format_version"), JOB_FORMAT_VERSION, "任务格式")
-        require_version(raw.get("sampling_version"), SAMPLING_VERSION, "抽样")
-        try:
-            return cls(**raw).validate()
-        except TypeError as error:
-            raise ValueError("任务参数格式无效") from error
-
-    def validate(self) -> "RunParameters":
-        require_version(self.job_format_version, JOB_FORMAT_VERSION, "任务格式")
-        require_version(self.sampling_version, SAMPLING_VERSION, "抽样")
-        if not isinstance(self.rule_name, str) or not self.rule_name:
-            raise ValueError("rule_name must be a non-empty string")
-        if isinstance(self.draws, bool) or not isinstance(self.draws, int) or self.draws <= 0:
-            raise ValueError("draws must be a positive integer")
-        if self.draws > 10_000_000:
-            raise ValueError("draws 超过上限")
-        if isinstance(self.trials, bool) or not isinstance(self.trials, int) or self.trials <= 0:
-            raise ValueError("trials must be a positive integer")
-        if self.trials > 1_000_000:
-            raise ValueError("trials 超过上限")
-        if self.draws * self.trials > 100_000_000:
-            raise ValueError("draws * trials 超过上限")
-        if isinstance(self.initial_pity, bool) or not isinstance(self.initial_pity, int) or self.initial_pity < 0:
-            raise ValueError("initial_pity must be a non-negative integer")
-        if (isinstance(self.initial_five_star_pity, bool)
-                or not isinstance(self.initial_five_star_pity, int)
-                or self.initial_five_star_pity < 0):
-            raise ValueError("initial_five_star_pity must be a non-negative integer")
-        if self.pool_config is not None and not isinstance(self.pool_config, dict):
-            raise ValueError("pool_config must be a dictionary or None")
-        if self.seed is not None and (isinstance(self.seed, bool) or not isinstance(self.seed, int)):
-            raise ValueError("seed must be an integer or None")
-        if not isinstance(self.trace, bool):
-            raise ValueError("trace must be a boolean")
-        return self
-
-    def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+def nonblank(field):
+    return GreaterThan(Length(Trim(F(field))), Value(0))
 
 
-@dataclass(frozen=True, slots=True)
-class JobState:
-    job_id: str
-    status: str
-    parameters: RunParameters | dict[str, Any]
-    completed_units: int
-    total_units: int
-    pid: int | None = None
-    started_at: str | None = None
-    updated_at: str | None = None
-    duration_seconds: float | None = None
-    error: str | None = None
-    result_path: str | None = None
-    persistence_error: str | None = None
-    phase: str | None = None
-    history_saved: bool = False
-    run_id: str | None = None
-    job_format_version: int = JOB_FORMAT_VERSION
-    sampling_version: int = SAMPLING_VERSION
-    phase_completed: int | None = None
-    phase_total: int | None = None
-    cancel_requested: bool = False
-    cleanup_error: str | None = None
+class User(AbstractUser):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    username = models.CharField(max_length=64, unique=True)
+    username_key = models.CharField(max_length=64, unique=True)
+    must_change_password = models.BooleanField(default=False)
+    auth_version = models.PositiveIntegerField(default=1)
+    deleting = models.BooleanField(default=False)
 
-    _STATUSES: ClassVar[frozenset[str]] = frozenset(
-        ("queued", "running", "completed", "cancelled", "failed")
-    )
-
-    @classmethod
-    def from_dict(cls, raw: dict[str, Any]) -> "JobState":
-        if not isinstance(raw, dict):
-            raise ValueError("任务状态必须是对象")
-        require_version(raw.get("job_format_version"), JOB_FORMAT_VERSION, "任务格式")
-        require_version(raw.get("sampling_version"), SAMPLING_VERSION, "抽样")
-        try:
-            return cls(**raw).validate()
-        except TypeError as error:
-            raise ValueError("任务状态格式无效") from error
-
-    def validate(self) -> "JobState":
-        require_version(self.job_format_version, JOB_FORMAT_VERSION, "任务格式")
-        require_version(self.sampling_version, SAMPLING_VERSION, "抽样")
-        if self.status not in self._STATUSES:
-            raise ValueError("status must be one of queued/running/completed/cancelled/failed")
-        if isinstance(self.completed_units, bool) or not isinstance(self.completed_units, int) or self.completed_units < 0:
-            raise ValueError("completed_units must be a non-negative integer")
-        if isinstance(self.total_units, bool) or not isinstance(self.total_units, int) or self.total_units < 0:
-            raise ValueError("total_units must be a non-negative integer")
-        if self.completed_units > self.total_units:
-            raise ValueError("completed_units cannot exceed total_units")
-        if isinstance(self.parameters, RunParameters):
-            self.parameters.validate()
-        elif isinstance(self.parameters, dict):
-            RunParameters.from_dict(self.parameters)
-        else:
-            raise ValueError("parameters must be serialized run parameters")
-        if self.phase not in (
-            None, "simulating", "theory", "validating", "saving", "committing"
-        ):
-            raise ValueError(
-                "phase must be simulating, theory, validating, saving, committing or None"
-            )
-        if (self.phase_completed is None) != (self.phase_total is None):
-            raise ValueError("phase_completed and phase_total must be provided together")
-        if self.phase_completed is not None:
-            if (
-                isinstance(self.phase_completed, bool)
-                or not isinstance(self.phase_completed, int)
-                or self.phase_completed < 0
-            ):
-                raise ValueError("phase_completed must be a non-negative integer")
-            if (
-                isinstance(self.phase_total, bool)
-                or not isinstance(self.phase_total, int)
-                or self.phase_total < 0
-            ):
-                raise ValueError("phase_total must be a non-negative integer")
-            if self.phase_completed > self.phase_total:
-                raise ValueError("phase_completed cannot exceed phase_total")
-        if type(self.cancel_requested) is not bool:
-            raise ValueError("cancel_requested must be a boolean")
-        if self.cleanup_error is not None and not isinstance(self.cleanup_error, str):
-            raise ValueError("cleanup_error must be a string or None")
-        if type(self.history_saved) is not bool:
-            raise ValueError("history_saved must be a boolean")
-        if self.run_id is not None:
-            try:
-                valid_run_id = type(self.run_id) is str and str(UUID(self.run_id)) == self.run_id
-            except (ValueError, AttributeError):
-                valid_run_id = False
-            if not valid_run_id:
-                raise ValueError("run_id must be a canonical UUID or None")
-        return self
-
-    def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+    class Meta:
+        db_table = "users"
+        constraints = [
+            models.CheckConstraint(condition=nonblank("username"), name="users_username_nonblank"),
+            models.CheckConstraint(condition=nonblank("username_key"), name="users_username_key_nonblank"),
+            models.CheckConstraint(condition=Q(is_staff=F("is_superuser")), name="users_staff_matches_superuser"),
+        ]
 
 
-def result_payload(result: Any, rule: Any, duration_seconds: float) -> dict[str, Any]:
-    payload = json.loads(json.dumps(asdict(result)))
-    payload.pop("records")
-    payload["result_format_version"] = RESULT_FORMAT_VERSION
-    payload.update(sampling_metadata())
-    mean_count_error = result.mean_six_stars - result.theoretical_expected_count
-    payload["rule_version"] = rule.version
-    payload["main_draws"] = result.draws
-    payload["theoretical_mean_interval"] = distribution_stats(rule).mean
-    payload["mean_count_error"] = mean_count_error
-    payload["mean_count_relative_error"] = (
-        mean_count_error / result.theoretical_expected_count
-        if result.theoretical_expected_count != 0.0
-        else None
-    )
-    payload["duration_seconds"] = duration_seconds
-    return payload
+class Pool(models.Model):
+    PUBLIC = "public"
+    PRIVATE = "private"
+    HIDDEN = "hidden"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    name = models.CharField(max_length=255)
+    name_key = models.CharField(max_length=255)
+    kind = models.CharField(max_length=7, choices=[(PUBLIC, PUBLIC), (PRIVATE, PRIVATE)])
+    owner = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, blank=True,
+                              on_delete=models.CASCADE, related_name="owned_pools")
+    visibility = models.CharField(max_length=6, choices=[(PUBLIC, PUBLIC), (HIDDEN, HIDDEN)])
+    original_author = models.CharField(max_length=255)
+    rule_name = models.CharField(max_length=128)
+    config_json = models.JSONField()
+    revision = models.PositiveIntegerField(default=1)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "pools"
+        constraints = [
+            models.CheckConstraint(
+                condition=(Q(kind="public", owner__isnull=True, visibility="public") |
+                           Q(kind="private", owner__isnull=False,
+                             visibility__in=["public", "hidden"])),
+                name="pools_kind_owner_visibility",
+            ),
+            models.CheckConstraint(condition=nonblank("name"), name="pools_name_nonblank"),
+            models.CheckConstraint(condition=nonblank("name_key"), name="pools_name_key_nonblank"),
+            models.CheckConstraint(condition=Q(revision__gte=1), name="pools_revision_positive"),
+            models.UniqueConstraint(fields=["name_key"], condition=Q(kind="public"),
+                                    name="pools_public_name_unique"),
+            models.UniqueConstraint(fields=["owner", "name_key"], condition=Q(kind="private"),
+                                    name="pools_private_owner_name_unique"),
+        ]
 
 
-def write_json(path: str | os.PathLike[str], value: dict[str, Any]) -> None:
-    target = Path(path)
-    target.parent.mkdir(parents=True, exist_ok=True)
-    temporary_name: str | None = None
-    try:
-        with tempfile.NamedTemporaryFile(
-            mode="w", encoding="utf-8", dir=target.parent, suffix=".tmp", delete=False
-        ) as temporary:
-            temporary_name = temporary.name
-            json.dump(value, temporary, ensure_ascii=False)
-            temporary.flush()
-            os.fsync(temporary.fileno())
-        os.replace(temporary_name, target)
-        temporary_name = None
-    finally:
-        if temporary_name is not None:
-            try:
-                os.unlink(temporary_name)
-            except FileNotFoundError:
-                pass
+class ExperimentConfig(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    owner = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE,
+                              related_name="experiment_configs")
+    name = models.CharField(max_length=255)
+    name_key = models.CharField(max_length=255)
+    pool = models.ForeignKey(Pool, null=True, blank=True, on_delete=models.SET_NULL,
+                             related_name="experiment_configs")
+    pool_name_hint = models.CharField(max_length=255, blank=True)
+    parameters_json = models.JSONField()
+    revision = models.PositiveIntegerField(default=1)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "experiment_configs"
+        constraints = [
+            models.CheckConstraint(condition=nonblank("name"), name="experiment_name_nonblank"),
+            models.CheckConstraint(condition=nonblank("name_key"), name="experiment_name_key_nonblank"),
+            models.CheckConstraint(condition=Q(revision__gte=1), name="experiment_revision_positive"),
+            models.UniqueConstraint(fields=["owner", "name_key"],
+                                    name="experiment_owner_name_unique"),
+        ]
 
 
-def read_json(path: str | os.PathLike[str]) -> dict[str, Any]:
-    with Path(path).open(encoding="utf-8") as source:
-        value = json.load(source)
-    if not isinstance(value, dict):
-        raise ValueError("JSON root must be an object")
-    return value
+class SimulationRun(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    owner = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE,
+                              related_name="simulation_runs")
+    created_at = models.DateTimeField(auto_now_add=True)
+    pool_id_snapshot = models.UUIDField()
+    pool_revision_snapshot = models.PositiveIntegerField()
+    pool_name_snapshot = models.CharField(max_length=255)
+    original_author_snapshot = models.CharField(max_length=255)
+    rule_name = models.CharField(max_length=128)
+    rule_version = models.CharField(max_length=32)
+    main_draws = models.PositiveIntegerField()
+    trials = models.PositiveIntegerField()
+    initial_pity = models.PositiveIntegerField()
+    initial_five_star_pity = models.PositiveIntegerField()
+    seed = models.TextField()  # Decimal text preserves integers beyond SQLite int64.
+    trace_enabled = models.BooleanField()
+    record_count = models.PositiveIntegerField()
+    pool_config_json = models.JSONField()
+    result_json = models.JSONField()
+    schema_version = models.PositiveSmallIntegerField(default=DATABASE_SCHEMA_VERSION)
+
+    class Meta:
+        db_table = "simulation_runs"
+        indexes = [models.Index(fields=["owner", "-created_at"], name="runs_owner_created_idx")]
+        constraints = [
+            models.CheckConstraint(condition=Q(schema_version=DATABASE_SCHEMA_VERSION),
+                                   name="runs_schema_version_v5"),
+            models.CheckConstraint(condition=Q(pool_revision_snapshot__gte=1),
+                                   name="runs_pool_revision_positive"),
+            models.CheckConstraint(condition=Q(main_draws__gte=1, trials__gte=1),
+                                   name="runs_draw_counts_positive"),
+            models.CheckConstraint(
+                condition=(Q(trace_enabled=False, record_count=0) |
+                           Q(trace_enabled=True, record_count__gt=0)),
+                name="runs_trace_count_matches",
+            ),
+        ]
+
+
+class DrawRecord(models.Model):
+    run = models.ForeignKey(SimulationRun, on_delete=models.CASCADE, related_name="draw_records")
+    trial_index = models.PositiveIntegerField()
+    draw_index = models.PositiveIntegerField()
+    source = models.CharField(max_length=5, choices=[("main", "main"), ("bonus", "bonus")])
+    source_index = models.PositiveIntegerField()
+    rarity = models.PositiveSmallIntegerField(choices=[(4, "4"), (5, "5"), (6, "6")])
+    character_name = models.TextField(null=True, blank=True)
+    record_json = models.JSONField()
+
+    class Meta:
+        db_table = "draw_records"
+        indexes = [models.Index(fields=["run", "source", "source_index", "rarity"],
+                                name="draw_run_source_position_idx")]
+        constraints = [
+            models.UniqueConstraint(fields=["run", "trial_index", "draw_index"],
+                                    name="draw_records_run_trial_draw_unique"),
+            models.CheckConstraint(condition=Q(trial_index__gt=0, draw_index__gt=0,
+                                               source_index__gt=0), name="draw_records_indexes_positive"),
+            models.CheckConstraint(condition=Q(source__in=["main", "bonus"]),
+                                   name="draw_records_source_valid"),
+            models.CheckConstraint(condition=Q(rarity__in=[4, 5, 6]),
+                                   name="draw_records_rarity_valid"),
+            models.CheckConstraint(
+                condition=RawSQL(
+                    "json_type(record_json, '$') IS 'object' "
+                    "AND json_type(record_json, '$.record_format_version') IS 'integer' "
+                    f"AND json_extract(record_json, '$.record_format_version') = {RECORD_FORMAT_VERSION} "
+                    "AND trial_index IS json_extract(record_json, '$.trial_index') "
+                    "AND draw_index IS json_extract(record_json, '$.draw_index') "
+                    "AND source IS json_extract(record_json, '$.source') "
+                    "AND source_index IS json_extract(record_json, '$.source_index') "
+                    "AND rarity IS json_extract(record_json, '$.draw_result.outcome.rarity') "
+                    "AND character_name IS json_extract(record_json, '$.draw_result.outcome.character_name')",
+                    [], output_field=models.BooleanField(),
+                ),
+                name="draw_records_json_matches_columns",
+            ),
+        ]
+
+
+class LoginLimit(models.Model):
+    """A surrogate ORM key with a database-unique (scope, key) bucket."""
+
+    scope = models.CharField(max_length=7, choices=[("account", "account"),
+                                                    ("source", "source")])
+    key = models.TextField()
+    failure_count = models.PositiveIntegerField(default=0)
+    window_start = models.DateTimeField(null=True, blank=True)
+    blocked_until = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        db_table = "login_limits"
+        constraints = [
+            models.UniqueConstraint(fields=["scope", "key"], name="login_limits_scope_key_unique"),
+            models.CheckConstraint(condition=Q(scope__in=["account", "source"]),
+                                   name="login_limits_scope_valid"),
+            models.CheckConstraint(condition=nonblank("key"), name="login_limits_key_nonblank"),
+        ]
+
+
+class AppMeta(models.Model):
+    key = models.CharField(max_length=128, primary_key=True)
+    value = models.JSONField()
+
+    class Meta:
+        db_table = "app_meta"

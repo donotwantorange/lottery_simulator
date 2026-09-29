@@ -568,7 +568,8 @@ class EngineTest(unittest.TestCase):
         self.assertEqual(
             result.pool_config,
             {
-                "format_version": 1,
+                "format_version": 2,
+                "rarity_labels": {"4": "四星", "5": "五星", "6": "六星"},
                 "up_share": 0.5,
                 "five_star": {
                     "base_probability": 0.08,

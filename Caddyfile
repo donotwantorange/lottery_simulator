@@ -1,5 +1,21 @@
 {$DOMAIN} {
     encode zstd gzip
     header Strict-Transport-Security "max-age=31536000; includeSubDomains"
-    reverse_proxy app:8501
+    @assets path /assets/*
+    header @assets Cache-Control "public, max-age=31536000, immutable"
+    @index path / /index.html
+    header @index Cache-Control "no-cache"
+
+    @api path /api /api/*
+    handle @api {
+        reverse_proxy app:8000 {
+            header_up X-Forwarded-Proto {scheme}
+        }
+    }
+
+    handle {
+        root * /srv
+        try_files {path} /index.html
+        file_server
+    }
 }

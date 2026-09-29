@@ -1,0 +1,42 @@
+from django.urls import path
+
+from dashboard.api import auth, experiments, jobs, management, pools, runs
+from dashboard.downloads import download_trace
+
+urlpatterns = [
+    path("management/users/", management.users),
+    path("management/users/<uuid:target_id>/", management.user_resource),
+    path("management/users/<uuid:target_id>/reset-password/", management.password_reset),
+    path("management/users/<uuid:target_id>/unlock-login/", management.login_unlock),
+    path("management/jobs/", management.jobs),
+    path("runs/<uuid:run_id>/download-trace/", download_trace),
+    path("jobs/", jobs.create_job),
+    path("jobs/busy/", jobs.busy),
+    path("jobs/mine/", jobs.mine),
+    path("jobs/<uuid:job_id>/", jobs.detail),
+    path("jobs/<uuid:job_id>/cancel/", jobs.cancel),
+    path("jobs/<uuid:job_id>/resave/", jobs.resave),
+    path("jobs/<uuid:job_id>/result/", jobs.result),
+    path("jobs/<uuid:job_id>/trace/", jobs.trace),
+    path("jobs/<uuid:job_id>/charts/", jobs.charts),
+    path("runs/", runs.collection),
+    path("runs/<uuid:run_id>/", runs.resource),
+    path("runs/<uuid:run_id>/trace/", runs.trace),
+    path("runs/<uuid:run_id>/charts/", runs.charts),
+    path("auth/csrf/", auth.csrf),
+    path("auth/me/", auth.me),
+    path("auth/login/", auth.login_view),
+    path("auth/logout/", auth.logout_view),
+    path("auth/change-password/", auth.change_password_view),
+    path("auth/activity/", auth.activity),
+    path("pools/import/", pools.import_pool),
+    path("pools/", pools.pool_collection),
+    path("pools/<uuid:pool_id>/copy/", pools.copy_pool_view),
+    path("pools/<uuid:pool_id>/export/", pools.export_pool_view),
+    path("pools/<uuid:pool_id>/", pools.pool_resource),
+    path("experiment-configs/import/preview/", experiments.preview_experiment_import),
+    path("experiment-configs/import/confirm/", experiments.confirm_experiment_import_view),
+    path("experiment-configs/", experiments.experiment_config_collection),
+    path("experiment-configs/<uuid:config_id>/export/", experiments.export_experiment_view),
+    path("experiment-configs/<uuid:config_id>/", experiments.experiment_config_resource),
+]

@@ -7,8 +7,8 @@ import sys
 import time
 
 from dashboard.jobs import ACTIVE_STATUSES, JobManager, timestamp, validate_parameters_for_active_rule
-from dashboard.limits import TraceLimits
-from dashboard.models import RunParameters, read_json, result_payload, write_json
+from dashboard.limits import SimulationLimits
+from dashboard.job_models import RunParameters, read_json, result_payload, write_json
 from dashboard.repository import HistoryRepository
 from dashboard.trace_store import TraceWriter
 from lottery_simulator.cli import RULES
@@ -29,6 +29,8 @@ def run(job_dir: Path, database_path: Path):
             return
         try:
             parameters = RunParameters.from_dict(read_json(job_dir / "parameters.json"))
+            if parameters.to_dict() != state.parameters or parameters.seed is None:
+                raise ValueError("任务参数与接受时快照不一致")
         except (OSError, TypeError, ValueError):
             logging.getLogger(__name__).exception(
                 "Invalid parameters for job %s", state.job_id
@@ -71,13 +73,13 @@ def run(job_dir: Path, database_path: Path):
     try:
         if parameters.pool_config is None:
             raise ValueError("worker requires a serialized pool configuration")
-        limits = TraceLimits.from_env()
+        limits = SimulationLimits.from_dict(state.limit_policy)
         parameters = validate_parameters_for_active_rule(parameters, limits=limits)
         rule = RULES[parameters.rule_name](
             config=PoolConfig.from_dict(parameters.pool_config)
         )
         if parameters.trace:
-            writer = TraceWriter(trace_path, limits=limits)
+            writer = TraceWriter(trace_path, limits=limits.trace_limits())
         result = simulate(
             rule, parameters.draws, parameters.trials, parameters.seed, parameters.initial_pity,
             progress_callback=lambda completed, total: publish_phase("simulating", completed, total),
@@ -98,6 +100,8 @@ def run(job_dir: Path, database_path: Path):
             writer.close()
             writer = None
         payload = result_payload(result, rule, time.monotonic() - started)
+        payload.update(owner_id=state.owner_id, accepted_at=state.accepted_at,
+                       pool_source=state.pool_source, limit_policy=state.limit_policy)
         if parameters.seed is None:
             parameters = replace(parameters, seed=result.seed)
             write_json(job_dir / "parameters.json", parameters.to_dict())
@@ -152,6 +156,7 @@ def run(job_dir: Path, database_path: Path):
             )
             write_json(state_path, current_state.to_dict())
             yield
+            current_state = manager.get(state.job_id)
             write_json(state_path, replace(
                 current_state, status="completed", phase=None,
                 phase_completed=None, phase_total=None, history_saved=True,
@@ -161,6 +166,14 @@ def run(job_dir: Path, database_path: Path):
             ).to_dict())
             published = True
 
+    def saving_progress(completed, total):
+        # save_run invokes this only while commit_guard already owns the job lock.
+        current_state = manager.get(state.job_id)
+        write_json(state_path, replace(
+            current_state, phase="saving", phase_completed=completed, phase_total=total,
+            updated_at=timestamp(), duration_seconds=time.monotonic() - started,
+        ).to_dict())
+
     try:
         repository = HistoryRepository(database_path)
         repository.initialize()
@@ -169,7 +182,7 @@ def run(job_dir: Path, database_path: Path):
             state.job_id, payload,
             trace_path=trace_path if parameters.trace else None,
             cancel_check=cancel_path.exists, commit_guard=commit_guard,
-            progress_callback=lambda completed, total: publish_phase("saving", completed, total),
+            progress_callback=saving_progress,
         )
         if published:
             with manager._locked():
@@ -231,8 +244,4 @@ def run(job_dir: Path, database_path: Path):
 
 
 if __name__ == "__main__":
-    if len(sys.argv) != 3:
-        raise SystemExit("usage: python -m dashboard.worker JOB_DIR DATABASE")
-    directory = Path(sys.argv[1]).resolve()
-    logging.basicConfig(filename=directory / "worker.log", encoding="utf-8", level=logging.INFO)
-    run(directory, Path(sys.argv[2]).resolve())
+    raise SystemExit("请使用 manage.py run_job --job-dir 任务目录")

@@ -3,20 +3,22 @@ services:
     build: .
     restart: unless-stopped
     environment:
-      APP_ENVIRONMENT: production
-      APP_AUTH_MODE: oidc
-      ALLOWED_EMAILS: "${ALLOWED_EMAILS:?Set ALLOWED_EMAILS in .env}"
-      STREAMLIT_SERVER_ADDRESS: 0.0.0.0
+      LOTTERY_ENV: production
+      SECRET_KEY: "${SECRET_KEY:?Set SECRET_KEY in .env}"
+      LOTTERY_ALLOWED_HOSTS: "${DOMAIN:?Set DOMAIN in .env}"
+      LOTTERY_CSRF_TRUSTED_ORIGINS: "https://${DOMAIN:?Set DOMAIN in .env}"
       LOTTERY_DATA_DIR: /app/data
-      LOTTERY_DB_PATH: /app/data/lottery_v4.sqlite3
-    volumes: ["lottery_data:/app/data", "lottery_backups:/app/backups", "./.streamlit/secrets.toml:/app/.streamlit/secrets.toml:ro"]
+      LOTTERY_DB_PATH: /app/data/history_v5.sqlite3
+      LOTTERY_JOBS_DIR: /app/data/jobs_v5
+      LOTTERY_EXPORTS_DIR: /app/data/exports_v5
+    volumes: ["lottery_data:/app/data", "lottery_backups:/app/backups"]
   caddy:
     image: caddy:2.11.4-alpine
     restart: unless-stopped
     environment:
       DOMAIN: "${DOMAIN:?Set DOMAIN in .env}"
     ports: ["80:80", "443:443"]
-    volumes: ["./Caddyfile:/etc/caddy/Caddyfile:ro", "caddy_data:/data", "caddy_config:/config"]
+    volumes: ["./Caddyfile:/etc/caddy/Caddyfile:ro", "./frontend/dist:/srv:ro", "caddy_data:/data", "caddy_config:/config"]
     depends_on:
       app:
         condition: service_healthy

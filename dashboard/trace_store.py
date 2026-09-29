@@ -3,6 +3,7 @@ from dataclasses import asdict, dataclass
 import json
 import math
 from pathlib import Path
+from uuid import UUID
 import sqlite3
 
 from dashboard.limits import TraceLimits
@@ -133,7 +134,7 @@ class TraceReader:
     def for_history(cls, path, run_id):
         if not isinstance(run_id, str) or not run_id:
             raise ValueError("run_id must be a non-empty string")
-        return cls(path, source_kind="history", run_id=run_id)
+        return cls(path, source_kind="history", run_id=UUID(run_id).hex)
 
     def _connect(self):
         uri = self.path.resolve().as_uri() + "?mode=ro"
@@ -221,14 +222,26 @@ class TraceReader:
         where, parameters = self._where(filters)
         table = "records" if self._source_kind == "store" else "draw_records"
         columns = "trial_index, draw_index, source, source_index, rarity, character_name, record_json"
-        with closing(self._connect()) as connection:
-            cursor = connection.execute(
-                f"SELECT {columns} FROM {table}{where} ORDER BY trial_index, draw_index",
-                parameters,
-            )
-            while batch := cursor.fetchmany(batch_size):
-                for row in batch:
-                    yield self._decode(row)
+        last = None
+        while True:
+            batch_where, batch_parameters = where, list(parameters)
+            if last is not None:
+                batch_where += (" AND " if where else " WHERE ") + (
+                    "(trial_index > ? OR (trial_index = ? AND draw_index > ?))")
+                batch_parameters.extend((last[0], last[0], last[1]))
+            # Immutable completed traces permit keyset paging. Release the
+            # SQLite read lock before yielding, so revocation/deletion can write.
+            with closing(self._connect()) as connection:
+                batch = connection.execute(
+                    f"SELECT {columns} FROM {table}{batch_where} "
+                    "ORDER BY trial_index, draw_index LIMIT ?",
+                    (*batch_parameters, batch_size),
+                ).fetchall()
+            if not batch:
+                return
+            last = (batch[-1]["trial_index"], batch[-1]["draw_index"])
+            for row in batch:
+                yield self._decode(row)
 
     def position_counts(self, *, source, trial_from, trial_to, source_from, source_to):
         if source not in ("main", "bonus"):
@@ -336,7 +349,8 @@ class TraceWriter:
 
     def __init__(self, path: str | Path, *, limits: TraceLimits):
         _integer(limits.batch_size, "batch_size", 1)
-        _integer(limits.max_records, "max_records", 1)
+        if limits.max_records is not None:
+            _integer(limits.max_records, "max_records", 1)
         self.path = Path(path)
         self.limits = limits
         self._buffer = []
@@ -356,7 +370,7 @@ class TraceWriter:
 
     def append(self, record: DrawRecord) -> None:
         self._ensure_writable()
-        if self._count >= self.limits.max_records:
+        if self.limits.max_records is not None and self._count >= self.limits.max_records:
             raise ValueError("Trace record limit exceeded")
         value = asdict(record)
         validate_record(value)

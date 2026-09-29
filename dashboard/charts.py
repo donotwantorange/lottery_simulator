@@ -208,6 +208,41 @@ def pity_rows(payload: dict, source: str) -> list[dict]:
     ]
 
 
+def summary_chart_data(payload: dict, source: str) -> dict:
+    """Build the five snapshot-based category charts and their table rows."""
+    labels = payload["pool_config"].get("rarity_labels", {})
+    rarity = rarity_comparison_rows(payload, source)
+    for row, key in zip(rarity, ("4", "5", "6")):
+        row["星级"] = labels.get(key, row["星级"])
+    characters = character_rows(payload, source)
+    for row in characters:
+        row[f'{labels.get("6", "六星")}内实际占比'] = row.pop("六星内实际占比")
+        row[f'{labels.get("6", "六星")}内理论占比'] = row.pop("六星内理论占比")
+    pity = pity_rows(payload, source)
+    pity[0]["保底类型"] = f'{labels.get("5", "五星")}保底'
+    pity[1]["保底类型"] = f'{labels.get("6", "六星")}硬保底'
+    categories = {
+        "rarity": (rarity, "星级", "每轮平均数量"),
+        "six_star_categories": (six_star_category_rows(payload, source), "类型", "每轮平均数量"),
+        "characters": (characters, "角色", "每轮平均数量"),
+        "rewards": (reward_rows(payload, source), "奖励", "奖励量"),
+        "pity": (pity, "保底类型", "触发次数"),
+    }
+    specs = {}
+    for kind, (rows, field, unit) in categories.items():
+        if not rows:
+            specs[kind] = None
+            continue
+        horizontal = kind == "characters" and (
+            len(rows) > 8 or any(len(str(row[field])) > 8 for row in rows)
+        )
+        specs[kind] = comparison_bar_chart(
+            rows, category_field=field, unit=unit, horizontal=horizontal,
+        ).to_dict()
+    return {"specs": specs, "rows": {kind: rows for kind, (rows, _, _) in categories.items()},
+            "rarity_labels": labels}
+
+
 def probability_rows(rule) -> list[dict]:
     probabilities = waiting_time_distribution(rule)
     analyzed_probabilities = distribution_stats(rule).probabilities

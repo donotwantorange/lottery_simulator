@@ -17,12 +17,12 @@ from lottery_simulator.formats import (
 
 class FormatsTest(unittest.TestCase):
     def test_format_versions_match_the_multi_trial_trace_contract(self):
-        self.assertEqual(CONFIG_FORMAT_VERSION, 1)
+        self.assertEqual(CONFIG_FORMAT_VERSION, 2)
         self.assertEqual(SAMPLING_VERSION, 1)
         self.assertEqual(RECORD_FORMAT_VERSION, 2)
-        self.assertEqual(RESULT_FORMAT_VERSION, 2)
-        self.assertEqual(JOB_FORMAT_VERSION, 2)
-        self.assertEqual(DATABASE_SCHEMA_VERSION, 4)
+        self.assertEqual(RESULT_FORMAT_VERSION, 3)
+        self.assertEqual(JOB_FORMAT_VERSION, 3)
+        self.assertEqual(DATABASE_SCHEMA_VERSION, 5)
         self.assertEqual(TRACE_STORE_FORMAT_VERSION, 1)
         self.assertEqual(TRACE_EXPORT_FORMAT_VERSION, 1)
 

@@ -13,8 +13,8 @@ import time
 from threading import Thread
 from uuid import UUID, uuid4
 
-from dashboard.models import JobState, RunParameters, read_json, write_json
-from dashboard.limits import TraceLimits
+from dashboard.job_models import JobState, RunParameters, read_json, write_json
+from dashboard.limits import SimulationLimits, TraceLimits
 from dashboard.repository import HistoryRepository
 from dashboard.trace_store import TraceFilter, TraceReader
 from lottery_simulator.cli import RULES
@@ -37,6 +37,14 @@ class JobAlreadyRunning(RuntimeError):
 def validate_parameters_for_active_rule(parameters: RunParameters, limits=None) -> RunParameters:
     """Validate dashboard parameters against the selected rule without copying its limits."""
     parameters.validate()
+    limits = limits or SimulationLimits()
+    for value, upper, label in (
+        (parameters.draws, getattr(limits, "max_draws", 10_000_000), "每轮主抽"),
+        (parameters.trials, getattr(limits, "max_trials", 1_000_000), "轮数"),
+        (parameters.draws * parameters.trials, getattr(limits, "max_main_draws", 100_000_000), "主抽总数"),
+    ):
+        if upper is not None and value > upper:
+            raise ValueError(f"{label}超过上限")
     try:
         rule_factory = RULES[parameters.rule_name]
     except KeyError:
@@ -60,10 +68,12 @@ def validate_parameters_for_active_rule(parameters: RunParameters, limits=None) 
             )
     elif parameters.initial_five_star_pity != 0:
         raise ValueError("关闭五星保底时初始五星保底必须为 0")
+    bonus = expected_bonus_draws(rule, parameters.initial_pity, parameters.draws)
+    total_records = parameters.trials * (parameters.draws + bonus)
+    if total_records > 2**63 - 1:
+        raise ValueError("总抽计数超过存储可表示范围")
     if parameters.trace:
-        limits = limits or TraceLimits.from_env()
-        bonus = expected_bonus_draws(rule, parameters.initial_pity, parameters.draws)
-        if parameters.trials * (parameters.draws + bonus) > limits.max_records:
+        if limits.max_records is not None and total_records > limits.max_records:
             raise ValueError("Trace记录数超过上限")
     return replace(parameters, pool_config=config.to_dict())
 
@@ -72,7 +82,8 @@ class JobManager:
     def __init__(self, root: str | Path, database_path: str | Path):
         self.root = Path(root).resolve()
         self.database_path = Path(database_path).resolve()
-        self.root.mkdir(parents=True, exist_ok=True)
+        self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
+        self.root.chmod(0o700)
 
     @contextmanager
     def _locked(self):
@@ -96,23 +107,42 @@ class JobManager:
     def get_active(self) -> JobState | None:
         return next(self._active_states(), None)
 
-    def start(self, parameters: RunParameters, *, synchronous=False) -> JobState:
-        parameters = validate_parameters_for_active_rule(parameters)
+    def start(self, *, prepare, synchronous=False) -> JobState:
+        """Only service-owned admission may produce the accepted snapshot."""
         with self._locked():
+            parameters, owner_id, pool_source, policy = prepare()
+            parameters = validate_parameters_for_active_rule(parameters, limits=policy)
+            for previous in list(self._active_states()):
+                directory = self._job_dir(previous.job_id)
+                if not self._is_worker(previous.pid, directory):
+                    self._finish_exited(previous, directory, "模拟进程已退出")
             if any(self._active_states()):
                 raise JobAlreadyRunning("已有模拟任务正在运行")
             state = JobState(str(uuid4()), "queued", parameters.to_dict(), 0,
                              parameters.draws * parameters.trials, updated_at=timestamp(),
-                             phase="simulating")
+                             phase="simulating", owner_id=owner_id, accepted_at=timestamp(),
+                             pool_source=pool_source, limit_policy=policy.to_dict())
+            state.validate()
             job_dir = self.root / state.job_id
+            job_dir.mkdir(mode=0o700)
             write_json(job_dir / "parameters.json", parameters.to_dict())
             write_json(job_dir / "state.json", state.to_dict())
             if not synchronous:
                 try:
+                    from django.conf import settings
+                    environment = os.environ.copy()
+                    environment.update({
+                        "DJANGO_SETTINGS_MODULE": os.environ.get("DJANGO_SETTINGS_MODULE", "webapp.settings"),
+                        "LOTTERY_DATA_DIR": str(settings.DATA_DIR),
+                        "LOTTERY_DB_PATH": str(self.database_path),
+                        "LOTTERY_JOBS_DIR": str(self.root),
+                        "LOTTERY_EXPORTS_DIR": str(settings.EXPORTS_DIR),
+                    })
                     process = subprocess.Popen(
-                        [sys.executable, "-m", "dashboard.worker", str(job_dir),
-                         str(self.database_path)],
+                        [sys.executable, str(Path(__file__).resolve().parents[1] / "manage.py"),
+                         "run_job", "--job-dir", str(job_dir)],
                         cwd=Path(__file__).resolve().parents[1], start_new_session=True,
+                        env=environment,
                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                         stderr=subprocess.DEVNULL,
                     )
@@ -139,7 +169,10 @@ class JobManager:
         if job_dir is None:
             return None
         try:
-            return JobState.from_dict(read_json(job_dir / "state.json"))
+            state = JobState.from_dict(read_json(job_dir / "state.json"))
+            if state.job_id != job_dir.name:
+                raise ValueError("任务状态与目录不一致")
+            return state
         except FileNotFoundError:
             return None
         except (OSError, TypeError, ValueError):
@@ -193,9 +226,11 @@ class JobManager:
         except (OSError, sqlite3.Error, ValueError):
             return None
 
-    def cancel(self, job_id) -> JobState | None:
+    def cancel(self, job_id, *, authorize=None) -> JobState | None:
         with self._locked():
             state = self.get(job_id)
+            if authorize is not None:
+                authorize(state)
             if state is not None and state.status in ACTIVE_STATUSES:
                 try:
                     saved = HistoryRepository(self.database_path).get_run(job_id)
@@ -284,12 +319,9 @@ class JobManager:
                         (current.status not in ACTIVE_STATUSES and not current.cleanup_error
                          and not (job_dir / "cancel.request").exists())):
                     continue
-                if not self._stop_worker(current.pid, job_dir):
-                    logging.getLogger(__name__).warning(
-                        "Worker exit not confirmed for job %s; retaining active state", current.job_id
-                    )
+                if self._is_worker(current.pid, job_dir):
                     continue
-                self._finish_exited(current, job_dir, "服务重启，未完成任务已停止")
+                self._finish_exited(current, job_dir, "模拟进程已退出")
 
     @staticmethod
     def _clean_stopped_files(job_dir, *, partial_result=False):
@@ -336,8 +368,9 @@ class JobManager:
             return False
         try:
             arguments = Path(f"/proc/{pid}/cmdline").read_bytes().split(b"\0")
-            return (len(arguments) > 3
-                    and arguments[1:3] == [b"-m", b"dashboard.worker"]
-                    and Path(os.fsdecode(arguments[3])).resolve() == job_dir)
+            return (len(arguments) > 4
+                    and Path(os.fsdecode(arguments[1])).resolve() == Path(__file__).resolve().parents[1] / "manage.py"
+                    and arguments[2:4] == [b"run_job", b"--job-dir"]
+                    and Path(os.fsdecode(arguments[4])).resolve() == job_dir.resolve())
         except (FileNotFoundError, ProcessLookupError):
             return False

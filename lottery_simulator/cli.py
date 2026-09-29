@@ -8,59 +8,106 @@ from lottery_simulator.analysis import distribution_stats
 from lottery_simulator.engine import SimulationResult, simulate
 from lottery_simulator.formats import RESULT_FORMAT_VERSION, sampling_metadata
 from lottery_simulator.rules.base import DrawState
-from lottery_simulator.rules.pool_config import load_pool_config
 from lottery_simulator.rules.rule_1 import Rule1
+from lottery_simulator.config_documents import (
+    DEFAULT_POOL_PATH, DEFAULT_POOL_DIRECTORY, load_pool_document,
+    load_experiment_document, read_config_json, resolve_pool_reference,
+    validate_experiment_parameters, rarity_label,
+)
 
 
 RULES = {"rule1": Rule1}
 
 
+class ChineseParser(argparse.ArgumentParser):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, add_help=False, **kwargs)
+        self._positionals.title = "位置参数"
+        self._optionals.title = "选项"
+        self.add_argument("-h", "--help", action="help", help="显示中文帮助并退出")
+
+    def format_usage(self):
+        return super().format_usage().replace("usage:", "用法：")
+
+    def format_help(self):
+        return super().format_help().replace("usage:", "用法：")
+
+    def error(self, message):
+        # argparse generates these diagnostics before application validation.
+        translations = {
+            "the following arguments are required:": "缺少必需参数：",
+            "unrecognized arguments:": "无法识别的参数：",
+            "invalid choice:": "不支持的选项：",
+            "choose from": "可选值",
+            "expected one argument": "需要一个参数值",
+            "not allowed with argument": "不能与以下参数同时使用",
+            "argument ": "参数 ",
+        }
+        for english, chinese in translations.items():
+            message = message.replace(english, chinese)
+        self.print_usage(sys.stderr)
+        self.exit(2, f"{self.prog}：错误：{message}\n")
+
+
+def _integer(value):
+    try:
+        return int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError("参数值必须是整数") from None
+
+
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="lottery_simulator")
-    commands = parser.add_subparsers(dest="command", required=True)
-    analyze = commands.add_parser("analyze")
-    analyze.add_argument("--rule", choices=RULES, default="rule1")
-    analyze.add_argument("--pool-config")
-    analyze.add_argument("--format", choices=("text", "json"), default="text")
-    simulation = commands.add_parser("simulate")
-    simulation.add_argument("--rule", choices=RULES, default="rule1")
-    simulation.add_argument("--draws", type=int, required=True)
-    simulation.add_argument("--trials", type=int, default=1)
-    simulation.add_argument("--seed", type=int)
-    simulation.add_argument("--initial-pity", type=int, default=0)
-    simulation.add_argument("--initial-five-star-pity", type=int, default=0)
-    simulation.add_argument("--pool-config")
-    simulation.add_argument("--trace", action="store_true")
-    simulation.add_argument("--format", choices=("text", "json"), default="text")
-    simulation.epilog = "大规模Trace会保存在内存；大结果请使用网页落库后通过export-trace导出。"
-    export = commands.add_parser("export-trace")
-    export.add_argument("--database", required=True)
-    export.add_argument("--run-id", required=True)
-    export.add_argument("--output", required=True)
-    export.add_argument("--trial-from", type=int)
-    export.add_argument("--trial-to", type=int)
-    export.add_argument("--source", choices=("main", "bonus"))
-    export.add_argument("--rarity", type=int, choices=(4, 5, 6))
-    export.add_argument("--character-name")
-    export.add_argument("--unnamed-character", action="store_true")
-    export.add_argument("--source-from", type=int)
-    export.add_argument("--source-to", type=int)
+    parser = ChineseParser(prog="lottery_simulator", description="本机抽奖分析工具；使用操作系统文件权限，不要求网页登录，不自动写入网页历史。")
+    commands = parser.add_subparsers(dest="command", required=True, title="命令")
+    analyze = commands.add_parser("analyze", help="分析池绑定规则", description="本机只读分析，读取新版池配置；文件访问由操作系统权限控制。",
+                                  epilog="示例：python -m lottery_simulator analyze --pool-config configs/pools/default.json")
+    analyze.add_argument("--pool-config", help="新版池文件路径（默认使用项目默认池）")
+    analyze.add_argument("--format", choices=("text", "json"), default="text", help="输出格式：中文文本或结构化JSON")
+    simulation = commands.add_parser("simulate", help="运行模拟", description="模拟使用池绑定规则，显式参数覆盖实验文件参数，不自动写入网页历史。",
+        epilog="示例：python -m lottery_simulator simulate --experiment-config configs/experiments/default.json --draws 10 --trials 2；或 python -m lottery_simulator simulate --pool-config configs/pools/default.json --draws 10。Trace保存在内存，大结果请使用网页模拟落库。")
+    simulation.add_argument("--draws", type=_integer, help="每轮主抽数（无实验文件时必填）")
+    simulation.add_argument("--trials", type=_integer, help="实验轮数（默认1）")
+    simulation.add_argument("--seed", type=_integer, help="整数随机种子（默认随机生成）")
+    simulation.add_argument("--initial-pity", type=_integer, help="初始六星保底进度（默认0）")
+    simulation.add_argument("--initial-five-star-pity", type=_integer, help="初始五星保底进度（默认0）")
+    simulation.add_argument("--pool-config", help="显式选择新版池文件，解决实验引用")
+    simulation.add_argument("--experiment-config", help="新版实验文件路径")
+    simulation.add_argument("--pool-directory", default=str(DEFAULT_POOL_DIRECTORY), help="按ID查找引用池的目录（默认configs/pools）")
+    trace = simulation.add_mutually_exclusive_group()
+    trace.add_argument("--trace", action="store_true", default=None, help="开启逐抽Trace，覆盖文件开关")
+    trace.add_argument("--no-trace", dest="trace", action="store_false", help="关闭逐抽Trace，覆盖文件开关")
+    simulation.add_argument("--format", choices=("text", "json"), default="text", help="输出格式：中文文本或结构化JSON")
+    export = commands.add_parser("export-trace", help="本机只读Trace导出维护工具",
+        description="拥有数据库文件访问权限即可导出，不受网页登录或网页用户隔离控制；仅限可信本机维护，不自动写入网页历史。",
+        epilog="示例：python -m lottery_simulator export-trace --database /tmp/history_v5.sqlite3 --run-id 实验UUID --output /tmp/trace.jsonl")
+    export.add_argument("--database", required=True, help="可读取的本机数据库文件路径")
+    export.add_argument("--run-id", required=True, help="实验记录UUID")
+    export.add_argument("--output", required=True, help="导出文件路径")
+    export.add_argument("--trial-from", type=_integer, help="起始轮次")
+    export.add_argument("--trial-to", type=_integer, help="结束轮次")
+    export.add_argument("--source", choices=("main", "bonus"), help="来源：main主池或bonus赠送池")
+    export.add_argument("--rarity", type=_integer, choices=(4, 5, 6), help="稳定星级编号4、5、6，不受显示改名影响")
+    export.add_argument("--character-name", help="角色名称筛选")
+    export.add_argument("--unnamed-character", action="store_true", help="仅导出未配置角色名单的抽次")
+    export.add_argument("--source-from", type=_integer, help="来源内起始抽次")
+    export.add_argument("--source-to", type=_integer, help="来源内结束抽次")
     return parser
 
 
 def _write_config_summary(pool_config: dict, output: TextIO) -> None:
     five_star = pool_config["five_star"]
+    label = lambda rarity: rarity_label(rarity, pool_config.get("rarity_labels"))
     print("配置摘要：", file=output)
-    print(f"  四星角色人数：{len(pool_config['four_star_characters'])}", file=output)
-    print(f"  五星角色人数：{len(pool_config['five_star_characters'])}", file=output)
+    print(f"  {label(4)}角色人数：{len(pool_config['four_star_characters'])}", file=output)
+    print(f"  {label(5)}角色人数：{len(pool_config['five_star_characters'])}", file=output)
     print(f"  UP占比：{pool_config['up_share']:.4%}", file=output)
     pity_status = "开启" if five_star["pity_enabled"] else "关闭"
     print(
-        f"  五星保底：{pity_status}（硬保底 {five_star['hard_pity']} 抽，"
+        f"  {label(5)}保底：{pity_status}（硬保底 {five_star['hard_pity']} 抽，"
         f"基础概率 {five_star['base_probability']:.4%}）",
         file=output,
     )
-    print("  六星角色：", file=output)
+    print(f"  {label(6)}角色：", file=output)
     for character in pool_config["six_star_characters"]:
         tags = []
         if character["is_up"]:
@@ -72,8 +119,8 @@ def _write_config_summary(pool_config: dict, output: TextIO) -> None:
     print("  奖励：", file=output)
     for reward in pool_config["rewards"]:
         print(
-            f"    {reward['name']}：四星 {reward['four_star']:g}，"
-            f"五星 {reward['five_star']:g}，六星 {reward['six_star']:g}",
+            f"    {reward['name']}：{label(4)} {reward['four_star']:g}，"
+            f"{label(5)} {reward['five_star']:g}，{label(6)} {reward['six_star']:g}",
             file=output,
         )
 
@@ -161,18 +208,19 @@ def _simulation_payload(result: SimulationResult, rule, include_records: bool):
 
 
 def _write_text_analysis(payload, output: TextIO) -> None:
+    six = rarity_label(6, payload["pool_config"].get("rarity_labels"))
     print(f"规则版本：{payload['rule_version']}", file=output)
     _write_config_summary(payload["pool_config"], output)
     print(f"规则：{payload['rule']}", file=output)
-    print(f"六星平均间隔：{payload['mean']:.5f} 抽", file=output)
-    print(f"长期综合六星率：{payload['long_run_rate']:.5%}", file=output)
+    print(f"{six}平均间隔：{payload['mean']:.5f} 抽", file=output)
+    print(f"长期综合{six}率：{payload['long_run_rate']:.5%}", file=output)
     print(f"方差：{payload['variance']:.5f} 抽²", file=output)
     print(f"标准差：{payload['standard_deviation']:.5f} 抽", file=output)
     print(f"中位数：第 {payload['median']} 抽", file=output)
     print(f"众数：第 {payload['mode']} 抽", file=output)
     for level, pull in payload["quantiles"].items():
         print(f"{float(level):.0%} 分位数：第 {pull} 抽", file=output)
-    print("抽次  条件六星概率  首次出六星概率  累计概率", file=output)
+    print(f"抽次  条件{six}概率  首次出{six}概率  累计概率", file=output)
     for row in payload["probability_table"]:
         print(
             f"{row['pull']}  {row['conditional_probability']:.4%}  "
@@ -183,6 +231,7 @@ def _write_text_analysis(payload, output: TextIO) -> None:
 
 
 def _write_text_simulation(payload, output: TextIO, trace: bool) -> None:
+    label = lambda rarity: rarity_label(rarity, payload["pool_config"].get("rarity_labels"))
     print(f"规则版本：{payload['rule_version']}", file=output)
     _write_config_summary(payload["pool_config"], output)
     print(f"规则：{payload['rule']}", file=output)
@@ -191,28 +240,28 @@ def _write_text_simulation(payload, output: TextIO, trace: bool) -> None:
     print(f"总抽数：{payload['total_draws']}", file=output)
     print(f"实验轮数：{payload['trials']}", file=output)
     print(f"随机种子：{payload['seed']}", file=output)
-    print(f"初始保底：{payload['initial_pity']}", file=output)
-    print(f"初始五星保底：{payload['initial_five_star_pity']}", file=output)
+    print(f"初始{label(6)}保底：{payload['initial_pity']}", file=output)
+    print(f"初始{label(5)}保底：{payload['initial_five_star_pity']}", file=output)
     print(f"初始主池累计抽数：{payload['initial_main_draws']}", file=output)
     print(f"结束主池累计抽数：{payload['final_main_draws']}", file=output)
-    print(f"主池平均六星数：{payload['mean_main_six_stars']:.6f}", file=output)
-    print(f"赠送平均六星数：{payload['mean_bonus_six_stars']:.6f}", file=output)
-    print(f"总平均六星数：{payload['mean_six_stars']:.6f}", file=output)
-    print(f"至少一个六星：{payload['at_least_one_rate']:.4%}", file=output)
+    print(f"主池平均{label(6)}数：{payload['mean_main_six_stars']:.6f}", file=output)
+    print(f"赠送平均{label(6)}数：{payload['mean_bonus_six_stars']:.6f}", file=output)
+    print(f"总平均{label(6)}数：{payload['mean_six_stars']:.6f}", file=output)
+    print(f"至少一个{label(6)}：{payload['at_least_one_rate']:.4%}", file=output)
     print(
-        f"主池理论六星期望：{payload['theoretical_expected_main_count']:.6f}",
+        f"主池理论{label(6)}期望：{payload['theoretical_expected_main_count']:.6f}",
         file=output,
     )
     print(
-        f"赠送理论六星期望：{payload['theoretical_expected_bonus_count']:.6f}",
+        f"赠送理论{label(6)}期望：{payload['theoretical_expected_bonus_count']:.6f}",
         file=output,
     )
-    print(f"总理论六星期望：{payload['theoretical_expected_count']:.6f}", file=output)
+    print(f"总理论{label(6)}期望：{payload['theoretical_expected_count']:.6f}", file=output)
     print(f"期望误差：{payload['mean_count_error']:+.6f}", file=output)
     relative_error = payload["mean_count_relative_error"]
     relative_error_text = "不可用" if relative_error is None else f"{relative_error:+.4%}"
     print(f"期望相对误差：{relative_error_text}", file=output)
-    print("六星数量分布：", file=output)
+    print(f"{label(6)}数量分布：", file=output)
     for count, frequency in sorted(payload["count_distribution"].items()):
         print(f"  {count} 个：{frequency / payload['trials']:.4%}", file=output)
     observed = payload["observed_mean_interval"]
@@ -227,12 +276,12 @@ def _write_text_simulation(payload, output: TextIO, trace: bool) -> None:
         summary = payload["source_summaries"][source]
         print(f"{source_name}星级：", file=output)
         for rarity, count in sorted(summary["mean_rarity_counts"].items()):
-            print(f"  {rarity}星：{count:.6f}", file=output)
-        print(f"{source_name}六星类别：", file=output)
+            print(f"  {label(rarity)}：{count:.6f}", file=output)
+        print(f"{source_name}{label(6)}类别：", file=output)
         category_names = {
-            "up": "UP六星",
-            "other_limited": "其他限定六星",
-            "standard": "常驻六星",
+            "up": f"UP {label(6)}",
+            "other_limited": f"其他限定{label(6)}",
+            "standard": f"常驻{label(6)}",
         }
         for category, count in summary["mean_six_star_categories"].items():
             print(f"  {category_names.get(category, category)}：{count:.6f}", file=output)
@@ -246,16 +295,16 @@ def _write_text_simulation(payload, output: TextIO, trace: bool) -> None:
             print(f"  {name}：{summary['mean_rewards'][name]:.6f}", file=output)
         print(f"{source_name}双保底：", file=output)
         pity_names = {
-            "five_star": "五星保底",
-            "six_star_hard": "六星硬保底",
+            "five_star": f"{label(5)}保底",
+            "six_star_hard": f"{label(6)}硬保底",
         }
         for pity_name, count in summary["mean_pity_triggers"].items():
             print(f"  {pity_names.get(pity_name, pity_name)}：{count:.6f}", file=output)
     if trace:
         print(
             "轮次  抽次  来源  来源序号  主池累计抽数  "
-            "星级  角色  奖励  4/5/6星概率  主池前双保底  主池后双保底  来源池前双保底  "
-            "来源池后双保底  五星保底触发  六星硬保底触发",
+            f"稀有度  角色  奖励  {label(4)}/{label(5)}/{label(6)}概率  主池前双保底  主池后双保底  来源池前双保底  "
+            f"来源池后双保底  {label(5)}保底触发  {label(6)}硬保底触发",
             file=output,
         )
         for record in payload["records"]:
@@ -272,7 +321,7 @@ def _write_text_simulation(payload, output: TextIO, trace: bool) -> None:
             print(
                 f"{record['trial_index']}  {record['draw_index']}  {source}  {record['source_index']}  "
                 f"{record['main_draws_completed']}  "
-                f"{outcome['rarity']}星  {outcome['character_name'] or '未配置角色名单'}  "
+                f"{label(outcome['rarity'])}  {outcome['character_name'] or '未配置角色名单'}  "
                 f"{rewards}  {probabilities['four_star']:.1%}/"
                 f"{probabilities['five_star']:.1%}/{probabilities['six_star']:.1%}  "
                 f"主池前{state_text(record['main_state_before'])}  "
@@ -300,53 +349,60 @@ def main(argv=None, stdout=None) -> int:
                 unnamed_character=args.unnamed_character,
                 source_from=args.source_from, source_to=args.source_to,
             )
-        except (OSError, TypeError, ValueError) as error:
-            parser.error(str(error))
+        except (OSError, TypeError, ValueError):
+            parser.error("导出失败：请检查本机文件权限、数据库版本及筛选参数")
         return 0
     try:
-        config = load_pool_config(args.pool_config)
-    except FileNotFoundError:
-        parser.error("配置文件不存在或不可读取")
-    except json.JSONDecodeError:
-        parser.error("配置文件 JSON 格式错误")
-    except OSError:
-        parser.error("配置文件不存在或不可读取")
-    except (TypeError, ValueError):
-        parser.error("配置文件内容无效：请检查概率、角色、权重、奖励和保底配置")
-    try:
-        rule = RULES[args.rule](config=config)
-    except ValueError as error:
+        experiment = None
+        if args.command == "simulate" and args.experiment_config:
+            experiment = load_experiment_document(read_config_json(args.experiment_config))
+        if args.pool_config or experiment is None:
+            document = load_pool_document(read_config_json(args.pool_config or DEFAULT_POOL_PATH))
+        else:
+            document = resolve_pool_reference(experiment.pool_ref, args.pool_directory,
+                                              interactive=sys.stdin.isatty())
+        rule = RULES[document.rule_name](config=document.to_pool_config())
+    except (TypeError, ValueError) as error:
         parser.error(str(error))
     if args.command == "analyze":
         payload = _analysis_payload(rule)
+        payload["pool_document"] = document.to_dict()
         if args.format == "json":
             json.dump(payload, output, ensure_ascii=False, indent=2)
             print(file=output)
         else:
             _write_text_analysis(payload, output)
         return 0
+    parameters = (dict(experiment.parameters) if experiment else
+                  {"draws": None, "trials": 1, "seed": None, "initial_pity": 0,
+                   "initial_five_star_pity": 0, "trace": False})
+    for key in parameters:
+        explicit = getattr(args, key)
+        if explicit is not None:
+            parameters[key] = explicit
+    if parameters["draws"] is None:
+        parser.error("无实验文件时必须指定--draws每轮主抽数")
     try:
-        rule.rarity_probabilities(
-            DrawState(args.initial_pity, args.initial_five_star_pity)
-        )
-    except (TypeError, ValueError):
-        parser.error("初始保底参数无效：请检查六星与五星保底进度范围")
+        validate_experiment_parameters(parameters, document)
+    except (TypeError, ValueError) as error:
+        parser.error(str(error))
     try:
         result = simulate(
             rule,
-            args.draws,
-            args.trials,
-            args.seed,
-            args.initial_pity,
-            initial_five_star_pity=args.initial_five_star_pity,
-            collect_records=args.trace,
+            parameters["draws"],
+            parameters["trials"],
+            parameters["seed"],
+            parameters["initial_pity"],
+            initial_five_star_pity=parameters["initial_five_star_pity"],
+            collect_records=parameters["trace"],
         )
     except (TypeError, ValueError):
         parser.error("模拟参数无效：请检查抽数、轮数、随机种子等参数")
-    payload = _simulation_payload(result, rule, include_records=args.trace)
+    payload = _simulation_payload(result, rule, include_records=parameters["trace"])
+    payload["pool_document"] = document.to_dict()
     if args.format == "json":
         json.dump(payload, output, ensure_ascii=False, indent=2)
         print(file=output)
     else:
-        _write_text_simulation(payload, output, args.trace)
+        _write_text_simulation(payload, output, parameters["trace"])
     return 0

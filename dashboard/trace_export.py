@@ -4,7 +4,6 @@ import os
 from pathlib import Path
 import tempfile
 
-from dashboard.repository import HistoryRepository
 from dashboard.trace_store import TraceFilter
 from lottery_simulator.formats import TRACE_EXPORT_FORMAT_VERSION
 
@@ -33,6 +32,18 @@ def export_trace(database, run_id, output, **filter_values):
     output = Path(output).resolve()
     if output in {Path(str(database) + suffix) for suffix in ("", "-journal", "-wal", "-shm")}:
         raise ValueError("输出路径不能是历史数据库或其伴随文件")
+    # The standalone CLI has no Django startup. Bind its explicit --database
+    # before importing ORM models; an initialized process cannot switch DBs.
+    from django.apps import apps
+    from django.conf import settings
+    import django
+    if not apps.ready:
+        os.environ.setdefault("DJANGO_SETTINGS_MODULE", "webapp.settings")
+        os.environ["LOTTERY_DB_PATH"] = str(database)
+        django.setup()
+    if Path(settings.DATABASES["default"]["NAME"]).resolve() != database:
+        raise ValueError("指定数据库与当前Django设置不一致")
+    from dashboard.repository import HistoryRepository
     repository = HistoryRepository(database)
     run = repository.get_run(run_id)
     if run is None:

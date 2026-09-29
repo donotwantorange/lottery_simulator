@@ -1,7 +1,0 @@
-[theme]
-base = "light"
-
-[client]
-showErrorDetails = "none"
-
-# Set server.address explicitly in the deployment command.

@@ -10,6 +10,15 @@ from unittest.mock import patch
 from lottery_simulator.cli import RULES, main
 from lottery_simulator.rules.rule_1 import Rule1
 from lottery_simulator.rules.pool_config import load_pool_config
+from lottery_simulator.config_documents import DEFAULT_POOL_PATH, read_config_json
+
+
+def write_pool(path, core):
+    document = read_config_json(DEFAULT_POOL_PATH)
+    document["rarity_labels"] = core.get("rarity_labels", document["rarity_labels"])
+    document["pool_config"] = {key: value for key, value in core.items()
+                               if key not in ("format_version", "rarity_labels")}
+    path.write_text(json.dumps(document, ensure_ascii=False), encoding="utf-8")
 
 
 class DelayedSixStarRule(Rule1):
@@ -32,7 +41,7 @@ class CliTest(unittest.TestCase):
         payload = json.loads(output)
         self.assertAlmostEqual(payload["mean"], 53.89927355371174)
         self.assertEqual(payload["hard_pity"], 80)
-        self.assertEqual(payload["result_format_version"], 2)
+        self.assertEqual(payload["result_format_version"], 3)
         self.assertEqual(payload["rule_version"], "2.0")
         self.assertNotIn("sampling_version", payload)
         self.assertNotIn("rng_algorithm", payload)
@@ -49,7 +58,7 @@ class CliTest(unittest.TestCase):
         payload = json.loads(output)
         self.assertEqual(payload["rule"], "rule1")
         self.assertEqual(payload["seed"], 42)
-        self.assertEqual(payload["result_format_version"], 2)
+        self.assertEqual(payload["result_format_version"], 3)
         self.assertEqual(payload["sampling_version"], 1)
         self.assertEqual(payload["rng_algorithm"], "python.random.Random")
         self.assertIsInstance(payload["python_implementation"], str)
@@ -104,20 +113,20 @@ class CliTest(unittest.TestCase):
 
         self.assertEqual(code, 0)
         self.assertIn(
-            "星级  角色  奖励  4/5/6星概率  主池前双保底  主池后双保底  来源池前双保底  "
+            "稀有度  角色  奖励  四星/五星/六星概率  主池前双保底  主池后双保底  来源池前双保底  "
             "来源池后双保底  五星保底触发  六星硬保底触发",
             output,
         )
         for line in (
-            "1  1  主池  1  1  4星  未配置角色名单  奖励A=1, 奖励B=0  "
+            "1  1  主池  1  1  四星  未配置角色名单  奖励A=1, 奖励B=0  "
             "91.2%/8.0%/0.8%  主池前(0,0)  主池后(1,1)  来源池前(0,0)  来源池后(1,1)  否  否",
-            "1  20  主池  20  20  6星  常驻-F  奖励A=25, 奖励B=10  "
+            "1  20  主池  20  20  六星  常驻-F  奖励A=25, 奖励B=10  "
             "91.2%/8.0%/0.8%  主池前(19,6)  主池后(0,0)  来源池前(19,6)  来源池后(0,0)  否  否",
-            "1  30  主池  30  30  5星  未配置角色名单  奖励A=5, 奖励B=2  "
+            "1  30  主池  30  30  五星  未配置角色名单  奖励A=5, 奖励B=2  "
             "0.0%/99.2%/0.8%  主池前(9,9)  主池后(10,0)  来源池前(9,9)  来源池后(10,0)  是  否",
-            "1  31  赠送  1  30  4星  未配置角色名单  奖励A=1, 奖励B=0  "
+            "1  31  赠送  1  30  四星  未配置角色名单  奖励A=1, 奖励B=0  "
             "91.2%/8.0%/0.8%  主池前(10,0)  主池后(10,0)  来源池前(0,0)  来源池后(1,1)  否  否",
-            "1  40  赠送  10  30  5星  未配置角色名单  奖励A=5, 奖励B=2  "
+            "1  40  赠送  10  30  五星  未配置角色名单  奖励A=5, 奖励B=2  "
             "0.0%/99.2%/0.8%  主池前(10,0)  主池后(10,0)  来源池前(9,9)  来源池后(10,0)  是  否",
         ):
             with self.subTest(line=line.split("  ", 1)[0]):
@@ -186,12 +195,13 @@ class CliTest(unittest.TestCase):
                 self.assertIn(f"{level}% 分位数：第 {draw} 抽", output)
 
     def test_zero_expectation_simulation_formats(self):
-        RULES[DelayedSixStarRule.name] = DelayedSixStarRule
-        self.addCleanup(RULES.pop, DelayedSixStarRule.name)
+        previous_rule = RULES["rule1"]
+        RULES["rule1"] = DelayedSixStarRule
+        self.addCleanup(RULES.__setitem__, "rule1", previous_rule)
         for output_format in ("json", "text"):
             with self.subTest(output_format=output_format):
                 code, output = self.run_cli(
-                    "simulate", "--rule", DelayedSixStarRule.name,
+                    "simulate",
                     "--draws", "1", "--trials", "2", "--seed", "42",
                     "--format", output_format,
                 )
@@ -214,8 +224,8 @@ class CliTest(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertIn("抽次", output)
         self.assertIn("来源池前双保底", output)
-        self.assertIn("1  1  主池  1  1  4星", output)
-        self.assertIn("1  2  主池  2  2  5星", output)
+        self.assertIn("1  1  主池  1  1  四星", output)
+        self.assertIn("1  2  主池  2  2  五星", output)
 
     def test_trace_supports_multiple_trials(self):
         code, output = self.run_cli(
@@ -247,7 +257,7 @@ class CliTest(unittest.TestCase):
             path = Path(directory) / "pool.json"
             raw = load_pool_config().to_dict()
             raw["up_share"] = 0.6
-            path.write_text(json.dumps(raw, ensure_ascii=False), encoding="utf-8")
+            write_pool(path, raw)
             code, output = self.run_cli(
                 "simulate", "--draws", "10", "--trials", "2", "--seed", "42",
                 "--pool-config", str(path), "--initial-five-star-pity", "3",
@@ -271,7 +281,7 @@ class CliTest(unittest.TestCase):
             raw["six_star_characters"] = raw["six_star_characters"][:1]
             raw["six_star_characters"][0]["name"] = "独占角色"
             raw["rewards"] = [{"name": "独占奖励", "four_star": 1, "five_star": 2, "six_star": 3}]
-            path.write_text(json.dumps(raw, ensure_ascii=False), encoding="utf-8")
+            write_pool(path, raw)
             code, json_output = self.run_cli(
                 "analyze", "--pool-config", str(path), "--format", "json"
             )
@@ -289,7 +299,7 @@ class CliTest(unittest.TestCase):
         code, output = self.run_cli("simulate", "--draws", "30", "--seed", "42")
         self.assertEqual(code, 0)
         for label in (
-            "配置摘要", "主池星级", "赠送星级", "总计星级", "六星类别", "UP六星",
+            "配置摘要", "主池星级", "赠送星级", "总计星级", "六星类别", "UP 六星",
             "其他限定六星", "常驻六星", "角色", "奖励", "双保底", "五星保底",
             "六星硬保底",
         ):
@@ -309,7 +319,7 @@ class CliTest(unittest.TestCase):
             invalid = Path(directory) / "invalid.json"
             raw = load_pool_config().to_dict()
             raw["up_share"] = 1.5
-            invalid.write_text(json.dumps(raw), encoding="utf-8")
+            write_pool(invalid, raw)
             with self.assertRaises(SystemExit):
                 self.run_cli("analyze", "--pool-config", str(invalid))
 
@@ -320,7 +330,7 @@ class CliTest(unittest.TestCase):
             path = Path(directory) / "disabled.json"
             raw = load_pool_config().to_dict()
             raw["five_star"]["pity_enabled"] = False
-            path.write_text(json.dumps(raw), encoding="utf-8")
+            write_pool(path, raw)
             with self.assertRaises(SystemExit):
                 self.run_cli(
                     "simulate", "--draws", "1", "--pool-config", str(path),
@@ -363,7 +373,7 @@ class CliTest(unittest.TestCase):
             path.write_text('{"secret": "do-not-leak"', encoding="utf-8")
             completed = self.run_module_cli("analyze", "--pool-config", str(path))
         self.assertEqual(completed.returncode, 2)
-        self.assertIn("配置文件 JSON 格式错误", completed.stderr)
+        self.assertIn("有效的UTF-8 JSON", completed.stderr)
         self.assertNotIn("do-not-leak", completed.stderr)
         self.assertNotIn("Traceback", completed.stderr)
 
@@ -372,7 +382,7 @@ class CliTest(unittest.TestCase):
             path = Path(directory) / "invalid.json"
             raw = load_pool_config().to_dict()
             raw["up_share"] = 1.5
-            path.write_text(json.dumps(raw), encoding="utf-8")
+            write_pool(path, raw)
             completed = self.run_module_cli(
                 "simulate", "--draws", "1", "--pool-config", str(path)
             )
@@ -389,7 +399,7 @@ class CliTest(unittest.TestCase):
                 name="private-character", up_weight=10 ** 400,
             )
             path = Path(directory) / "huge.json"
-            path.write_text(json.dumps(raw), encoding="utf-8")
+            write_pool(path, raw)
             completed = self.run_module_cli("analyze", "--pool-config", str(path))
         self.assertEqual(completed.returncode, 2)
         self.assertEqual(completed.stdout, "")
@@ -404,7 +414,7 @@ class CliTest(unittest.TestCase):
                 raw = load_pool_config().to_dict()
                 raw["five_star"].update(base_probability=probability, hard_pity=threshold)
                 path = Path(directory) / "invalid.json"
-                path.write_text(json.dumps(raw), encoding="utf-8")
+                write_pool(path, raw)
                 completed = self.run_module_cli(
                     "simulate", "--draws", "30", "--pool-config", str(path),
                 )
@@ -452,6 +462,59 @@ class CliTest(unittest.TestCase):
         self.assertIn("模拟参数无效", completed.stderr)
         self.assertNotIn("保底参数无效", completed.stderr)
         self.assertNotIn("Traceback", completed.stderr)
+
+    def test_experiment_parameters_are_overridden_only_when_explicit(self):
+        path = DEFAULT_POOL_PATH.parent.parent / "experiments/default.json"
+        code, output = self.run_cli("simulate", "--experiment-config", str(path),
+                                    "--draws", "1", "--trials", "2", "--seed", "7",
+                                    "--trace", "--format", "json")
+        payload = json.loads(output)
+        self.assertEqual(code, 0)
+        self.assertEqual((payload["draws"], payload["trials"], payload["seed"]), (1, 2, 7))
+        self.assertTrue(payload["trace_enabled"])
+        self.assertEqual(payload["pool_document"]["id"], read_config_json(DEFAULT_POOL_PATH)["id"])
+
+    def test_no_trace_explicitly_overrides_true_file_switch(self):
+        with TemporaryDirectory() as directory:
+            raw = read_config_json(DEFAULT_POOL_PATH.parent.parent / "experiments/default.json")
+            raw["parameters"].update(draws=1, trials=1, trace=True)
+            path = Path(directory, "experiment.json")
+            path.write_text(json.dumps(raw), encoding="utf-8")
+            _, output = self.run_cli("simulate", "--experiment-config", str(path),
+                                     "--no-trace", "--format", "json")
+            payload = json.loads(output)
+            self.assertFalse(payload["trace_enabled"])
+            self.assertNotIn("records", payload)
+
+    def test_rule_override_is_removed(self):
+        completed = self.run_module_cli("simulate", "--draws", "1", "--rule", "rule1")
+        self.assertEqual(completed.returncode, 2)
+        self.assertIn("无法识别的参数", completed.stderr)
+
+    def test_rarity_names_are_used_in_text_and_snapshot(self):
+        with TemporaryDirectory() as directory:
+            raw = load_pool_config().to_dict()
+            raw["rarity_labels"] = {"4": "R", "5": "SR", "6": "SSR"}
+            path = Path(directory, "pool.json")
+            write_pool(path, raw)
+            _, output = self.run_cli("simulate", "--pool-config", str(path),
+                                     "--draws", "1", "--seed", "42", "--trace")
+            self.assertIn("UP SSR", output)
+            self.assertIn("SR保底", output)
+            self.assertIn("R/SR/SSR概率", output)
+            self.assertNotIn("六星", output)
+
+    def test_noninteractive_reference_failure_requires_explicit_pool(self):
+        with TemporaryDirectory() as directory:
+            raw = read_config_json(DEFAULT_POOL_PATH.parent.parent / "experiments/default.json")
+            raw["pool_ref"]["id"] = "a33e8fb2-6ca9-4f89-9d7f-e4975c5c4aaa"
+            path = Path(directory, "experiment.json")
+            path.write_text(json.dumps(raw), encoding="utf-8")
+            completed = self.run_module_cli("simulate", "--experiment-config", str(path),
+                                            "--draws", "1", "--trials", "1")
+            self.assertEqual(completed.returncode, 2)
+            self.assertIn("--pool-config", completed.stderr)
+            self.assertEqual(completed.stdout, "")
 
 
 if __name__ == "__main__":

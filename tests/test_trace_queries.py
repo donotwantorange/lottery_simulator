@@ -1,13 +1,9 @@
-from contextlib import closing
 from dataclasses import replace
-import sqlite3
 from tempfile import TemporaryDirectory
 from pathlib import Path
 import unittest
-from uuid import uuid4
 
 from dashboard.limits import TraceLimits
-from dashboard.repository import HistoryRepository
 from dashboard.trace_store import TraceFilter, TraceReader, TraceWriter
 from lottery_simulator.engine import simulate
 from lottery_simulator.rules.rule_1 import Rule1
@@ -117,34 +113,6 @@ class TraceQueriesTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             reader.position_counts(source="main", trial_from=1, trial_to=3,
                                    source_from=1, source_to=1001)
-
-    def test_history_factory_reads_same_rows_and_rejects_missing_target(self):
-        history_path = self.root / "history.sqlite3"
-        repository = HistoryRepository(history_path)
-        repository.initialize()
-        run_id = str(uuid4())
-        with closing(sqlite3.connect(history_path)) as history, \
-                closing(sqlite3.connect(self.trace_path)) as trace:
-            history.execute(
-                "INSERT INTO simulation_runs VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (run_id, "2026-09-20T00:00:00+00:00", "rule1", "2.0", 81, 3, 29, 0,
-                 "42", 1, 273, "{}", "{}", 4),
-            )
-            history.executemany(
-                "INSERT INTO draw_records VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                ((run_id, *row) for row in trace.execute(
-                    "SELECT trial_index, draw_index, source, source_index, rarity, "
-                    "character_name, record_json FROM records"
-                )),
-            )
-            history.commit()
-        rows, total = repository.get_trace_reader(run_id).query_records(
-            TraceFilter(source="main", source_from=81, source_to=81), limit=50,
-        )
-        self.assertEqual((len(rows), total), (3, 3))
-        with self.assertRaises(ValueError):
-            repository.get_trace_reader(str(uuid4())).query_records(TraceFilter(), limit=50)
-
 
 if __name__ == "__main__":
     unittest.main()

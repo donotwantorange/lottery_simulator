@@ -1,1 +1,4 @@
-streamlit[auth]==1.63.0
+altair==6.2.2
+Django==5.2.17
+djangorestframework==3.18.1
+gunicorn==26.2.0

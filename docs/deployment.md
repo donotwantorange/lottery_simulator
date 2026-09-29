@@ -1,196 +1,51 @@
-# Linux 公网部署与运维
+# 部署接口与运维说明
 
-## 范围与前提
+本文记录当前 Django＋React 实现对应的生产接口，不表示已在真实服务器部署或验收。生产需要 HTTPS 反向代理、静态前端服务、Gunicorn Web 服务和本机任务 worker；本次不连接服务器、不启动公网服务。
 
-适用于个人白名单使用的单实例 Streamlit 仪表盘。服务器需要 Linux、Docker Engine、Docker Compose v2、systemd，以及可管理的公网域名。本文不自动安装系统软件。
+## 组件与请求分流
 
-部署目录以 `/opt/lottery-simulator` 为例；若位置不同，所有 `cd` 和备份 service 的 `WorkingDirectory` 都必须改成实际目录。以下命令在服务器上的项目根目录执行。Docker 命令需要有 Docker 权限的运维账号；该权限等价于高权限，不授予不可信账号。
+- `frontend/dist/`：由 Vite 构建的静态资源。生产 Web 服务器提供静态文件；SPA 页面路径回退到 `index.html`。
+- `/api/`：转发到 `webapp.wsgi:application` 对应的 Gunicorn 服务。API 路径不能回退到前端 HTML。
+- 模拟任务：由 Django 接受后在独立 worker 进程执行。不要在 HTTP 请求里执行模拟；不要因 Web 服务重启而清理或误杀已接受的任务。
+- SQLite：默认 `data/history_v5.sqlite3`，任务状态和导出临时目录分别为 `data/jobs_v5/`、`data/exports_v5/`。三个位置均需为服务账号可写的私有持久目录。
 
-✅ 部署接口已实现、静态合同已验证，并已随多轮Trace功能于2026-09-22本地合并到`master`；配置固定生产/OIDC，只有 Caddy 发布80/443，且Caddyfile声明 `Strict-Transport-Security: max-age=31536000; includeSubDomains`。本地合并不代表服务器已经升级，当前未在线推送，也未执行真实部署或旧数据切换。详见[本地合并记录](changes/2026-09-22-multi-trial-trace-ui-local-merge.md)。⚠️当前开发环境没有Docker/Caddy，镜像构建、Compose官方解析和运行、卷权限、自动证书、HSTS实际响应与公网OIDC均为“服务器现场未验”；下面是未来部署时执行的步骤，不是本轮成功记录。
+本地开发时 Vite 在 `127.0.0.1:5173` 提供网页，并把 `/api` 代理至 `127.0.0.1:8000`。生产由反向代理保证浏览器只使用同一个 HTTPS 主机；不需要 CORS。前端构建变量 `VITE_*` 会进入公开资源，绝不能放密钥、数据库路径凭据或其他私有值。
 
-## 1. 域名、端口和认证
+## 生产配置要求
 
-1. 为域名设置指向服务器公网 IPv4 的 DNS A 记录。只有实际可达的 IPv6 才设置 AAAA；错误的 AAAA 会导致部分客户端或证书校验失败。
-2. 云安全组和主机防火墙放行 TCP 80、443；保持 SSH 管理通道。不要向公网放行 8501，也不要给 Compose 的 app 增加 `ports`。
-3. 在 OIDC 提供商注册 Web 应用，回调地址精确设为 `https://${DOMAIN}/oauth2callback`（将 `${DOMAIN}` 换成真实域名，不保留占位符）。取得 client ID、client secret 和 HTTPS discovery metadata URL；提供商需要返回允许登录用户的 `email` claim。
+至少设置并持久保存以下 Django 环境值：
 
-项目根目录新建 `.env`（不要提交）：
-
-```dotenv
-DOMAIN=lottery.example.com
-ALLOWED_EMAILS=owner@example.com,another@example.com
+```text
+LOTTERY_ENV=production
+SECRET_KEY=<高熵随机值>
+LOTTERY_ALLOWED_HOSTS=<正式主机名>
+LOTTERY_DB_PATH=<私有持久路径>/history_v5.sqlite3
+LOTTERY_JOBS_DIR=<私有持久路径>/jobs_v5
+LOTTERY_EXPORTS_DIR=<私有持久路径>/exports_v5
 ```
 
-只有这两个变量从 `.env` 注入。`DOMAIN` 仅填主机名，不带协议、路径或端口。白名单是逗号分隔的完整邮箱，代码规范化大小写并精确匹配；缺少白名单会拒绝访问。Compose 的 `${...:?}` 也会拒绝缺少或为空的变量。不要通过修改 Compose 关闭生产认证。
+生产模式缺少 `SECRET_KEY` 会拒绝启动。Compose 将 `LOTTERY_ALLOWED_HOSTS` 限定为正式域名，并将该 HTTPS Origin 放入 `LOTTERY_CSRF_TRUSTED_ORIGINS`；Caddy保留原Host并转发 `X-Forwarded-Proto`。当前 Django settings 未配置 `SECURE_PROXY_SSL_HEADER`，因此不把任意转发头当作安全判定依据；Secure Cookie 由 `LOTTERY_ENV=production` 明确启用。Cookie 保持 HttpOnly、SameSite=Lax。不要公开 SQLite、任务目录、备份或环境文件。
 
-创建私密 OIDC 配置：
+仓库的 Docker Compose 接口由 `app` 和 `caddy` 两个服务组成。`.env` 至少提供 `DOMAIN` 和高熵 `SECRET_KEY`。发布前安装锁文件依赖并构建前端：`npm --prefix frontend ci && npm --prefix frontend run build`；随后执行 `docker compose config --quiet` 检查配置，再按维护流程迁移目标数据库。`frontend/dist/` 以只读目录挂载给 Caddy。`app` 只在内部网络监听8000并由 Gunicorn 提供 WSGI；只有 Caddy发布80/443。Caddy把裸 `/api` 及 `/api/*` 转发到 Gunicorn，其余请求从 `frontend/dist/` 服务静态资源并将前端路径回退到 `index.html`；API不存在的路径仍由 Django 返回404，不会回退前端页面。Vite带内容哈希的 `/assets/*` 设置一年 immutable 缓存，`index.html` 设置 no-cache；私有 API 响应不应被共享缓存。生产不运行 Django `runserver`、Vite dev 或 Vite preview。
+
+镜像以 `0700` 创建数据库、任务、导出和备份目录，容器用户为非root服务账号。Gunicorn使用2个gthread worker、每进程4个请求线程、120秒超时；每个WSGI进程默认只有1个并发导出槽，因此单容器最多两个长下载同时进行，其余线程仍可处理控制请求。导出槽是进程内限制，不是跨进程全局队列。改动 Django 配置、代码或依赖后按服务管理器重启 Web 服务；重启 Web 不应自动删除任务目录或终止已接受 worker。更新前确认进程管理方式能分别管理 Web 和 worker。完整停机/维护应先停止接收新任务，再等待或明确取消 worker，最后停止 Web。
+
+## 数据库与备份
+
+本版本使用 Django migration 管理 v5 schema。迁移前先验证目标 `LOTTERY_DB_PATH` 是预期的 v5 路径；不要将新版本指向旧 Streamlit 数据库，也不要自动迁移旧历史。任务14尚未完成真实切换，因此不要把下方接口当作旧数据清理许可。
+
+备份脚本可对运行中的 SQLite 源库执行在线备份：
 
 ```bash
-cd /opt/lottery-simulator
-cp .streamlit/secrets.example.toml .streamlit/secrets.toml
-chmod 600 .env .streamlit/secrets.toml
-python3 -c 'import secrets; print(secrets.token_urlsafe(48))'
+python3 scripts/backup_db.py /srv/lottery/data/history_v5.sqlite3 /srv/lottery/backups/lottery-v5-$(date +%F-%H%M%S).sqlite3
 ```
 
-把上一步生成的随机值填入 `cookie_secret`，用编辑器设置 `.streamlit/secrets.toml`。生产启动会拒绝缺失、空白或 UTF-8 字节数少于 32 的 `cookie_secret`，并拒绝缺失或空白的 OIDC 必填字段；长度检查不能替代使用高熵随机值：
+备份包含账号、密码哈希、会话、角色池、配置和已提交历史。它不包含 `jobs_v5/` 或 `exports_v5/`。脚本成功时输出 `Backup integrity_check: ok`，目标文件权限设置为 `0600`。备份目录应限制为服务/运维账号可访问，并复制到受控异机位置；不得放入静态网站目录或提交 Git。
 
-```toml
-[auth]
-redirect_uri = "https://lottery.example.com/oauth2callback"
-cookie_secret = "替换为随机长密钥"
-client_id = "替换为提供商客户端ID"
-client_secret = "替换为提供商客户端密钥"
-server_metadata_url = "https://identity.example.com/.well-known/openid-configuration"
-expose_tokens = []
-```
+恢复前停止 Web、worker 和定时备份，保存当前数据库副本，再恢复明确选定的 v5 备份。检查 `PRAGMA integrity_check` 为 `ok`，启动后验证账号登录、历史读取和小型模拟写入。恢复不会回滚或恢复任务目录；若任务状态与恢复后的数据库不一致，先保留目录并调查，不能递归清理数据目录。
 
-该 TOML 不展开环境变量，回调必须与真实域名和提供商注册值完全一致。不要在日志、截图或提交中泄露密钥。容器以 UID 10001 运行，因此首次启动前赋予该 UID 文件读取权限；以后编辑需使用有权限的管理员：
+仓库提供的 `deploy/lottery-backup.service` 与 `.timer` 是 systemd 备份接口示例，假设 Docker Compose 服务名 `app` 和容器路径 `/app/data`、`/app/backups`。它们已与当前 Compose 配置对齐，使用 `history_v5.sqlite3` 与 `lottery-v5-` 前缀；用于非 Compose 的本机 Gunicorn 部署时需由维护者适配真实路径。本轮不安装或执行 systemd 单元。
 
-```bash
-sudo chown 10001:10001 .streamlit/secrets.toml
-sudo chmod 600 .streamlit/secrets.toml
-```
+## 未验证事项
 
-secrets 只读挂载，不进入镜像。`.env`、数据库、备份、私钥以及 `*.pem`、`*.key`、`*.crt`、`*.cer`、`*.p12`、`*.pfx` 证书/密钥文件均由 `.dockerignore` 排除；默认数据和备份路径也由 `.gitignore` 排除。证书实际保存到 Docker 命名卷，不在源码目录中。
-
-## 2. 构建与启动
-
-```bash
-docker compose config --quiet
-docker compose config
-docker compose up -d --build
-docker compose ps
-docker compose logs --tail=100 app caddy
-```
-
-检查解析结果：app 无宿主机端口；只有 Caddy 映射 `80:80`、`443:443`；app 的 `APP_ENVIRONMENT=production`、`APP_AUTH_MODE=oidc`。不要将解析结果分享给无关人员（其中含白名单）。Caddy 等待 app 健康后启动，自动管理 HTTPS 并代理 `app:8501`；无需关闭 Streamlit 的 XSRF/CORS 防护。
-
-镜像固定 `python:3.12.14-slim-trixie`，Caddy 固定 `caddy:2.11.4-alpine`，Python 依赖来自 `requirements.txt`。`EXPOSE 8501` 仅是镜像元数据，不发布端口。
-
-持久化路径：
-
-| 命名卷 | 容器路径 | 内容 |
-| --- | --- | --- |
-| `lottery_data` | app `/app/data` | `lottery_v4.sqlite3`、任务文件 `jobs_v4/` |
-| `lottery_backups` | app `/app/backups` | SQLite 备份 |
-| `caddy_data` | Caddy `/data` | 证书、私钥及 ACME 状态 |
-| `caddy_config` | Caddy `/config` | Caddy 持久配置 |
-
-Trace 限制通过环境变量配置：`LOTTERY_MAX_TRACE_RECORDS` 默认 `1000000`，`LOTTERY_MAX_TRACE_DOWNLOAD_RECORDS` 默认 `10000`。前者按每轮主抽和赠送抽的总记录数计算，后者限制网页一次导出的匹配记录数；设置必须是正整数。修改 Compose 环境或容器环境后需要重启 app（例如 `docker compose up -d app`）才会生效，不能在运行中的任务中途改变其准入结果。
-
-实际卷名会带 Compose 项目前缀。升级和恢复时保持同一项目目录/项目名，避免误用新空卷。不要执行 `docker compose down -v`，它会删除持久卷。
-
-Compose 显式设置 `LOTTERY_DATA_DIR=/app/data`、`LOTTERY_DB_PATH=/app/data/lottery_v4.sqlite3`。页面和 worker 共用这个数据库路径，定时备份也使用它。非容器开发未设置 `LOTTERY_DB_PATH` 时使用 `LOTTERY_DATA_DIR/history_v4.sqlite3`，任务状态使用同目录下的 `jobs_v4/`。历史数据库只接受 schema v4；旧的 v1/v2/v3 库（包括旧 `data/history.sqlite3` 或已存在卷中的 `/app/data/lottery.sqlite3`）不读取、不迁移、不覆盖，也不自动删除；需要保留它时请单独备份。自定义数据库路径时，父目录需已存在且可写。
-
-## 3. 健康检查和公网验收
-
-```bash
-docker compose exec -T app python3 -c "import urllib.request; r=urllib.request.urlopen('http://127.0.0.1:8501/_stcore/health', timeout=5); print(r.status, r.read().decode())"
-docker compose logs --since=10m app caddy
-curl -I http://lottery.example.com
-curl -I https://lottery.example.com
-```
-
-把 curl 域名替换为 `.env` 中的真实域名。预期本地 health 返回 `200 ok`，公网 HTTP 跳转 HTTPS，HTTPS 证书有效，且 HTTPS 响应包含 `Strict-Transport-Security: max-age=31536000; includeSubDomains`。⚠️ health 只证明 Streamlit 服务存活，不证明脚本成功渲染、数据库可写、登录正常或 Caddy 在服务器上实际发送 HSTS。
-
-未来部署时必须使用公网域名进行人工验收（本轮暂缓，不作为本地完成条件）：
-
-- 无登录时只有登录入口；OIDC 回调正确，白名单用户可以访问，白名单外用户不能访问，退出后受保护操作不可用。
-- 登录后运行小模拟，刷新/新会话可查历史，以确认持久数据库已初始化（未首次登录时不会创建库）。
-- 桌面与窄屏分别检查三个页面（新建实验、实验结果、历史记录）和结果页四种视图（实验概览、分类统计、按抽次分析、逐抽明细）；分类统计可在主池、赠送、总计之间切换，按抽次分析和逐抽明细可选择轮次并查看表格。主池规则曲线位于“新建实验”的“主池规则预览”，历史结果不展示该预览。
-- 用 Tab/Shift+Tab 按视觉顺序遍历侧栏导航、主区域参数、结果视图、明细筛选/分页/准备下载、历史筛选/选择/复用/删除；每一步焦点均可见，Enter/Space 可操作。另检查任务阶段标签与计数：主抽100%后可能仍有理论、校验和保存阶段，校验/写入100%不代表历史已提交；保存失败时结果页仍可查看完整汇总，Trace 明细仍完整可读/导出。
-- 用本次验收任务点“停止模拟”，确认提交前取消不能续算、部分结果和Trace清理，任务参数/日志/状态保留；若提交已完成，历史记录不被停止操作删除。并检查五类并排柱的模拟/理论标签精度，以及逐抽明细概率按 `0..1` 显示（如 `0.008` 表示0.8%）。
-- 删除第一次点击只出现确认，取消后记录仍在，独立“确认删除”后才移除。用本次创建的验收记录，不删除真实重要历史。
-
-⚠️ 单元测试和 AppTest 不能替代浏览器布局、键盘焦点、DNS、证书和真实 OIDC 验收。应把实际观察逐项补记到变更记录。
-
-## 4. 在线备份和每日定时任务
-
-先完成一次登录和模拟，确认 `/app/data/lottery_v4.sqlite3` 存在。手动在线备份：
-
-```bash
-docker compose exec -T app python3 scripts/backup_db.py /app/data/lottery_v4.sqlite3 /app/backups/lottery-v4-$(date +%F).sqlite3
-```
-
-脚本只读打开源库，使用 SQLite 在线 backup API，包含已提交 WAL 数据；创建目标父目录，拒绝同一路径/符号链接/硬链接别名，并检查目标 `PRAGMA integrity_check`。退出码为 0 且输出 `Backup integrity_check: ok` 才算成功。非零退出后目标可能已存在或已覆盖，不可使用该次输出恢复；同日命令会覆盖同名备份，重要操作前使用带时分秒的独立文件名。该脚本只备份 v4 SQLite 历史，不备份 `jobs_v4/` 任务文件、保存失败任务的暂存 Trace、OIDC secrets 或证书。
-
-安装 systemd 定时任务前，编辑项目内 `deploy/lottery-backup.service`，把 `WorkingDirectory=/opt/lottery-simulator` 改为真实部署路径，并用 `command -v docker` 确认 `/usr/bin/docker` 是否正确。service 中 `date +%%F` 的双百分号是 systemd 转义，手工终端命令用单百分号。
-
-```bash
-sudo install -m 644 deploy/lottery-backup.service /etc/systemd/system/lottery-backup.service
-sudo install -m 644 deploy/lottery-backup.timer /etc/systemd/system/lottery-backup.timer
-sudo systemctl daemon-reload
-sudo systemctl enable --now lottery-backup.timer
-sudo systemctl start lottery-backup.service
-sudo systemctl status lottery-backup.timer lottery-backup.service --no-pager
-sudo systemctl list-timers lottery-backup.timer --all
-sudo journalctl -u lottery-backup.service -n 50 --no-pager
-```
-
-timer 按服务器时区每日执行，`Persistent=true` 在错过计划后补执行；容器未运行时备份会失败，需监控 service 日志。没有自动保留/清理策略：检查磁盘空间，并将已校验备份复制到受控异机存储。命名卷不能抵御整机/磁盘丢失：
-
-```bash
-install -d -m 700 backups
-docker compose cp app:/app/backups/lottery-v4-$(date +%F).sqlite3 backups/
-chmod 600 backups/*.sqlite3
-```
-
-使用你已有的加密传输/存储流程做异机复制；本文不配置外部存储，不自动删除旧备份。
-
-## 5. 停机恢复
-
-恢复会替换当前历史。先选择已知成功的 v4 备份（下面日期为示例，必须替换），暂停定时器，停止 app，保留当前库的独立备份，再恢复。`docker compose run` 复用命名卷，以镜像的非 root 用户运行脚本，不启动 Streamlit；不要在 app 运行时直接复制 SQLite 文件或删除 WAL 文件。恢复只接受 v4 数据库，不迁移旧库。仅开启 Trace 且历史保存失败的任务会在 `jobs_v4/<job_id>/` 留下完整 `trace.sqlite3` 供当前结果分页/导出；未开启 Trace 的失败任务没有暂存明细，只保留 `result.json` 汇总。两类任务目录文件都不属于历史备份，需单独处理。
-
-```bash
-cd /opt/lottery-simulator
-sudo systemctl stop lottery-backup.timer
-sudo systemctl stop lottery-backup.service
-docker compose stop app
-docker compose run --rm --no-deps app python3 scripts/backup_db.py /app/data/lottery_v4.sqlite3 /app/backups/pre-restore-v4-$(date +%F-%H%M%S).sqlite3
-docker compose run --rm --no-deps app python3 scripts/backup_db.py /app/backups/lottery-v4-2026-09-14.sqlite3 /app/data/lottery_v4.sqlite3
-```
-
-每条备份/恢复命令必须检查退出码；任何一步失败就停下，不要继续启动服务。首次空库恢复可以跳过不存在源库的 pre-restore 步骤；不要跳过现有库的保护备份。
-
-```bash
-docker compose run --rm --no-deps app python3 -c "import sqlite3; c=sqlite3.connect('file:/app/data/lottery_v4.sqlite3?mode=ro', uri=True); print(c.execute('PRAGMA integrity_check').fetchall()); print(c.execute('SELECT count(*) FROM simulation_runs').fetchone()); c.close()"
-docker compose up -d app
-docker compose ps
-sudo systemctl start lottery-backup.timer
-```
-
-校验输出必须是 `[('ok',)]`，历史数量须符合所选快照；恢复只接受 v4 数据库，不迁移旧库。重新登录检查历史/Trace，并运行一个小模拟验证恢复后仍可写。备份不会恢复未完成任务或保存失败任务的暂存 Trace；若有旧任务状态影响运行，先保留 `jobs_v4/` 并调查，不要执行宽泛删除 `data/` 或 `jobs/` 的命令。⚠️ 当前已在临时真实 SQLite 上验证恢复及继续写入，但容器卷上的停机恢复仍须现场验证。
-
-## 6. 镜像升级与按 Git 提交回滚
-
-升级前记录当前已部署提交，取一个明确名称，避免“回滚到最新”这种不确定目标：
-
-```bash
-git status --short
-git tag deployment-before-upgrade-2026-09-14 HEAD
-docker compose exec -T app python3 scripts/backup_db.py /app/data/lottery_v4.sqlite3 /app/backups/pre-upgrade-v4-$(date +%F-%H%M%S).sqlite3
-```
-
-先处理工作区中已有修改；不要覆盖它们。如果这个 tag 已存在，选一个新的明确名称。获取并切换到已经审查的目标提交，例如先 `git fetch --all`，再 `git switch --detach <目标提交>`（替换尖括号参数）。保持部署目录与卷项目名不变，再运行：
-
-```bash
-docker compose build --pull app
-docker compose pull caddy
-docker compose up -d
-docker compose ps
-docker compose logs --tail=100 app caddy
-```
-
-重复健康、登录、历史读写检查。不兼容 schema 不会被旧版 repository 静默改写；如果升级包含数据库迁移，回滚代码之外还需要按上一节恢复升级前兼容备份。
-
-回滚到上面命名的提交：
-
-```bash
-docker compose stop app
-git switch --detach deployment-before-upgrade-2026-09-14
-docker compose build app
-docker compose up -d
-docker compose ps
-```
-
-重新验证 HTTPS/OIDC、历史与新模拟；失败时保留日志和当前库，不执行 `git reset --hard` 或删除卷。固定版本降低漂移，但并非完整镜像可重复构建证明；本轮不进行额外 SHA/镜像摘要核验。
+本地双账号浏览器验收已完成，记录于[浏览器验收记录](changes/2026-09-29-user-pool-browser-acceptance.md)，覆盖登录、账号隔离、池复制、Trace/非Trace模拟、刷新、图表、筛选、CSRF原生下载请求和实际取消。该记录不证明公网反向代理、HTTPS/域名、生产容器、Gunicorn/worker systemd 生命周期或真实数据切换已经验证。旧 Streamlit 入口及依赖已从本工作树移除；旧数据仍留在原稳定目录。

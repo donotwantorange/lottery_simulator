@@ -54,7 +54,7 @@ class ChartDataTest(unittest.TestCase):
         self.payload = {
             "trials": 10,
             "pool_config": {
-                "format_version": 1,
+                "format_version": 2,
                 "up_share": 0.5,
                 "five_star": {
                     "base_probability": 0.08,
@@ -112,6 +112,30 @@ class ChartDataTest(unittest.TestCase):
                 {"星级": "六星", "模拟均值": 3.0, "理论期望": 3.0},
             ],
         )
+
+    def test_summary_api_has_five_categories_and_total_snapshot_labels(self):
+        from copy import deepcopy
+        from dashboard.charts import summary_chart_data
+
+        self.payload["pool_config"]["rarity_labels"] = {"4": "稀有四", "5": "稀有五", "6": "稀有六"}
+        response = summary_chart_data(self.payload, "total")
+        self.assertEqual(set(response["specs"]), {
+            "rarity", "six_star_categories", "characters", "rewards", "pity",
+        })
+        self.assertEqual([row["星级"] for row in response["rows"]["rarity"]], [
+            "稀有四", "稀有五", "稀有六",
+        ])
+        self.assertEqual(response["rows"]["characters"][0]["角色"], "UP-A")
+        self.assertEqual(response["rows"]["rewards"][0]["奖励"], "奖励A")
+        self.assertEqual(response["rows"]["pity"][0]["保底类型"], "稀有五保底")
+        self.assertIn("稀有六内实际占比", response["rows"]["characters"][0])
+        for source, count in (("main", 17.0), ("bonus", 27.0)):
+            self.payload["source_summaries"][source] = deepcopy(self.payload["source_summaries"]["total"])
+            self.payload["source_summaries"][source]["mean_rarity_counts"]["4"] = count
+            self.payload["theoretical_source_summaries"][source] = deepcopy(
+                self.payload["theoretical_source_summaries"]["total"]
+            )
+            self.assertEqual(summary_chart_data(self.payload, source)["rows"]["rarity"][0]["模拟均值"], count)
 
     def test_six_star_category_rows_map_all_categories(self):
         self.assertEqual(

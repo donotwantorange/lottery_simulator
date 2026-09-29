@@ -91,7 +91,7 @@ class PoolConfigTest(unittest.TestCase):
 
     def test_pool_config_requires_exact_format_version_and_valid_rarity(self):
         base = load_pool_config().to_dict()
-        for version in (None, 0, 2, True, "1"):
+        for version in (None, 0, 1, 3, True, "2"):
             with self.subTest(version=version):
                 raw = copy.deepcopy(base)
                 if version is None:

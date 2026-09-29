@@ -1,4 +1,8 @@
-"""Online SQLite backup: python3 scripts/backup_db.py SOURCE DESTINATION."""
+"""Back up SQLite online: python3 scripts/backup_db.py SOURCE DESTINATION.
+
+The database may contain account password hashes and sessions; backups are
+therefore created with owner-only permissions.
+"""
 
 import argparse
 from contextlib import closing
@@ -11,6 +15,8 @@ def backup_database(source, destination):
     if source == destination or (destination.exists() and source.samefile(destination)):
         raise ValueError("Source and destination refer to the same file")
     destination.parent.mkdir(parents=True, exist_ok=True)
+    destination.touch(mode=0o600, exist_ok=True)
+    destination.chmod(0o600)
     with closing(sqlite3.connect(source.as_uri() + "?mode=ro", uri=True)) as original:
         with closing(sqlite3.connect(destination)) as snapshot:
             original.backup(snapshot)

@@ -29,6 +29,8 @@
 
 | 日期／主题 | 当前状态 | 设计 | 计划 | 实施／修改记录 | Git状态 |
 |---|---|---|---|---|---|
+| 2026-09-24 用户权限、角色池与实验配置整理 | 任务14已验收；任务15切换中 | [设计](2026-09-24-user-pool-experiment-design.md) | [计划](2026-09-24-user-pool-experiment-plan.md) | [实施记录](2026-09-24-user-pool-experiment.md) | 准备本地合并；不推送 |
+| 2026-09-23 SQLite历史库备份恢复演练 | 已验证（后续补录） | — | — | [演练记录](2026-09-23-backup-restore-drill.md) | 随新版本地合并；不推送 |
 | 2026-09-22 网页使用体验与任务控制 | 已合并（用户反馈确认无误，浏览器细项未逐项记录） | [设计](2026-09-22-dashboard-usability-task-control-design.md) | [计划](2026-09-22-dashboard-usability-task-control-plan.md) | [实施记录](2026-09-22-dashboard-usability-task-control.md) | 功能提交 `9e33670`，本地合并 `b085d33`，未推送 |
 
 本表从新规则生效后的下一项改动开始登记；已有文档仍可在本目录按日期查找。

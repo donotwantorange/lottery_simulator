@@ -1,0 +1,6 @@
+{
+  "format_version": 1,
+  "name": "默认实验",
+  "pool_ref": {"id": "ad9e5c3a-a308-48be-8be7-6173a38e0831", "name": "默认角色池"},
+  "parameters": {"draws": 100, "trials": 1000, "initial_pity": 0, "initial_five_star_pity": 0, "seed": null, "trace": false}
+}
