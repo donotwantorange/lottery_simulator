@@ -1,6 +1,6 @@
 # 本地使用手册
 
-本手册负责安装、启动与本机维护。页面操作见[网页页面指南](dashboard-guide.md)，服务器配置见[部署接口与运维说明](deployment.md)，项目入口见[README](../README.md)。
+本手册负责本机开发环境的安装、启动与维护。页面操作见[网页页面指南](dashboard-guide.md)，服务器安装和运维见[部署指南](deployment.md)，项目入口见[README](../README.md)。`scripts/install.sh` 用于服务器首次部署，不代替本文的本机开发步骤。
 
 项目目录为 `/home/qykj/202607/test/lottery_simulator`。本机已完成依赖、数据库和管理员初始化，日常使用从下一节开始；新机器才需要“首次安装”。本文命令均在项目根目录执行。
 
@@ -48,7 +48,7 @@ npm --prefix frontend ci
 
 ## 完成一次小型实验
 
-已有开启Trace的历史也可直接用于查看新版图表，无需重跑。按前节启动后端和前端、刷新页面即可加载修改；不用迁移数据库或重新初始化管理员。生产静态资源的更新方式另见[部署说明](deployment.md#本次图表修改的发布范围)。
+已有开启Trace的历史也可直接用于查看新版图表，无需重跑。按前节启动后端和前端、刷新页面即可加载修改；不用迁移数据库或重新初始化管理员。服务器静态资源的更新方式另见[版本更新](deployment.md#版本更新)。
 
 登录后直接使用默认角色池，设置每轮30主抽、2轮、两种初始保底均为0、种子42、开启Trace。无需先保存实验配置。
 
@@ -146,4 +146,4 @@ install -d -m 700 backups
 
 ## 验证范围与历史记录
 
-本地功能和真实v5库切换已完成，证据见[实施记录](changes/2026-09-24-user-pool-experiment.md)及[浏览器验收](changes/2026-09-29-user-pool-browser-acceptance.md)。旧数据清理是已完成的历史操作，不是日常使用步骤；未进行真实公网部署。此前[v4恢复演练](changes/2026-09-23-backup-restore-drill.md)仅为历史参考。
+本地功能和真实v5库切换已完成，证据见[实施记录](changes/2026-09-24-user-pool-experiment.md)及[浏览器验收](changes/2026-09-29-user-pool-browser-acceptance.md)。旧数据清理是已完成的历史操作，不是日常使用步骤。2026-09-30用户反馈腾讯云手动部署成功；服务器证据和未验事项统一见[部署验证状态](deployment.md#验证状态)。此前[v4恢复演练](changes/2026-09-23-backup-restore-drill.md)仅为历史参考。
