@@ -146,4 +146,4 @@ install -d -m 700 backups
 
 ## 验证范围与历史记录
 
-本地功能和真实v5库切换已完成，证据见[实施记录](changes/2026-09-24-user-pool-experiment.md)及[浏览器验收](changes/2026-09-29-user-pool-browser-acceptance.md)。旧数据清理是已完成的历史操作，不是日常使用步骤。2026-09-30用户反馈腾讯云手动部署成功；服务器证据和未验事项统一见[部署验证状态](deployment.md#验证状态)。此前[v4恢复演练](changes/2026-09-23-backup-restore-drill.md)仅为历史参考。
+本地功能和真实v5库切换已完成，证据见[实施记录](changes/2026-09-24-user-pool-experiment.md)及[浏览器验收](changes/2026-09-29-user-pool-browser-acceptance.md)。旧数据清理是已完成的历史操作，不是日常使用步骤。2026-09-30用户确认腾讯云服务器已使用手动指令部署；自动安装脚本尚未实机测试，已有隔离检查不能代替实机验收。服务器证据和未验事项统一见[部署验证状态](deployment.md#验证状态)。此前[v4恢复演练](changes/2026-09-23-backup-restore-drill.md)仅为历史参考。
