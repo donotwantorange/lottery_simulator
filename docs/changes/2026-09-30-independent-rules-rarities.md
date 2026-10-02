@@ -342,3 +342,17 @@
 ### 2026-10-02收尾复核
 
 上轮工具额度中断发生在额外检查残留浏览器子进程时，必需验收、证据归档及临时服务停止此前均已完成。本次只读确认Windows无本轮.task16 Node/无头浏览器残留，8000/5173/18080无监听；工作树无临时验收文件，归档中的后端、账号完整标量、前端与最终产物浏览器日志仍在。Git diff --check通过，原本地手册与0001迁移无差异。未重跑已通过且无代码变化的用例，未执行任务17。
+
+## 任务17本地切换进度（2026-10-02）
+
+用户授权完成剩余任务，并明确选择本机 `data/history_v5.sqlite3` 保留账号；提交身份使用用户提供的仓库级 name/email。任务1—16实现提交 `b234ce9`，主检出进度提交 `dac1240`，本地master合并提交 `906bfe1`。未推送，服务器未升级，原 `docs/local-usage.md` 和 migration0001 与基准一致。
+
+切换前WSL仅DNS监听，无项目服务、用户crontab或项目备份timer；Windows netstat核对8000/18080未占用。CIM读取受限，使用netstat替代，未知进程未停止。
+
+采用任务15备份与导入工具：私有备份位于WSL `/home/lottery/lottery-backups/cutover-20261002-1010/history_v5.sqlite3` 和 `history_v6-ready.sqlite3`，umask077；两次完整性检查通过。目标主检出 `data/history_v6.sqlite3` 完整迁移至v6，导入1账号、0登录限制，初始化1默认公共规则及1默认公共池。检查ID/密码散列一致（未输出散列）、auth_version递增、管理员有效且无deleting；旧Session未迁入，实验/历史/事件均为空，源库仍v5。导入工具已核对源/目标完整schema与删除清单。
+
+实际运行代码来自主检出 `D:\Web_project\lottery_simulator`，WSL Python位于 `/home/lottery/.venvs/lottery-simulator/bin/python`。后端显式使用主检出data中的history_v6/jobs_v6/exports_v6，8000端口；PID和日志在 `/home/lottery/lottery-runtime-v6/`。本机静态前端入口 `http://127.0.0.1:18080/`，临时Node启动器/PID/日志在主检出 `data/local-v6-runtime/`（忽略、不提交），API代理至当前WSL地址。WSL重启后地址可能改变，需重新核对再启动。
+
+首页及CSRF HTTP200；独立浏览器实际显示登录按钮，最终资源 `index-29lZozkw.js`、`index-ByJ5s0HX.css` 均200。登录页截图在 `data/local-v6-runtime/login.png`。仍等待用户用原密码实际登录、10抽1轮Trace、历史与过程明细验收；不索取或重置原密码。真实账号验证前保留v5源库及旧业务材料，不执行删除。任务17尚未标完成。
+
+回滚：只停止上述PID文件对应并确认身份的新服务，保留v6库备查；旧版本在隔离基准提交a0b575f检出启动，明确指定原history_v5/jobs/exports路径。禁止旧代码读取v6，不reset --hard，不删除.env/data/命名卷。当前主检出data只有旧源库和本轮新增v6/runtime，未发现旧任务或下载目录。
