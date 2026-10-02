@@ -1,4 +1,4 @@
-"""Task 14 browser-facing backend flow on a physical, isolated v5 database."""
+"""Backend execution and API flows on physical, isolated v6 databases."""
 
 import os
 from pathlib import Path
@@ -10,19 +10,69 @@ from django.test import SimpleTestCase
 
 
 ROOT = Path(__file__).resolve().parents[2]
+JOB_HELPER = '''
+def job_payload(pool, draws, trials=1, seed="42", trace=True):
+    return {"pool_id": str(pool.pk), "expected_pool_revision": pool.revision,
+        "expected_rule_revision": pool.rule.revision, "initial_context": None,
+        "parameters": {"draws": str(draws), "trials": str(trials), "seed": str(seed),
+            "trace": trace, "initial_main_draws": "0", "initial_small_pity": {},
+            "initial_big_pity": {"target_obtained": False, "misses": "0"}}}
+def save_pool_v6(actor, document, **kwargs):
+    from dashboard.models import Rule
+    from dashboard.services.pools import save_pool
+    from lottery_simulator.config_documents import DEFAULT_RULE_PATH, load_rule_document, read_config_json
+    definition = load_rule_document(read_config_json(DEFAULT_RULE_PATH))
+    rule, _ = Rule.objects.get_or_create(pk=definition.id, defaults={
+        "name": definition.name, "name_key": definition.name, "kind": Rule.PUBLIC,
+        "owner": None, "visibility": Rule.PUBLIC,
+        "original_author": definition.original_author or "项目默认配置",
+        "algorithm": definition.algorithm, "config_json": definition.to_dict(), "revision": 1})
+    return save_pool(actor, document, expected_rule_revision=rule.revision, **kwargs)
+'''
 
 
 class EndToEndTests(SimpleTestCase):
     def scenario(self, script):
+        script = JOB_HELPER + script
         with TemporaryDirectory(prefix="lottery-acceptance-") as directory:
             environment = {**os.environ, "PYTHONDONTWRITEBYTECODE": "1",
-                "LOTTERY_DATA_DIR": directory, "LOTTERY_DB_PATH": directory + "/history_v5.sqlite3",
+                "LOTTERY_ALLOWED_HOSTS": "testserver,localhost,127.0.0.1",
+                "LOTTERY_DATA_DIR": directory, "LOTTERY_DB_PATH": directory + "/history_v6.sqlite3",
                 "LOTTERY_JOBS_DIR": directory + "/jobs", "LOTTERY_EXPORTS_DIR": directory + "/exports"}
             for arguments, stdin in ((["migrate", "--noinput", "--verbosity", "0"], None),
                                      (["shell"], script)):
                 result = subprocess.run([sys.executable, str(ROOT / "manage.py"), *arguments],
                     input=stdin, cwd=ROOT, env=environment, capture_output=True, text=True, timeout=60)
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_v6_frozen_snapshot_stream_trace_and_history(self):
+        self.scenario('''
+from unittest.mock import patch
+from django.core.management import call_command
+from dashboard.models import Pool, Rule, SimulationEvent, SimulationRun, User
+from dashboard.services.accounts import create_account
+from dashboard.services.runs import submit_job
+from lottery_simulator.config_documents import DEFAULT_POOL_PATH, DEFAULT_RULE_PATH, read_config_json
+
+with patch("dashboard.management.commands.init_admin.getpass", side_effect=["123456", "123456"]):
+    call_command("init_admin", username="admin")
+admin = User.objects.get(username="admin")
+alice = create_account(admin, "alice", "123456", must_change_password=False)
+rule_id = read_config_json(DEFAULT_RULE_PATH)["id"]
+rule = Rule.objects.get(pk=rule_id)
+pool = Pool.objects.get(pk=read_config_json(DEFAULT_POOL_PATH)["id"])
+payload = {"pool_id": str(pool.pk), "expected_pool_revision": pool.revision,
+    "expected_rule_revision": rule.revision, "initial_context": None,
+    "parameters": {"draws": "30", "trials": "2", "seed": "42", "trace": True,
+        "initial_main_draws": "0", "initial_small_pity": {},
+        "initial_big_pity": {"target_obtained": False, "misses": "0"}}}
+state = submit_job(alice, payload, synchronous=True)
+assert state.status == "completed" and state.history_saved
+run = SimulationRun.objects.get(pk=state.run_id)
+assert run.rule_name_snapshot == "zmd" and run.schema_version == 6
+assert run.event_count == 80
+assert SimulationEvent.objects.filter(run=run).count() == 80
+''')
 
     def test_account_deletion_at_worker_commit_barrier(self):
         self.scenario('''
@@ -31,7 +81,7 @@ from copy import deepcopy
 from threading import Event, Thread
 from unittest.mock import patch
 from django.db import close_old_connections
-from dashboard.models import DrawRecord, Pool, SimulationRun, User
+from dashboard.models import Pool, SimulationEvent, SimulationRun, User
 from dashboard.repository import HistoryRepository
 from dashboard.services.accounts import create_account, delete_account
 from dashboard.services.pools import save_pool
@@ -40,16 +90,13 @@ from lottery_simulator.config_documents import DEFAULT_POOL_PATH, read_config_js
 
 admin = create_account(None, "admin", "123456", admin=True, must_change_password=False)
 bob = create_account(admin, "bob", "123456", must_change_password=False)
-system_pool = save_pool(admin, {**read_config_json(DEFAULT_POOL_PATH), "kind": "public"})
-parameters = {"draws": 2, "trials": 1, "initial_pity": 0,
-              "initial_five_star_pity": 0, "seed": "41", "trace": True}
-bob_state = submit_job(bob, {"pool_id": str(system_pool.pk), "expected_revision": 1,
-                           "parameters": parameters}, synchronous=True)
+system_pool = save_pool_v6(admin, {**read_config_json(DEFAULT_POOL_PATH), "kind": "public"})
+bob_state = submit_job(bob, job_payload(system_pool, 2, seed=41), synchronous=True)
 original_save = HistoryRepository.save_run
 for committed_first in (False, True):
     target = create_account(admin, "target" + str(committed_first), "123456",
                             must_change_password=False)
-    private_pool = save_pool(target, {**read_config_json(DEFAULT_POOL_PATH),
+    private_pool = save_pool_v6(target, {**read_config_json(DEFAULT_POOL_PATH),
                                     "name": "私有池" + str(committed_first)})
     arrived, release = Event(), Event()
     errors, submitted = [], []
@@ -66,8 +113,7 @@ for committed_first in (False, True):
         close_old_connections()
         try:
             actor = User.objects.get(pk=target.pk)
-            submitted.append(submit_job(actor, {"pool_id": str(private_pool.pk),
-                "expected_revision": 1, "parameters": parameters}, synchronous=True))
+            submitted.append(submit_job(actor, job_payload(private_pool, 2, seed=41), synchronous=True))
         except BaseException as error:
             errors.append(error)
         finally:
@@ -104,11 +150,15 @@ for committed_first in (False, True):
     assert not User.objects.filter(pk=target.pk).exists()
     assert not Pool.objects.filter(pk=private_pool.pk).exists()
     assert not SimulationRun.objects.filter(owner_id=target.pk).exists()
-    assert not DrawRecord.objects.filter(run_id=payloads[0][0]).exists()
+    assert not SimulationEvent.objects.filter(run_id=payloads[0][0]).exists()
     assert not (get_manager().root / payloads[0][0]).exists()
     assert SimulationRun.objects.filter(pk=bob_state.run_id, owner=bob).exists()
     assert Pool.objects.filter(pk=system_pool.pk, owner=None).exists()
-    summary = dict(payloads[0][1], trace_enabled=False, record_count=0)
+    summary = deepcopy(payloads[0][1])
+    summary["trace_enabled"] = False
+    summary["event_count"] = 0
+    summary["parameters"]["trace"] = False
+    summary["counts"]["trace_events"] = 0
     from uuid import uuid4
     try:
         original_save(HistoryRepository(), str(uuid4()), summary)
@@ -133,7 +183,7 @@ from dashboard.services.runs import submit_job
 from lottery_simulator.config_documents import DEFAULT_POOL_PATH, read_config_json
 
 admin = create_account(None, "admin", "123456", admin=True, must_change_password=False)
-pool = save_pool(admin, {**read_config_json(DEFAULT_POOL_PATH), "kind": "public"})
+pool = save_pool_v6(admin, {**read_config_json(DEFAULT_POOL_PATH), "kind": "public"})
 original_save = HistoryRepository.save_run
 for operation in ("logout", "disable", "demote"):
     target = create_account(admin, operation, "123456", admin=True, must_change_password=False)
@@ -150,10 +200,8 @@ for operation in ("logout", "disable", "demote"):
     def worker_run():
         close_old_connections()
         try:
-            states.append(submit_job(User.objects.get(pk=target.pk), {
-                "pool_id": str(pool.pk), "expected_revision": 1, "parameters": {
-                    "draws": 2, "trials": 1, "initial_pity": 0,
-                    "initial_five_star_pity": 0, "seed": "43", "trace": True}}, synchronous=True))
+            states.append(submit_job(User.objects.get(pk=target.pk),
+                                     job_payload(pool, 2, seed=43), synchronous=True))
         except BaseException as error:
             errors.append(error)
         finally:
@@ -186,7 +234,7 @@ from django.contrib.sessions.models import Session
 from django.test import Client
 from dashboard.api.errors import APIError
 from dashboard.downloads import cleanup_stale_exports
-from dashboard.models import DrawRecord, SimulationRun, User
+from dashboard.models import SimulationEvent, SimulationRun, User
 from dashboard.services.accounts import create_account
 from dashboard.services.pools import save_pool
 from dashboard.services.runs import submit_job
@@ -195,10 +243,8 @@ from lottery_simulator.config_documents import DEFAULT_POOL_PATH, read_config_js
 
 admin = create_account(None, "admin", "123456", admin=True, must_change_password=False)
 alice = create_account(admin, "alice", "123456", must_change_password=False)
-pool = save_pool(alice, read_config_json(DEFAULT_POOL_PATH))
-state = submit_job(alice, {"pool_id": str(pool.pk), "expected_revision": 1, "parameters": {
-    "draws": 1, "trials": 10001, "initial_pity": 0, "initial_five_star_pity": 0,
-    "seed": "37", "trace": True}}, synchronous=True)
+pool = save_pool_v6(alice, read_config_json(DEFAULT_POOL_PATH))
+state = submit_job(alice, job_payload(pool, 1, trials=10001, seed=37), synchronous=True)
 assert state.status == "completed" and state.history_saved
 url = f"/api/v1/runs/{state.run_id}/download-trace/"
 def login(username):
@@ -213,24 +259,25 @@ def download(actor, filters=None):
 assert download(client).status_code == 400
 response = download(client, {"trial_to": 10000})
 assert response.status_code == 200
-assert b"".join(response.streaming_content).count(b'"type": "record"') == 10000
+assert b"".join(response.streaming_content).count(b'"type": "event"') == 10000
 response.close()
 administrator = login("admin")
 response = download(administrator)
 assert response.status_code == 200
-assert b"".join(response.streaming_content).count(b'"type": "record"') == 10001
+assert b"".join(response.streaming_content).count(b'"type": "event"') == 10001
 response.close()
-assert DrawRecord.objects.filter(run_id=state.run_id).count() == 10001
+assert SimulationEvent.objects.filter(run_id=state.run_id).count() == 10001
 
-original_iterator = TraceReader.iter_records
+original_iterator = TraceReader.iter_events
 def revoke_between_batches(reader, filters, *, batch_size):
     assert batch_size == 1000
     for index, record in enumerate(original_iterator(reader, filters, batch_size=batch_size)):
         if index == 1000:
             User.objects.filter(pk=alice.pk).update(is_active=False, auth_version=2)
         yield record
-with patch.object(TraceReader, "iter_records", revoke_between_batches):
-    assert download(client, {"trial_to": 10000}).status_code == 401
+with patch.object(TraceReader, "iter_events", revoke_between_batches):
+    revoked = download(client, {"trial_to": 10000})
+    assert revoked.status_code == 401, revoked.status_code
 exports = Path(os.environ["LOTTERY_EXPORTS_DIR"])
 assert not list(exports.glob("*.jsonl"))
 User.objects.filter(pk=alice.pk).update(is_active=True)
@@ -239,7 +286,7 @@ client = login("alice")
 with patch("dashboard.downloads.tempfile.NamedTemporaryFile", side_effect=OSError(errno.ENOSPC, "full")):
     assert download(client, {"trial_to": 1}).status_code == 503
 assert SimulationRun.objects.filter(pk=state.run_id).exists()
-assert DrawRecord.objects.filter(run_id=state.run_id).count() == 10001
+assert SimulationEvent.objects.filter(run_id=state.run_id).count() == 10001
 response = download(client, {"trial_to": 10000})
 assert response.status_code == 200
 assert client.get("/api/v1/auth/me/").status_code == 200
@@ -294,14 +341,15 @@ assert not list(exports.glob("*.jsonl"))
     def test_two_connections_admin_demotions_and_job_submissions(self):
         with TemporaryDirectory(prefix="lottery-admin-race-") as directory:
             environment = {**os.environ, "PYTHONDONTWRITEBYTECODE": "1",
-                "LOTTERY_DATA_DIR": directory, "LOTTERY_DB_PATH": directory + "/history_v5.sqlite3",
+                "LOTTERY_ALLOWED_HOSTS": "testserver,localhost,127.0.0.1",
+                "LOTTERY_DATA_DIR": directory, "LOTTERY_DB_PATH": directory + "/history_v6.sqlite3",
                 "LOTTERY_JOBS_DIR": directory + "/jobs", "LOTTERY_EXPORTS_DIR": directory + "/exports"}
             migration = subprocess.run(
                 [sys.executable, str(ROOT / "manage.py"), "migrate", "--noinput", "--verbosity", "0"],
                 cwd=ROOT, env=environment, capture_output=True, text=True, timeout=30,
             )
             self.assertEqual(migration.returncode, 0, migration.stdout + migration.stderr)
-            script = '''
+            script = JOB_HELPER + '''
 from concurrent.futures import ThreadPoolExecutor
 from threading import Barrier
 from django.db import close_old_connections
@@ -353,10 +401,8 @@ from lottery_simulator.config_documents import DEFAULT_POOL_PATH, read_config_js
 admin = User.objects.get(is_superuser=True, is_active=True)
 alice = create_account(admin, "alice", "123456", must_change_password=False)
 bob = create_account(admin, "bob", "123456", must_change_password=False)
-pool = save_pool(admin, {**read_config_json(DEFAULT_POOL_PATH), "kind": "public"})
-payload = {"pool_id": str(pool.pk), "expected_revision": 1, "parameters": {
-    "draws": 2, "trials": 1, "initial_pity": 0, "initial_five_star_pity": 0,
-    "seed": "31", "trace": False}}
+pool = save_pool_v6(admin, {**read_config_json(DEFAULT_POOL_PATH), "kind": "public"})
+payload = job_payload(pool, 2, seed=31, trace=False)
 barrier = Barrier(2)
 def submit(user_id):
     close_old_connections()
@@ -389,8 +435,9 @@ with patch("dashboard.jobs.subprocess.Popen", return_value=SimpleNamespace(pid=1
         with TemporaryDirectory(prefix="lottery-e2e-") as directory:
             environment = {**os.environ,
                 "PYTHONDONTWRITEBYTECODE": "1",
+                "LOTTERY_ALLOWED_HOSTS": "testserver,localhost,127.0.0.1",
                 "LOTTERY_DATA_DIR": directory,
-                "LOTTERY_DB_PATH": directory + "/history_v5.sqlite3",
+                "LOTTERY_DB_PATH": directory + "/history_v6.sqlite3",
                 "LOTTERY_JOBS_DIR": directory + "/jobs",
                 "LOTTERY_EXPORTS_DIR": directory + "/exports"}
             migration = subprocess.run(
@@ -398,7 +445,7 @@ with patch("dashboard.jobs.subprocess.Popen", return_value=SimpleNamespace(pid=1
                 cwd=ROOT, env=environment, capture_output=True, text=True, timeout=30,
             )
             self.assertEqual(migration.returncode, 0, migration.stdout + migration.stderr)
-            script = '''
+            script = JOB_HELPER + '''
 import json
 import os
 import time
@@ -429,14 +476,16 @@ def post(url, body):
 assert post(login_url, {"username": "alice", "password": "123456"}).status_code == 200
 token = client.get("/api/v1/auth/csrf/").json()["csrf_token"]
 assert client.get("/api/v1/pools/").status_code == 200
-parameters = {"draws": "2", "trials": "1", "initial_pity": 0,
-              "initial_five_star_pity": 0, "seed": "900719925474099312345", "trace": True}
+parameters = {"draws": "2", "trials": "1", "initial_main_draws": "0",
+    "initial_small_pity": {}, "initial_big_pity": {"target_obtained": False, "misses": "0"},
+    "seed": "900719925474099312345", "trace": True}
 config = post("/api/v1/experiment-configs/", {"name": "端到端实验",
-    "pool_ref": {"id": str(pool.pk), "name": pool.name}, "parameters": parameters})
+    "pool_ref": {"id": str(pool.pk), "name": pool.name}, "parameters": parameters,
+    "initial_context": None, "expected_pool_revision": pool.revision,
+    "expected_rule_revision": pool.rule.revision})
 assert config.status_code == 201, config.content
 assert config.json()["owner_id"] == str(alice.pk)
-accepted = post("/api/v1/jobs/", {"pool_id": str(pool.pk), "expected_revision": pool.revision,
-    "parameters": parameters})
+accepted = post("/api/v1/jobs/", job_payload(pool, 2, seed=parameters["seed"], trace=True))
 assert accepted.status_code == 202, accepted.content
 job_id = accepted.json()["job_id"]
 assert any(row["job_id"] == job_id for row in client.get("/api/v1/jobs/mine/").json()["items"])
@@ -460,14 +509,14 @@ run = client.get(f"/api/v1/runs/{run_id}/")
 assert run.status_code == 200 and run.json()["seed"] == parameters["seed"], run.content
 assert run.json()["pool_name_snapshot"] == pool.name
 trace = client.get(f"/api/v1/runs/{run_id}/trace/")
-assert trace.status_code == 200 and trace.json()["total"] == 2, trace.content
+assert trace.status_code == 200 and trace.json()["total"] == "2", trace.content
 assert client.post(f"/api/v1/runs/{run_id}/download-trace/",
                    data=json.dumps({"filters": {}}), content_type="application/json").status_code == 403
 download = post(f"/api/v1/runs/{run_id}/download-trace/", {"filters": {}})
 assert download.status_code == 200 and download.streaming, download.content
 body = b"".join(download.streaming_content)
 download.close()
-assert body.count(b'"type": "record"') == 2
+assert body.count(b'"type": "event"') == 2
 assert not list(Path(os.environ["LOTTERY_EXPORTS_DIR"]).glob("*.jsonl"))
 
 other = Client(HTTP_HOST="localhost")
@@ -481,22 +530,20 @@ assert SimulationRun.objects.filter(pk=run_id, owner=alice).exists()
 
 pool_document = read_config_json(DEFAULT_POOL_PATH)
 pool_document.update(name="稍后隐藏的池", visibility="public")
-shared_pool = save_pool(alice, pool_document)
+shared_pool = save_pool_v6(alice, pool_document)
 assert other.get(f"/api/v1/pools/{shared_pool.pk}/").status_code == 200
-bob_state = submit_job(bob, {"pool_id": str(shared_pool.pk), "expected_revision": 1,
-    "parameters": {"draws": 2, "trials": 1, "initial_pity": 0,
-                   "initial_five_star_pity": 0, "seed": "23", "trace": True}}, synchronous=True)
+bob_state = submit_job(bob, job_payload(shared_pool, 2, seed=23), synchronous=True)
 assert bob_state.history_saved
-save_pool(alice, {**pool_document, "visibility": "hidden"}, pool_id=shared_pool.pk,
+save_pool_v6(alice, {**pool_document, "visibility": "hidden"}, pool_id=shared_pool.pk,
           expected_revision=shared_pool.revision)
 assert other.get(f"/api/v1/pools/{shared_pool.pk}/").status_code == 404
-assert other.post("/api/v1/jobs/", data=json.dumps({"pool_id": str(shared_pool.pk),
-    "expected_revision": 2, "parameters": parameters}), content_type="application/json").status_code == 404
+assert other.post("/api/v1/jobs/", data=json.dumps(job_payload(shared_pool, 2, seed=parameters["seed"])),
+    content_type="application/json").status_code == 404
 assert other.get(f"/api/v1/runs/{bob_state.run_id}/").status_code == 200
 snapshot = other.post(f"/api/v1/runs/{bob_state.run_id}/download-trace/",
     data=json.dumps({"filters": {}}), content_type="application/json")
 assert snapshot.status_code == 200 and snapshot.streaming
-assert b'"type": "record"' in b"".join(snapshot.streaming_content)
+assert b'"type": "event"' in b"".join(snapshot.streaming_content)
 snapshot.close()
 '''
             result = subprocess.run(

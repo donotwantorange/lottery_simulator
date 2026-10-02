@@ -40,6 +40,7 @@ def delete_account(actor, target_id):
     from uuid import UUID
     from django.contrib.sessions.models import Session
     from dashboard.models import AppMeta
+    from dashboard.models import ExperimentConfig, Pool, Rule
     from dashboard.jobs import ACTIVE_STATUSES
     from dashboard.services.pools import _actor
     from dashboard.services.runs import get_manager
@@ -76,6 +77,8 @@ def delete_account(actor, target_id):
             if target.is_superuser and target.is_active and not target.deleting:
                 if User.objects.filter(is_superuser=True, is_active=True, deleting=False).count() <= 1:
                     raise AccountError("不能删除最后一个可用管理员")
+            if Pool.objects.filter(rule__owner=target).exclude(owner=target).exists():
+                raise AccountError("该账号的私有规则仍被其他用户角色池引用，请先处理引用")
             if not target.deleting:
                 target.deleting = True
                 target.auth_version += 1
@@ -128,11 +131,20 @@ def delete_account(actor, target_id):
             with transaction.atomic():
                 authorize()
                 target = User.objects.get(pk=target_id, deleting=True)
+                if Pool.objects.filter(rule__owner=target).exclude(owner=target).exists():
+                    raise AccountError("该账号的私有规则仍被其他用户角色池引用，请先处理引用")
                 # Sessions do not have a user FK; remove only decoded sessions
                 # belonging to this exact UUID, leaving other accounts untouched.
                 for session in Session.objects.iterator(chunk_size=1000):
                     if session.get_decoded().get("_auth_user_id") == str(target_id):
                         session.delete()
+                # Remove references owned by this account before its private rules;
+                # external consumers were checked above and are never cascaded.
+                for pool in Pool.objects.filter(owner=target).iterator():
+                    ExperimentConfig.objects.filter(pool=pool).update(
+                        pool=None, pool_name_hint=pool.name)
+                    pool.delete()
+                Rule.objects.filter(owner=target).delete()
                 target.delete()
                 AppMeta.objects.filter(key=manifest_key).delete()
         except DatabaseError as error:

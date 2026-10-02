@@ -6,15 +6,13 @@ from pathlib import Path
 import sys
 import time
 
-from dashboard.jobs import ACTIVE_STATUSES, JobManager, timestamp, validate_parameters_for_active_rule
+from dashboard.jobs import ACTIVE_STATUSES, JobManager, timestamp
 from dashboard.limits import SimulationLimits
 from dashboard.job_models import RunParameters, read_json, result_payload, write_json
 from dashboard.repository import HistoryRepository
 from dashboard.trace_store import TraceWriter
-from lottery_simulator.cli import RULES
 from lottery_simulator.engine import SimulationCancelled, simulate
-from lottery_simulator.rules.pool_config import PoolConfig
-from lottery_simulator.rules.base import expected_bonus_draws
+from lottery_simulator.rules.runtime import compile_pool
 
 
 def run(job_dir: Path, database_path: Path):
@@ -71,40 +69,31 @@ def run(job_dir: Path, database_path: Path):
     status, error = "completed", None
     writer = None
     try:
-        if parameters.pool_config is None:
-            raise ValueError("worker requires a serialized pool configuration")
         limits = SimulationLimits.from_dict(state.limit_policy)
-        parameters = validate_parameters_for_active_rule(parameters, limits=limits)
-        rule = RULES[parameters.rule_name](
-            config=PoolConfig.from_dict(parameters.pool_config)
-        )
+        compiled = compile_pool(parameters.rule_snapshot, parameters.pool_snapshot)
+        experiment = parameters.parameters
+        counts = limits.validate(compiled, experiment)
         if parameters.trace:
             writer = TraceWriter(trace_path, limits=limits.trace_limits())
         result = simulate(
-            rule, parameters.draws, parameters.trials, parameters.seed, parameters.initial_pity,
+            compiled, experiment,
             progress_callback=lambda completed, total: publish_phase("simulating", completed, total),
             cancel_check=cancel_path.exists,
-            collect_records=parameters.trace,
-            initial_five_star_pity=parameters.initial_five_star_pity,
             record_sink=writer.append if writer is not None else None,
             phase_callback=publish_phase,
         )
         if writer is not None:
             writer.finish(
-                trials=parameters.trials, draws=parameters.draws,
-                initial_main_draws=parameters.initial_pity,
-                bonus_per_trial=expected_bonus_draws(rule, parameters.initial_pity, parameters.draws),
+                compiled=compiled, parameters=experiment, counts=counts,
                 cancel_check=cancel_path.exists,
                 progress_callback=lambda completed, total: publish_phase("validating", completed, total),
             )
             writer.close()
             writer = None
-        payload = result_payload(result, rule, time.monotonic() - started)
+        payload = result_payload(result, compiled, time.monotonic() - started)
         payload.update(owner_id=state.owner_id, accepted_at=state.accepted_at,
-                       pool_source=state.pool_source, limit_policy=state.limit_policy)
-        if parameters.seed is None:
-            parameters = replace(parameters, seed=result.seed)
-            write_json(job_dir / "parameters.json", parameters.to_dict())
+                       pool_source=state.pool_source, rule_source=state.rule_source,
+                       limit_policy=state.limit_policy)
     except SimulationCancelled:
         status = "cancelled"
     except Exception:

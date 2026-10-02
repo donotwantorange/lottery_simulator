@@ -1,29 +1,125 @@
 {
-  "format_version": 2,
+  "format_version": 3,
   "id": "ad9e5c3a-a308-48be-8be7-6173a38e0831",
   "name": "默认角色池",
   "original_author": "项目默认配置",
-  "rule_name": "rule1",
-  "rarity_labels": {"4": "四星", "5": "五星", "6": "六星"},
-  "pool_config": {
-    "up_share": 0.5,
-    "five_star": {"base_probability": 0.08, "pity_enabled": true, "hard_pity": 10},
-    "six_star_characters": [
-      {"name": "UP-A", "is_up": true, "is_limited": true, "up_weight": 1},
-      {"name": "限定-B", "is_up": false, "is_limited": true, "up_weight": null},
-      {"name": "限定-C", "is_up": false, "is_limited": true, "up_weight": null},
-      {"name": "常驻-D", "is_up": false, "is_limited": false, "up_weight": null},
-      {"name": "常驻-E", "is_up": false, "is_limited": false, "up_weight": null},
-      {"name": "常驻-F", "is_up": false, "is_limited": false, "up_weight": null},
-      {"name": "常驻-G", "is_up": false, "is_limited": false, "up_weight": null},
-      {"name": "常驻-H", "is_up": false, "is_limited": false, "up_weight": null},
-      {"name": "常驻-I", "is_up": false, "is_limited": false, "up_weight": null}
-    ],
-    "four_star_characters": [],
-    "five_star_characters": [],
-    "rewards": [
-      {"name": "奖励A", "four_star": 1, "five_star": 5, "six_star": 25},
-      {"name": "奖励B", "four_star": 0, "five_star": 2, "six_star": 10}
-    ]
-  }
+  "rule_ref": {
+    "id": "fdf11d26-3e2f-4685-8492-157e22495e1b",
+    "name": "zmd"
+  },
+  "rarity_pools": [
+    {
+      "rarity_id": "d566afb8-a779-4ec2-916e-a8bbc54defcf",
+      "characters": [],
+      "up_enabled": false,
+      "up_share": 0
+    },
+    {
+      "rarity_id": "79413a4b-1c79-4a1c-9ed4-376ecd6f7dd4",
+      "characters": [],
+      "up_enabled": false,
+      "up_share": 0
+    },
+    {
+      "rarity_id": "d6067ec9-0987-4688-b13c-0a6d32d0dc7d",
+      "characters": [
+        {
+          "id": "1635b5c7-f5b2-46e6-b9bf-fa40b352376a",
+          "rarity_id": "d6067ec9-0987-4688-b13c-0a6d32d0dc7d",
+          "name": "UP-A",
+          "weight": 1,
+          "is_up": true,
+          "is_limited": true
+        },
+        {
+          "id": "1dc89b38-e0b0-4f5f-a90b-c857122c3101",
+          "rarity_id": "d6067ec9-0987-4688-b13c-0a6d32d0dc7d",
+          "name": "限定-B",
+          "weight": 1,
+          "is_up": false,
+          "is_limited": true
+        },
+        {
+          "id": "e13dfb23-259f-4771-a540-db4f205c0a64",
+          "rarity_id": "d6067ec9-0987-4688-b13c-0a6d32d0dc7d",
+          "name": "限定-C",
+          "weight": 1,
+          "is_up": false,
+          "is_limited": true
+        },
+        {
+          "id": "e2c6f42b-628b-49a3-89b5-f46579b09844",
+          "rarity_id": "d6067ec9-0987-4688-b13c-0a6d32d0dc7d",
+          "name": "常驻-D",
+          "weight": 1,
+          "is_up": false,
+          "is_limited": false
+        },
+        {
+          "id": "3887c559-2966-48e5-95f4-67c4ee63645d",
+          "rarity_id": "d6067ec9-0987-4688-b13c-0a6d32d0dc7d",
+          "name": "常驻-E",
+          "weight": 1,
+          "is_up": false,
+          "is_limited": false
+        },
+        {
+          "id": "c0370555-4502-4b07-a821-77426f5a89f7",
+          "rarity_id": "d6067ec9-0987-4688-b13c-0a6d32d0dc7d",
+          "name": "常驻-F",
+          "weight": 1,
+          "is_up": false,
+          "is_limited": false
+        },
+        {
+          "id": "518ba34a-c365-4b7a-9039-056ff0ca8a09",
+          "rarity_id": "d6067ec9-0987-4688-b13c-0a6d32d0dc7d",
+          "name": "常驻-G",
+          "weight": 1,
+          "is_up": false,
+          "is_limited": false
+        },
+        {
+          "id": "298f756c-cb30-4652-b281-756e49d202a8",
+          "rarity_id": "d6067ec9-0987-4688-b13c-0a6d32d0dc7d",
+          "name": "常驻-H",
+          "weight": 1,
+          "is_up": false,
+          "is_limited": false
+        },
+        {
+          "id": "514821cc-d443-4169-b919-9b3e23bd0e34",
+          "rarity_id": "d6067ec9-0987-4688-b13c-0a6d32d0dc7d",
+          "name": "常驻-I",
+          "weight": 1,
+          "is_up": false,
+          "is_limited": false
+        }
+      ],
+      "up_enabled": true,
+      "up_share": 0.5
+    }
+  ],
+  "rarity_labels": {},
+  "rewards": [
+    {
+      "id": "6ded7d46-2cbf-48e7-bbe6-bb9df7755c69",
+      "name": "奖励A",
+      "amounts": {
+        "d566afb8-a779-4ec2-916e-a8bbc54defcf": 1,
+        "79413a4b-1c79-4a1c-9ed4-376ecd6f7dd4": 5,
+        "d6067ec9-0987-4688-b13c-0a6d32d0dc7d": 25
+      }
+    },
+    {
+      "id": "8ba47d20-2849-4627-a76c-3799d219d521",
+      "name": "奖励B",
+      "amounts": {
+        "d566afb8-a779-4ec2-916e-a8bbc54defcf": 0,
+        "79413a4b-1c79-4a1c-9ed4-376ecd6f7dd4": 2,
+        "d6067ec9-0987-4688-b13c-0a6d32d0dc7d": 10
+      }
+    }
+  ],
+  "mechanism_targets": {}
 }

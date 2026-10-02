@@ -1,0 +1,94 @@
+{
+  "format_version": 1,
+  "id": "fdf11d26-3e2f-4685-8492-157e22495e1b",
+  "name": "zmd",
+  "original_author": "项目默认配置",
+  "algorithm": "dynamic_probability",
+  "rarities": [
+    {
+      "id": "d566afb8-a779-4ec2-916e-a8bbc54defcf",
+      "name": "四星",
+      "rank": 0,
+      "base_probability": 0.912,
+      "soft_enabled": false,
+      "soft_start": 1,
+      "soft_step": 0,
+      "hard_enabled": false,
+      "hard_pity": 1
+    },
+    {
+      "id": "79413a4b-1c79-4a1c-9ed4-376ecd6f7dd4",
+      "name": "五星",
+      "rank": 1,
+      "base_probability": 0.08,
+      "soft_enabled": false,
+      "soft_start": 1,
+      "soft_step": 0,
+      "hard_enabled": true,
+      "hard_pity": 10
+    },
+    {
+      "id": "d6067ec9-0987-4688-b13c-0a6d32d0dc7d",
+      "name": "六星",
+      "rank": 2,
+      "base_probability": 0.008,
+      "soft_enabled": true,
+      "soft_start": 66,
+      "soft_step": 0.05,
+      "hard_enabled": true,
+      "hard_pity": 80
+    }
+  ],
+  "big_pity": {
+    "enabled": true,
+    "hard_pity": 120,
+    "target": "first_up",
+    "after_obtain": "disable_after_obtain"
+  },
+  "bonus": {
+    "enabled": true,
+    "at_main_draw": 30,
+    "draws": 10,
+    "rarities": [
+      {
+        "id": "d566afb8-a779-4ec2-916e-a8bbc54defcf",
+        "name": "四星",
+        "rank": 0,
+        "base_probability": 0.912,
+        "soft_enabled": false,
+        "soft_start": 1,
+        "soft_step": 0,
+        "hard_enabled": false,
+        "hard_pity": 1
+      },
+      {
+        "id": "79413a4b-1c79-4a1c-9ed4-376ecd6f7dd4",
+        "name": "五星",
+        "rank": 1,
+        "base_probability": 0.08,
+        "soft_enabled": false,
+        "soft_start": 1,
+        "soft_step": 0,
+        "hard_enabled": true,
+        "hard_pity": 10
+      },
+      {
+        "id": "d6067ec9-0987-4688-b13c-0a6d32d0dc7d",
+        "name": "六星",
+        "rank": 2,
+        "base_probability": 0.008,
+        "soft_enabled": false,
+        "soft_start": 1,
+        "soft_step": 0,
+        "hard_enabled": false,
+        "hard_pity": 1
+      }
+    ]
+  },
+  "grant": {
+    "enabled": true,
+    "period": 240,
+    "quantity": 1,
+    "target": "first_up"
+  }
+}

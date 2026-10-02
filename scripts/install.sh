@@ -11,21 +11,44 @@ fi
 if (( $# )); then printf '不支持的参数；使用 --help 查看说明。\n' >&2; exit 1; fi
 project_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
 cd "$project_dir"
-for file in docker-compose.yml Dockerfile Caddyfile configs/pools/default.json frontend/package-lock.json; do
+for file in docker-compose.yml Dockerfile Caddyfile configs/pools/default.json configs/rules/zmd.json frontend/package-lock.json; do
   [[ -f $file ]] || { printf '缺少项目文件：%s；请下载完整 master 项目。\n' "$file" >&2; exit 1; }
 done
 [[ -t 0 ]] || { printf '请在交互式终端执行，不要使用 curl | bash。\n' >&2; exit 1; }
 if (( EUID == 0 )); then admin=(); else admin=(sudo); sudo -v; fi
 docker_cmd() { "${admin[@]}" docker "$@"; }
 
+stop_existing_install() {
+  printf '检测到已有安装或数据库数据，首次安装已停止。请按“备份 → 空v6 migrate → 导入账号 → 初始化默认业务 → 配置v6路径 → 最终切换”操作；不会创建新账号或改动现有数据。\n' >&2
+  exit 1
+}
+
+for path in data/history_v5.sqlite3 data/history_v6.sqlite3 data/jobs_v5 data/exports_v5; do
+  [[ ! -e $path ]] || stop_existing_install
+done
+
 printf '抽奖模拟器首次安装\n安装目录：%s\n' "$project_dir"
-if command -v docker >/dev/null && docker_cmd info >/dev/null 2>&1; then
-  running=$(docker_cmd ps -q --filter "label=com.docker.compose.project.working_dir=$project_dir")
-  if [[ -n $running ]]; then
-    printf '本目录已有运行中的服务。首次安装已退出；更新请按 docs/deployment.md 的版本更新章节执行。\n'
-    docker_cmd ps --filter "label=com.docker.compose.project.working_dir=$project_dir"
-    exit 0
+if command -v docker >/dev/null; then
+  docker_cmd info >/dev/null 2>&1 || {
+    printf '无法检查 Docker 数据卷，安装已停止。\n' >&2; exit 1;
+  }
+  existing=$(docker_cmd ps -aq --filter "label=com.docker.compose.project.working_dir=$project_dir") || {
+    printf '无法检查本目录的 Docker 容器，安装已停止。\n' >&2; exit 1;
+  }
+  [[ -z $existing ]] || stop_existing_install
+  if [[ -f .env ]]; then
+    project_name=$(docker_cmd compose config --format json 2>/dev/null | python3 -c 'import json, sys; print(json.load(sys.stdin)["name"])') || {
+      printf '无法读取 Compose 项目标识，安装已停止。\n' >&2; exit 1;
+    }
+  else
+    project_name=${COMPOSE_PROJECT_NAME:-$(basename "$project_dir" | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9_-')}
   fi
+  volume=$(docker_cmd volume ls -q \
+    --filter "label=com.docker.compose.project=$project_name" \
+    --filter 'label=com.docker.compose.volume=lottery_data') || {
+    printf '无法检查已有数据库卷，安装已停止。\n' >&2; exit 1;
+  }
+  [[ -z $volume ]] || stop_existing_install
 fi
 
 stage='安装基础工具'
@@ -143,13 +166,22 @@ docker_cmd run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp \
 stage='构建后端'
 docker_cmd compose build app
 docker_cmd compose pull caddy
+stage='检查全新v6数据目录'
+docker_cmd compose run --rm -T app python -c '
+from pathlib import Path
+root = Path("/app/data")
+allowed = {"jobs_v6", "exports_v6"}
+bad = [p for p in root.iterdir() if p.name not in allowed or not p.is_dir() or next(p.iterdir(), None) is not None]
+if bad:
+    raise SystemExit("检测到已有数据库或文件数据，首次安装已停止；请先完成账号保留迁移。")
+'
 stage='迁移数据库'
 docker_cmd compose run --rm app python manage.py migrate
 stage='检查管理员初始化状态'
 initialized=$(docker_cmd compose run --rm -T app python manage.py shell -c \
-  'from dashboard.models import AppMeta, User, Pool; print("READY" if AppMeta.objects.filter(key="initialized").exists() else "PARTIAL" if User.objects.exists() or Pool.objects.exists() else "EMPTY")' | tail -n 1)
+  'from dashboard.models import AppMeta, User, Pool, Rule; print("READY" if AppMeta.objects.filter(key="initialized").exists() else "PARTIAL" if User.objects.exists() or Pool.objects.exists() or Rule.objects.exists() else "EMPTY")' | tail -n 1)
 case "$initialized" in
-  READY) printf '保留已有管理员和数据，跳过初始化。\n' ;;
+  READY) printf '发现已有初始化数据，首次安装已停止；请使用账号保留迁移流程。\n' >&2; exit 1 ;;
   EMPTY)
     read -r -p '请输入首个管理员用户名：' username
     [[ -n $username ]] || { printf '用户名不能为空。\n' >&2; exit 1; }

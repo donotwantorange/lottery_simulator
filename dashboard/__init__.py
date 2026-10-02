@@ -1,5 +1,1 @@
-"""Data contracts used by the web dashboard."""
-
-from .job_models import JobState, RunParameters, read_json, result_payload, write_json
-
-__all__ = ["JobState", "RunParameters", "read_json", "result_payload", "write_json"]
+"""Django dashboard application; execution contracts live in job_models."""

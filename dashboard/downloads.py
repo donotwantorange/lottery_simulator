@@ -1,6 +1,5 @@
 """Authenticated, bounded-memory exports with per-batch revocation checks."""
 
-import json
 import fcntl
 import logging
 import os
@@ -24,7 +23,7 @@ from dashboard.api.pools import _json_body
 from dashboard.limits import TraceLimits
 from dashboard.models import User
 from dashboard.trace_store import TraceFilter
-from lottery_simulator.formats import TRACE_EXPORT_FORMAT_VERSION
+from dashboard.trace_export import iter_jsonl
 
 
 # ponytail: slots are per WSGI process, as specified; cross-process/global
@@ -192,7 +191,7 @@ def _filters(raw):
     if raw.keys() - fields:
         raise ValueError("明细筛选包含不支持字段")
     values = dict(raw)
-    for key in {"trial_from", "trial_to", "source_from", "source_to", "rarity"} & values.keys():
+    for key in {"trial_from", "trial_to", "source_from", "source_to", "main_from", "main_to"} & values.keys():
         if isinstance(values[key], str):
             if not values[key].isascii() or not values[key].isdecimal():
                 raise ValueError("明细筛选抽次必须是正整数")
@@ -249,7 +248,7 @@ def download_trace(request, run_id):
         filters = _download_data(request)
         actor = gate.actor()
         reader = get_trace_reader_for_actor(actor, run_id)
-        _, count = reader.query_records(filters, limit=50)
+        count = reader.count_events(filters)
         maximum = None if actor.is_superuser else TraceLimits.from_env().max_download_records
         if maximum is not None and count > maximum:
             raise APIError("validation_error", f"下载明细超过普通用户上限{maximum}条，请缩小筛选范围", 400)
@@ -270,23 +269,20 @@ def download_trace(request, run_id):
             path = Path(destination.name)
             with _paths_lock:
                 _active_paths.add(path)
-            metadata = dict(run.result_json)
-            destination.write(json.dumps({"type": "metadata", "export_format_version":
-                TRACE_EXPORT_FORMAT_VERSION, "run": metadata, "filters": filters.__dict__,
-                "matched_record_count": count}, ensure_ascii=False) + "\n")
-            reader_iterator = reader.iter_records(filters, batch_size=1000)
-            for index, record in enumerate(reader_iterator):
+            reader_iterator = iter_jsonl(dict(run.result_json), reader, filters, batch_size=1000)
+            for index, line in enumerate(reader_iterator):
                 if index % 1000 == 0:
                     _run(gate, run_id)
                     current_actor = gate.actor()
                     current_max = None if current_actor.is_superuser else TraceLimits.from_env().max_download_records
                     if current_max is not None and count > current_max:
                         raise APIError("forbidden", "当前账号下载限额已变化，请缩小筛选范围", 403)
-                destination.write(json.dumps({"type": "record", "record": record}, ensure_ascii=False) + "\n")
+                destination.write(line)
             _run(gate, run_id)
             destination.flush()
             os.fsync(destination.fileno())
-        reader_iterator.close()
+        if hasattr(reader_iterator, "close"):
+            reader_iterator.close()
         reader_iterator = None
 
         def check():
@@ -308,7 +304,7 @@ def download_trace(request, run_id):
         return _error(error)
     finally:
         try:
-            if reader_iterator is not None:
+            if reader_iterator is not None and hasattr(reader_iterator, "close"):
                 reader_iterator.close()
             if path is not None:
                 _cleanup(path)

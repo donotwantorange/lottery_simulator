@@ -1,4 +1,4 @@
-"""Django settings with v5 data paths isolated from the legacy application."""
+"""Django settings with v6 data paths isolated from the legacy application."""
 
 import os
 from pathlib import Path
@@ -27,11 +27,11 @@ ALLOWED_HOSTS = [
 
 DATA_DIR = Path(os.environ.get("LOTTERY_DATA_DIR", BASE_DIR / "data")).expanduser().resolve()
 DATABASE_PATH = Path(
-    os.environ.get("LOTTERY_DB_PATH", DATA_DIR / "history_v5.sqlite3")
+    os.environ.get("LOTTERY_DB_PATH", DATA_DIR / "history_v6.sqlite3")
 ).expanduser().resolve()
-JOBS_DIR = Path(os.environ.get("LOTTERY_JOBS_DIR", DATA_DIR / "jobs_v5")).expanduser().resolve()
+JOBS_DIR = Path(os.environ.get("LOTTERY_JOBS_DIR", DATA_DIR / "jobs_v6")).expanduser().resolve()
 EXPORTS_DIR = Path(
-    os.environ.get("LOTTERY_EXPORTS_DIR", DATA_DIR / "exports_v5")
+    os.environ.get("LOTTERY_EXPORTS_DIR", DATA_DIR / "exports_v6")
 ).expanduser().resolve()
 
 INSTALLED_APPS = [
@@ -78,7 +78,8 @@ DATABASES = {
         "ENGINE": "django.db.backends.sqlite3",
         "NAME": str(DATABASE_PATH),
         "ATOMIC_REQUESTS": False,
-        "OPTIONS": {"timeout": 20, "transaction_mode": "IMMEDIATE"},
+        "OPTIONS": {"timeout": 20, "transaction_mode": "IMMEDIATE",
+                    "init_command": "PRAGMA journal_mode=WAL"},
     }
 }
 

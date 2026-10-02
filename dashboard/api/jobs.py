@@ -9,7 +9,7 @@ from dashboard.api.experiments import _data_response
 from dashboard.api.pools import _actor_or_error, _error_response, _json_body, _page
 from dashboard.services.accounts import AccountError
 from dashboard.services.runs import (
-    RunError, cancel_job, get_job_for_actor, get_job_result_for_actor,
+    RunError, cancel_job, get_job_for_actor, get_job_result_for_actor, preview_submission,
     get_job_trace_reader_for_actor, job_busy, job_detail, list_my_jobs,
     pagination, resave_job_for_actor, safe_json, submit_job,
 )
@@ -41,6 +41,15 @@ def create_job(request):
     try:
         state = submit_job(_actor_or_error(request), _json_body(request))
         return _data_response(job_detail(state), status=202)
+    except ERRORS as error:
+        return _error(error)
+
+
+@csrf_protect
+@require_POST
+def preview(request):
+    try:
+        return _data_response(preview_submission(_actor_or_error(request), _json_body(request)))
     except ERRORS as error:
         return _error(error)
 
@@ -106,9 +115,11 @@ def trace(request, job_id):
         start = pagination(page, page_size)
         if page_size not in {50, 100, 200}:
             raise RunError("逐抽分页大小必须是50、100或200")
-        items, total = get_job_trace_reader_for_actor(actor, job_id).query_records(
-            _trace_filter(request), limit=page_size, offset=start)
-        return _data_response({"items": safe_json(items), "total": total,
+        reader = get_job_trace_reader_for_actor(actor, job_id)
+        filters = _trace_filter(request)
+        items = reader.query_events(filters, limit=page_size, offset=start)
+        total = reader.count_events(filters)
+        return _data_response({"items": safe_json(items), "total": str(total),
                                "page": page, "page_size": page_size})
     except ERRORS as error:
         return _error(error)

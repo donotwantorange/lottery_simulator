@@ -1,52 +1,37 @@
 import platform
 import unittest
 
-from lottery_simulator.formats import (
-    CONFIG_FORMAT_VERSION,
-    DATABASE_SCHEMA_VERSION,
-    JOB_FORMAT_VERSION,
-    RECORD_FORMAT_VERSION,
-    RESULT_FORMAT_VERSION,
-    SAMPLING_VERSION,
-    TRACE_EXPORT_FORMAT_VERSION,
-    TRACE_STORE_FORMAT_VERSION,
-    require_version,
-    sampling_metadata,
-)
+from lottery_simulator import formats
 
 
 class FormatsTest(unittest.TestCase):
-    def test_format_versions_match_the_multi_trial_trace_contract(self):
-        self.assertEqual(CONFIG_FORMAT_VERSION, 2)
-        self.assertEqual(SAMPLING_VERSION, 1)
-        self.assertEqual(RECORD_FORMAT_VERSION, 2)
-        self.assertEqual(RESULT_FORMAT_VERSION, 3)
-        self.assertEqual(JOB_FORMAT_VERSION, 3)
-        self.assertEqual(DATABASE_SCHEMA_VERSION, 5)
-        self.assertEqual(TRACE_STORE_FORMAT_VERSION, 1)
-        self.assertEqual(TRACE_EXPORT_FORMAT_VERSION, 1)
+    def test_new_versions_are_separate_from_legacy_names(self):
+        expected = {"RULE_FORMAT_VERSION": 1, "POOL_FORMAT_VERSION": 3,
+                    "EXPERIMENT_FORMAT_VERSION": 2, "RESULT_FORMAT_VERSION": 4,
+                    "EVENT_FORMAT_VERSION": 3, "SAMPLING_VERSION": 2,
+                    "JOB_FORMAT_VERSION": 4, "DATABASE_SCHEMA_VERSION": 6,
+                    "TRACE_STORE_FORMAT_VERSION": 2, "TRACE_EXPORT_FORMAT_VERSION": 2}
+        for name, version in expected.items():
+            with self.subTest(name=name):
+                self.assertEqual(getattr(formats, name), version)
+                self.assertIs(type(getattr(formats, name)), int)
+        self.assertEqual(formats.RULE_VERSION, "3.0")
+        self.assertIs(type(formats.RULE_VERSION), str)
+        self.assertEqual(formats.CONFIG_FORMAT_VERSION, 2)
+        self.assertEqual(formats.RECORD_FORMAT_VERSION, 2)
 
     def test_require_version_accepts_matching_integer(self):
-        self.assertIsNone(require_version(1, 1, "任务"))
+        self.assertIsNone(formats.require_version(1, 1, "任务"))
 
     def test_integer_version_rejects_bool_and_nonmatching_values(self):
-        for value in (True, "1", None, 2):
+        for value in (True, "1", None, 2, 1.0):
             with self.subTest(value=value), self.assertRaises(ValueError):
-                require_version(value, 1, "任务")
+                formats.require_version(value, 1, "任务")
 
     def test_sampling_metadata_describes_the_runtime(self):
-        metadata = sampling_metadata()
-
-        self.assertEqual(
-            set(metadata),
-            {
-                "sampling_version",
-                "rng_algorithm",
-                "python_implementation",
-                "python_version",
-            },
-        )
-        self.assertEqual(metadata["sampling_version"], 1)
+        metadata = formats.sampling_metadata()
+        self.assertEqual(set(metadata), {"sampling_version", "rng_algorithm", "python_implementation", "python_version"})
+        self.assertEqual(metadata["sampling_version"], 2)
         self.assertEqual(metadata["rng_algorithm"], "python.random.Random")
         self.assertEqual(metadata["python_implementation"], platform.python_implementation())
         self.assertEqual(metadata["python_version"], platform.python_version())

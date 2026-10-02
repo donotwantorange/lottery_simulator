@@ -13,13 +13,6 @@ from tempfile import TemporaryDirectory
 import unittest
 from uuid import UUID, uuid4
 
-from dashboard.limits import TraceLimits
-from dashboard.job_models import result_payload
-from dashboard.repository import HistoryRepository
-from dashboard.trace_store import TraceWriter
-from lottery_simulator.engine import simulate
-from lottery_simulator.rules.rule_1 import Rule1
-
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -64,18 +57,18 @@ class DeploymentFilesTest(unittest.TestCase):
         service.read_string(self.read("deploy/lottery-backup.service"))
         return shlex.split(service["Service"]["ExecStart"])
 
-    def test_compose_and_backup_use_v5_database_path(self):
+    def test_compose_and_backup_use_v6_database_path(self):
         compose = self.compose_services()
         self.assertEqual(
             compose["app"]["environment"]["LOTTERY_DB_PATH"],
-            "/app/data/history_v5.sqlite3",
+            "/app/data/history_v6.sqlite3",
         )
         command = self.backup_command()
         self.assertEqual(command[:2], ["/bin/sh", "-c"])
         self.assertEqual(
             command[2],
             "/usr/bin/docker compose exec -T app python3 scripts/backup_db.py "
-            "/app/data/history_v5.sqlite3 /app/backups/lottery-v5-$(date +%%F).sqlite3",
+            "/app/data/history_v6.sqlite3 /app/backups/lottery-v6-$(date +%%F).sqlite3",
         )
 
     def test_compose_public_boundary_and_persistent_paths(self):
@@ -88,9 +81,9 @@ class DeploymentFilesTest(unittest.TestCase):
         environment = app["environment"]
         self.assertEqual(environment["LOTTERY_ENV"], "production")
         self.assertIn("${SECRET_KEY", environment["SECRET_KEY"])
-        self.assertEqual(environment["LOTTERY_DB_PATH"], "/app/data/history_v5.sqlite3")
-        self.assertEqual(environment["LOTTERY_JOBS_DIR"], "/app/data/jobs_v5")
-        self.assertEqual(environment["LOTTERY_EXPORTS_DIR"], "/app/data/exports_v5")
+        self.assertEqual(environment["LOTTERY_DB_PATH"], "/app/data/history_v6.sqlite3")
+        self.assertEqual(environment["LOTTERY_JOBS_DIR"], "/app/data/jobs_v6")
+        self.assertEqual(environment["LOTTERY_EXPORTS_DIR"], "/app/data/exports_v6")
         self.assertNotIn("APP_AUTH_MODE", environment)
         self.assertNotIn("STREAMLIT_SERVER_ADDRESS", environment)
         self.assertIn("lottery_data:/app/data", app["volumes"])
@@ -111,7 +104,7 @@ class DeploymentFilesTest(unittest.TestCase):
             instructions.setdefault(command, []).append(value)
         self.assertEqual(instructions["USER"], ["app"])
         self.assertTrue(any("useradd" in line for line in instructions["RUN"]))
-        self.assertTrue(any("/app/data/jobs_v5" in line and "/app/data/exports_v5" in line
+        self.assertTrue(any("/app/data/jobs_v6" in line and "/app/data/exports_v6" in line
                             and "-m 700" in line and "-o app -g app" in line
                             for line in instructions["RUN"]))
         command = json.loads(instructions["CMD"][0])
@@ -147,7 +140,7 @@ class DeploymentFilesTest(unittest.TestCase):
         command = shlex.split(service["Service"]["ExecStart"])
         self.assertEqual(command[:2], ["/bin/sh", "-c"])
         self.assertEqual(command[2], "/usr/bin/docker compose exec -T app python3 scripts/backup_db.py "
-                         "/app/data/history_v5.sqlite3 /app/backups/lottery-v5-$(date +%%F).sqlite3")
+                         "/app/data/history_v6.sqlite3 /app/backups/lottery-v6-$(date +%%F).sqlite3")
         timer = configparser.ConfigParser(interpolation=None)
         timer.read_string(self.read("deploy/lottery-backup.timer"))
         self.assertEqual(timer["Timer"]["OnCalendar"], "daily")
@@ -163,7 +156,7 @@ class DeploymentFilesTest(unittest.TestCase):
             self.assertIn(pattern, excluded)
         result = subprocess.run(["git", "check-ignore", ".env", ".streamlit/secrets.toml",
                                  "data/lottery.sqlite3", "backups/example.sqlite3",
-                                 "frontend/node_modules/package.json", "frontend/dist/index.html",
+                                 "frontend/node_modules", "frontend/dist/index.html",
                                  "private.key", "certificate.pem", "certificate.crt",
                                  "certificate.cer", "certificate.p12", "certificate.pfx",
                                  "caddy_data/state.json",
@@ -177,150 +170,128 @@ class BackupDatabaseTest(unittest.TestCase):
         directory = TemporaryDirectory()
         self.addCleanup(directory.cleanup)
         self.root = Path(directory.name)
-        self.data_dir = self.root / "data"
+        self.data_dir = self.root / 'data'
         self.data_dir.mkdir()
-        self.source = self.data_dir / "history_v5.sqlite3"
-        self.destination = self.root / "backups" / "snapshot.sqlite3"
-        self.run_id = str(uuid4())
-        self.username = "backup-" + uuid4().hex[:12]
-        self.password = "sample-password"
-        self.session_key = uuid4().hex
-        self.environment = {
-            **os.environ,
-            "LOTTERY_DATA_DIR": str(self.data_dir),
-            "LOTTERY_DB_PATH": str(self.source),
-            "LOTTERY_JOBS_DIR": str(self.data_dir / "jobs_v5"),
-            "LOTTERY_EXPORTS_DIR": str(self.data_dir / "exports_v5"),
-            "LOTTERY_ENV": "development",
-        }
-        self.manage("migrate", "--noinput", "--verbosity", "0")
-        self.manage("shell", stdin=self._create_v5_fixture())
-        session_rows = self.snapshot(self.source)["django_session"]
-        self.assertEqual(len(session_rows), 1)
-        self.session_key = session_rows[0][0]
-
-    def manage(self, *arguments, stdin=None):
-        result = subprocess.run(
-            [sys.executable, str(ROOT / "manage.py"), *arguments],
-            cwd=ROOT, env=self.environment, input=stdin, capture_output=True,
-            text=True, timeout=60,
-        )
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        return result
-
-    def _create_v5_fixture(self):
-        return f'''\
-from django.contrib.sessions.backends.db import SessionStore
-from dashboard.job_models import result_payload
-from dashboard.limits import TraceLimits
-from dashboard.models import User
-from dashboard.repository import HistoryRepository
-from dashboard.services.accounts import create_account
-from dashboard.services.pools import save_pool
-from dashboard.trace_store import TraceWriter
-from lottery_simulator.config_documents import DEFAULT_POOL_PATH, read_config_json
-from lottery_simulator.engine import simulate
-from lottery_simulator.rules.rule_1 import Rule1
-from pathlib import Path
-from uuid import UUID
-
-admin = create_account(None, {self.username!r}, {self.password!r}, admin=True, must_change_password=False)
-pool = save_pool(admin, {{**read_config_json(DEFAULT_POOL_PATH), "name": "备份验收池", "kind": "public"}})
-session = SessionStore(session_key={self.session_key!r})
-session["_auth_user_id"] = str(admin.pk)
-session["_auth_user_backend"] = "dashboard.services.accounts.UsernameBackend"
-session["_auth_user_hash"] = admin.get_session_auth_hash()
-session["auth_version"] = admin.auth_version
-session["created_at"] = "2026-09-29T00:00:00+00:00"
-session["last_activity_at"] = "2026-09-29T00:00:00+00:00"
-session.save()
-rule = Rule1()
-trace_path = Path({str(self.root / 'trace.sqlite3')!r})
-writer = TraceWriter(trace_path, limits=TraceLimits(batch_size=5, max_records=100))
-try:
-    result = simulate(rule, 12, seed=42, collect_records=True, record_sink=writer.append)
-    writer.finish(trials=1, draws=12, initial_main_draws=0, bonus_per_trial=result.bonus_draws)
-finally:
-    writer.close()
-payload = result_payload(result, rule, 0.25)
-payload.update(owner_id=str(admin.pk), pool_source={{"id": str(pool.pk), "revision": pool.revision,
-    "name": pool.name, "original_author": pool.original_author}})
-HistoryRepository().save_run({self.run_id!r}, payload, trace_path=trace_path)
-assert User.objects.get(pk=admin.pk).check_password({self.password!r})
-assert SessionStore(session.session_key).load()["_auth_user_id"] == str(admin.pk)
-'''
+        self.source = self.data_dir / 'history_v6.sqlite3'
+        self.destination = self.root / 'backups' / 'snapshot.sqlite3'
+        self.username, self.password = 'backup-' + uuid4().hex[:12], 'sample-password'
+        self.environment = {**os.environ, 'PYTHONDONTWRITEBYTECODE': '1', 'LOTTERY_ENV': 'development',
+            'LOTTERY_DATA_DIR': str(self.data_dir), 'LOTTERY_DB_PATH': str(self.source),
+            'LOTTERY_JOBS_DIR': str(self.data_dir / 'jobs_v6'),
+            'LOTTERY_EXPORTS_DIR': str(self.data_dir / 'exports_v6')}
+        self.manage('migrate', '--noinput', '--verbosity', '0')
+        self.manage('shell', stdin=self._create_v6_fixture())
+        with closing(sqlite3.connect(self.source)) as connection:
+            self.session_key = connection.execute('SELECT session_key FROM django_session').fetchone()[0]
+            self.run_id = str(UUID(connection.execute('SELECT id FROM simulation_runs').fetchone()[0]))
 
     def snapshot(self, path):
         with closing(sqlite3.connect(path)) as connection:
             return {
-                table: connection.execute(f"SELECT * FROM {table} ORDER BY rowid").fetchall()
-                for table in ("users", "django_session", "pools", "simulation_runs", "draw_records")
+                table: connection.execute(f'SELECT * FROM {table} ORDER BY rowid').fetchall()
+                for table in ('users', 'django_session', 'rules', 'pools',
+                              'simulation_runs', 'simulation_events')
             }
 
-    def backup(self, source=None, destination=None):
-        script = ROOT / "scripts/backup_db.py"
-        self.assertTrue(script.is_file(), "Missing deployment file: scripts/backup_db.py")
-        return subprocess.run([sys.executable, str(script), str(source or self.source),
-                               str(destination or self.destination)], capture_output=True,
-                              text=True, timeout=10)
+    def manage(self, *arguments, stdin=None):
+        result = subprocess.run([sys.executable, str(ROOT / 'manage.py'), *arguments],
+            cwd=ROOT, env=self.environment, input=stdin, capture_output=True,
+            text=True, timeout=60)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        return result
 
-    def test_online_backup_is_independent_complete_and_restorable(self):
+    def _create_v6_fixture(self):
+        return f'''\
+from django.contrib.sessions.backends.db import SessionStore
+from dashboard.models import Pool, Rule, User
+from dashboard.services.accounts import create_account
+from dashboard.services.runs import submit_job
+from dashboard.management.commands.init_business_defaults import initialize_business_defaults
+from lottery_simulator.config_documents import DEFAULT_POOL_PATH, read_config_json
+admin = create_account(None, {self.username!r}, {self.password!r}, admin=True, must_change_password=False)
+initialize_business_defaults()
+alice = create_account(admin, 'alice', 'sample-password', must_change_password=False)
+pool = Pool.objects.get(pk=read_config_json(DEFAULT_POOL_PATH)['id'])
+session = SessionStore()
+session['_auth_user_id'] = str(admin.pk)
+session['_auth_user_backend'] = 'dashboard.services.accounts.UsernameBackend'
+session['_auth_user_hash'] = admin.get_session_auth_hash()
+session['auth_version'] = admin.auth_version
+session['created_at'] = '2026-09-29T00:00:00+00:00'
+session['last_activity_at'] = '2026-09-29T00:00:00+00:00'
+session.save()
+state = submit_job(alice, {{'pool_id': str(pool.pk), 'expected_pool_revision': pool.revision,
+    'expected_rule_revision': pool.rule.revision, 'initial_context': None,
+    'parameters': {{'draws': '12', 'trials': '1', 'seed': '42', 'trace': True,
+        'initial_main_draws': '0', 'initial_small_pity': {{}},
+        'initial_big_pity': {{'target_obtained': False, 'misses': '0'}}}}}}, synchronous=True)
+assert state.status == 'completed' and state.history_saved
+assert User.objects.get(pk=admin.pk).check_password({self.password!r})
+'''
+
+    def backup(self, source=None, destination=None):
+        return subprocess.run(
+            [sys.executable, str(ROOT / 'scripts/backup_db.py'),
+             str(source or self.source), str(destination or self.destination)],
+            capture_output=True, text=True, timeout=10,
+        )
+
+    def test_online_backup_preserves_accounts_and_rules_and_restores(self):
         before = self.snapshot(self.source)
-        self.assertEqual(len(before["users"]), 1)
-        self.assertEqual(len(before["django_session"]), 1)
-        self.assertEqual(len(before["pools"]), 1)
-        self.assertEqual(len(before["simulation_runs"]), 1)
-        self.assertEqual(len(before["draw_records"]), 12)
+        self.assertEqual(len(before['users']), 2)
+        self.assertEqual(len(before['django_session']), 1)
+        self.assertEqual(len(before['rules']), 1)
+        self.assertEqual(len(before['pools']), 1)
+        self.assertEqual(len(before['simulation_runs']), 1)
+        self.assertGreater(len(before['simulation_events']), 0)
         with closing(sqlite3.connect(self.source)) as live:
-            live.execute("PRAGMA journal_mode=WAL")
+            live.execute('PRAGMA journal_mode=WAL')
             result = self.backup()
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(self.snapshot(self.destination), before)
         self.assertEqual(self.destination.stat().st_mode & 0o777, 0o600)
         with closing(sqlite3.connect(self.destination)) as connection:
-            self.assertEqual(connection.execute("PRAGMA integrity_check").fetchall(), [("ok",)])
-            self.assertEqual(connection.execute(
-                "SELECT count(*) FROM draw_records WHERE run_id=?", (UUID(self.run_id).hex,)
-            ).fetchone()[0], 12)
-        with closing(sqlite3.connect(self.source)) as live:
-            live.execute("DELETE FROM draw_records")
-            live.execute("DELETE FROM simulation_runs")
-            live.execute("DELETE FROM django_session")
-            live.execute("DELETE FROM users")
-            live.commit()
+            self.assertEqual(connection.execute('PRAGMA integrity_check').fetchall(), [('ok',)])
+        with closing(sqlite3.connect(self.source)) as connection:
+            connection.execute('PRAGMA foreign_keys=OFF')
+            for table in ('simulation_events', 'simulation_runs', 'django_session',
+                          'pools', 'rules', 'users'):
+                connection.execute(f'DELETE FROM {table}')
         result = self.backup(self.destination, self.source)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(self.snapshot(self.source), before)
-        self.manage("shell", stdin=f'''\
+        self.manage('shell', stdin=f'''\
 from django.contrib.sessions.models import Session
-from dashboard.models import User, SimulationRun, DrawRecord
+from dashboard.models import SimulationRun, User
 from dashboard.repository import HistoryRepository
+from dashboard.trace_store import TraceFilter
 admin = User.objects.get(username={self.username!r})
 assert admin.check_password({self.password!r})
-session = Session.objects.get(session_key={self.session_key!r})
-assert session.get_decoded()["_auth_user_id"] == str(admin.pk)
-run = HistoryRepository().get_run({self.run_id!r})
-assert run["record_count"] == 12
-assert DrawRecord.objects.filter(run_id={UUID(self.run_id).hex!r}).count() == 12
+assert Session.objects.get(session_key={self.session_key!r}).get_decoded()['_auth_user_id'] == str(admin.pk)
+summary = HistoryRepository().get_run({self.run_id!r})
+assert SimulationRun.objects.get(pk={self.run_id!r}).schema_version == 6
+assert summary['result_format_version'] == 4 and summary['event_count'] > 0
+assert HistoryRepository().get_trace_reader({self.run_id!r}).count_events(TraceFilter()) == summary['event_count']
 ''')
 
     def test_same_resolved_path_is_rejected_without_losing_data(self):
         before = self.snapshot(self.source)
-        alias = self.root / "alias.sqlite3"
+        alias = self.root / 'alias.sqlite3'
         alias.symlink_to(self.source)
-        hardlink = self.root / "hardlink.sqlite3"
+        hardlink = self.root / 'hardlink.sqlite3'
         hardlink.hardlink_to(self.source)
         for destination in (self.source, alias, hardlink):
             result = self.backup(destination=destination)
             self.assertNotEqual(result.returncode, 0)
-            self.assertIn("same", result.stderr.lower())
+            self.assertIn('same', result.stderr.lower())
             self.assertEqual(self.snapshot(self.source), before)
 
     def test_missing_source_is_not_created(self):
-        missing = self.root / "missing.sqlite3"
+        missing = self.root / 'missing.sqlite3'
         result = self.backup(source=missing)
         self.assertNotEqual(result.returncode, 0)
         self.assertFalse(missing.exists())
 
-if __name__ == "__main__":
+
+if __name__ == '__main__':
     unittest.main()

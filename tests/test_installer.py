@@ -15,8 +15,12 @@ import json, os, pathlib, sys
 a = sys.argv[1:]
 with open(os.environ['INSTALL_CALLS'], 'a') as f:
     f.write(json.dumps(a) + '\\n')
-if a[:2] == ['ps', '-q'] and os.environ.get('INSTALL_RUNNING') == '1':
+if a[:2] == ['ps', '-aq'] and os.environ.get('INSTALL_RUNNING') == '1':
     print('existing-container')
+if a[:2] == ['volume', 'ls'] and os.environ.get('INSTALL_VOLUME') == '1':
+    print('existing-lottery-data')
+if a[:4] == ['compose', 'config', '--format', 'json']:
+    print(json.dumps({'name': 'fixture'}))
 if a[:2] == ['run', '--rm'] and 'node:22-bookworm-slim' in a:
     for i, item in enumerate(a):
         if item == '-v' and a[i+1].endswith(':/work/frontend'):
@@ -25,6 +29,12 @@ if a[:2] == ['run', '--rm'] and 'node:22-bookworm-slim' in a:
             (source / 'dist/index.html').write_text('fixture')
 if a[:2] == ['compose', 'run'] and 'shell' in a:
     print(os.environ.get('INSTALL_STATE', 'READY'))
+if a[:4] == ['compose', 'run', '--rm', '-T'] and 'python' in a and (
+    os.environ.get('INSTALL_PREFLIGHT_FAIL') == '1' or
+    os.environ.get('INSTALL_STATE') in {'READY', 'PARTIAL'}
+):
+    print('检测到已有数据库或文件数据，首次安装已停止。', file=sys.stderr)
+    sys.exit(1)
 '''
 
 
@@ -35,7 +45,8 @@ class InstallerTest(unittest.TestCase):
             (root / 'scripts').mkdir()
             shutil.copy2(SCRIPT, root / 'scripts/install.sh')
             for name in ['docker-compose.yml', 'Dockerfile', 'Caddyfile',
-                         'configs/pools/default.json', 'frontend/package-lock.json']:
+                         'configs/pools/default.json', 'configs/rules/zmd.json',
+                         'frontend/package-lock.json']:
                 target = root / name
                 target.parent.mkdir(parents=True, exist_ok=True)
                 target.touch()
@@ -78,30 +89,48 @@ class InstallerTest(unittest.TestCase):
 
     def test_running_installation_exits_before_changes(self):
         code, output, calls = self.run_installer(INSTALL_RUNNING='1')
-        self.assertEqual(code, 0, output)
-        self.assertIn('已有运行中的服务', output)
+        self.assertNotEqual(code, 0, output)
+        self.assertIn('首次安装已停止', output)
         self.assertFalse(any(x[0] in {'pull', 'run', 'compose'} for x in calls))
 
-    def test_initialized_database_and_required_build_mounts(self):
-        code, output, calls = self.run_installer()
-        self.assertEqual(code, 0, output)
+    def test_existing_stopped_database_volume_stops_before_changes(self):
+        code, output, calls = self.run_installer(INSTALL_VOLUME='1')
+        self.assertNotEqual(code, 0, output)
+        self.assertIn('首次安装已停止', output)
+        self.assertFalse(any(x[0] in {'pull', 'run'} or tuple(x[:2]) in
+            {('compose', 'build'), ('compose', 'up')} for x in calls))
+
+    def test_initialized_database_stops_after_read_only_preflight(self):
+        code, output, calls = self.run_installer(INSTALL_STATE='READY')
+        self.assertNotEqual(code, 0, output)
+        self.assertIn('首次安装已停止', output)
         build = next(x for x in calls if 'node:22-bookworm-slim' in x)
         self.assertTrue(any(x.endswith(':/work/frontend') for x in build))
         self.assertTrue(any(x.endswith(':/work/configs:ro') for x in build))
         self.assertIn('/work/frontend', build)
-        self.assertFalse(any('init_admin' in x for x in calls))
-        self.assertIn(['compose', 'up', '-d'], calls)
+        self.assertFalse(any('init_admin' in x or 'migrate' in x or x[:2] == ['compose', 'up'] for x in calls))
+
+    def test_nonempty_data_preflight_stops_before_migrate_or_init(self):
+        code, output, calls = self.run_installer(INSTALL_PREFLIGHT_FAIL='1')
+        self.assertNotEqual(code, 0, output)
+        self.assertFalse(any('migrate' in x or 'init_admin' in x or x[:2] == ['compose', 'up'] for x in calls))
 
     def test_partial_database_stops_without_start_or_reset(self):
         code, output, calls = self.run_installer(INSTALL_STATE='PARTIAL')
         self.assertNotEqual(code, 0)
-        self.assertIn('初始化状态异常', output)
-        self.assertNotIn(['compose', 'up', '-d'], calls)
-        self.assertFalse(any('init_admin' in x or 'down' in x for x in calls))
+        self.assertIn('首次安装已停止', output)
+        self.assertFalse(any('migrate' in x or 'init_admin' in x or x[:2] == ['compose', 'up'] for x in calls))
 
     def test_fresh_install_creates_private_env_and_initializes(self):
         code, output, calls = self.run_installer(create_env=False,
             answers=b'n\nfixture.example\nadmin-fixture\n', INSTALL_STATE='EMPTY')
+        self.assertEqual(code, 0, output)
+        self.assertIn(['compose', 'run', '--rm', 'app', 'python', 'manage.py',
+                       'init_admin', '--username', 'admin-fixture'], calls)
+        self.assertIn(['compose', 'up', '-d'], calls)
+
+    def test_fresh_retry_keeps_existing_env_and_initializes(self):
+        code, output, calls = self.run_installer(answers=b'n\nadmin-fixture\n', INSTALL_STATE='EMPTY')
         self.assertEqual(code, 0, output)
         self.assertIn(['compose', 'run', '--rm', 'app', 'python', 'manage.py',
                        'init_admin', '--username', 'admin-fixture'], calls)

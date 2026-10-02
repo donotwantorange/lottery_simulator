@@ -8,9 +8,9 @@ services:
       LOTTERY_ALLOWED_HOSTS: "${DOMAIN:?Set DOMAIN in .env}"
       LOTTERY_CSRF_TRUSTED_ORIGINS: "https://${DOMAIN:?Set DOMAIN in .env}"
       LOTTERY_DATA_DIR: /app/data
-      LOTTERY_DB_PATH: /app/data/history_v5.sqlite3
-      LOTTERY_JOBS_DIR: /app/data/jobs_v5
-      LOTTERY_EXPORTS_DIR: /app/data/exports_v5
+      LOTTERY_DB_PATH: /app/data/history_v6.sqlite3
+      LOTTERY_JOBS_DIR: /app/data/jobs_v6
+      LOTTERY_EXPORTS_DIR: /app/data/exports_v6
     volumes: ["lottery_data:/app/data", "lottery_backups:/app/backups"]
   caddy:
     image: caddy:2.11.4-alpine

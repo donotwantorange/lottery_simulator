@@ -1,7 +1,7 @@
 """Back up SQLite online: python3 scripts/backup_db.py SOURCE DESTINATION.
 
-The database may contain account password hashes and sessions; backups are
-therefore created with owner-only permissions.
+The database contains private account, session, rule, and history data. Backups
+exclude job directories and use owner-only permissions.
 """
 
 import argparse

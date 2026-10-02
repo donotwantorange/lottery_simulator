@@ -1,118 +1,79 @@
+"""Task 9 event query and export-facing reader contracts."""
+
+from pathlib import Path
 from dataclasses import replace
 from tempfile import TemporaryDirectory
-from pathlib import Path
 import unittest
 
 from dashboard.limits import TraceLimits
 from dashboard.trace_store import TraceFilter, TraceReader, TraceWriter
-from lottery_simulator.engine import simulate
-from lottery_simulator.rules.rule_1 import Rule1
+from lottery_simulator.engine import simulate_draws as simulate
+from tests.fixtures_rules import default_parameters, make_default_compiled
 
 
 class TraceQueriesTest(unittest.TestCase):
     def setUp(self):
-        directory = TemporaryDirectory()
-        self.addCleanup(directory.cleanup)
-        self.root = Path(directory.name)
-        self.trace_path = self.root / "trace.sqlite3"
-        records = list(simulate(
-            Rule1(), 81, trials=3, seed=42, initial_pity=29,
-            collect_records=True,
-        ).records)
-        desired = {(1, 1): (4, "same"), (2, 1): (5, "same"), (3, 1): (6, "six"),
-                   (1, 2): (4, None), (2, 2): (4, None), (3, 2): (5, "five")}
-        adjusted = []
-        for record in records:
-            key = (record.trial_index, record.source_index)
-            if record.source == "main" and key in desired:
-                rarity, name = desired[key]
-                outcome = replace(record.draw_result.outcome, rarity=rarity, character_name=name)
-                record = replace(record, draw_result=replace(record.draw_result, outcome=outcome))
-            adjusted.append(record)
-        writer = TraceWriter(self.trace_path, limits=TraceLimits(batch_size=17))
+        self.temp = TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.path = Path(self.temp.name) / "events.sqlite3"
+        self.compiled = make_default_compiled()
+        parameters = default_parameters(draws=40, trials=3, seed=42, trace=True)
+        writer = TraceWriter(self.path, limits=TraceLimits(batch_size=17, max_records=None))
         self.addCleanup(writer.close)
-        for record in adjusted:
-            writer.append(record)
-        writer.finish(trials=3, draws=81, initial_main_draws=29, bonus_per_trial=10)
+        result = simulate(self.compiled, parameters, record_sink=writer.append)
+        writer.finish(self.compiled, result.parameters, result.counts)
+        self.reader = TraceReader.for_trace_store(self.path)
 
-    def test_trace_store_pagination_filters_and_injection_are_safe(self):
-        reader = TraceReader.for_trace_store(self.trace_path)
-        rows, total = reader.query_records(TraceFilter(trial_from=1, trial_to=1), limit=50)
-        self.assertEqual(total, 91)
-        self.assertEqual([(row["trial_index"], row["draw_index"]) for row in rows[:2]],
-                         [(1, 1), (1, 2)])
-        tail, tail_total = reader.query_records(
-            TraceFilter(trial_from=1, trial_to=1), limit=50, offset=100,
-        )
-        self.assertEqual(tail, [])
-        self.assertEqual(tail_total, 91)
-        named, named_total = reader.query_records(
-            TraceFilter(rarity=4, character_name="same'; DROP TABLE records; --"), limit=50,
-        )
-        self.assertEqual((named, named_total), ([], 0))
-        same_four, _ = reader.query_records(TraceFilter(rarity=4, character_name="same"), limit=50)
-        same_five, _ = reader.query_records(TraceFilter(rarity=5, character_name="same"), limit=50)
-        self.assertEqual(len(same_four), 1)
-        self.assertEqual(len(same_five), 1)
-        unnamed, unnamed_total = reader.query_records(
-            TraceFilter(rarity=4, unnamed_character=True), limit=50,
-        )
-        self.assertGreaterEqual(unnamed_total, 2)
-        self.assertTrue(all(row["draw_result"]["outcome"]["character_name"] is None
-                            for row in unnamed))
+    def test_filters_pagination_and_dynamic_ids(self):
+        rows = self.reader.query_events(TraceFilter(trial_from=1, trial_to=1), limit=50)
+        self.assertEqual(rows[0]["trial_index"], 1)
+        self.assertEqual(self.reader.count_events(TraceFilter(trial_from=1, trial_to=1)),
+                         sum(row["trial_index"] == 1 for row in self.reader.iter_events(TraceFilter())))
+        tail = self.reader.query_events(TraceFilter(), limit=50,
+            offset=self.reader.count_events(TraceFilter()) - 1)
+        self.assertEqual(len(tail), 1)
+        rarity_id = self.compiled.rule.rarities[0].id
+        selected = self.reader.query_events(TraceFilter(rarity_id=rarity_id, event_type="draw"), limit=50)
+        self.assertTrue(all(event["draw_result"]["outcome"]["rarity_id"] == rarity_id for event in selected))
 
-    def test_filter_and_page_validation(self):
-        invalid = (
-            {"trial_from": True}, {"trial_from": 0}, {"trial_from": 2, "trial_to": 1},
-            {"source": "other"}, {"rarity": 3}, {"character_name": "x"},
-            {"rarity": 4, "character_name": "x", "unnamed_character": True},
-            {"unnamed_character": 1}, {"source_from": 3, "source_to": 2},
-        )
-        for values in invalid:
+    def test_keyset_iterator_and_draw_only_position_counts(self):
+        events = list(self.reader.iter_events(TraceFilter(source="main", source_from=1,
+                                                          source_to=2), batch_size=2))
+        self.assertEqual(len(events), 6)
+        rows = self.reader.position_counts(source="main", trial_from=1, trial_to=3,
+                                           source_from=1, source_to=2)
+        self.assertEqual([row["observations"] for row in rows], [3, 3])
+        self.assertTrue(all(sum(row["rarity_counts"].values()) == row["observations"] for row in rows))
+        self.assertTrue(all(event["event_type"] == "draw" for event in events))
+
+    def test_filters_and_pages_reject_bad_values(self):
+        for values in ({"trial_from": True}, {"trial_from": 0},
+                       {"source": "invalid"}, {"rarity_id": "nope"},
+                       {"event_type": "other"}, {"character_id": "bad", "unnamed_character": True}):
             with self.subTest(values=values), self.assertRaises(ValueError):
                 TraceFilter(**values)
-        reader = TraceReader.for_trace_store(self.trace_path)
-        for limit, offset in ((49, 0), (100, True), (100, -1)):
+        for limit, offset in ((0, 0), (True, 0), (10, -1)):
             with self.subTest(limit=limit, offset=offset), self.assertRaises(ValueError):
-                reader.query_records(TraceFilter(), limit=limit, offset=offset)
+                self.reader.query_events(TraceFilter(), limit=limit, offset=offset)
 
-    def test_iter_records_uses_full_filter_and_order(self):
-        reader = TraceReader.for_trace_store(self.trace_path)
-        rows = list(reader.iter_records(
-            TraceFilter(source="main", source_from=80, source_to=81), batch_size=2,
-        ))
-        self.assertEqual(len(rows), 6)
-        self.assertEqual([(row["trial_index"], row["source_index"]) for row in rows],
-                         [(1, 80), (1, 81), (2, 80), (2, 81), (3, 80), (3, 81)])
+    def test_two_grants_are_events_and_never_position_observations(self):
+        compiled = replace(self.compiled, rule=replace(self.compiled.rule,
+                           grant=replace(self.compiled.rule.grant, quantity=2)))
+        path = Path(self.temp.name) / "grants.sqlite3"
+        writer = TraceWriter(path, limits=TraceLimits(max_records=None))
+        self.addCleanup(writer.close)
+        result = simulate(compiled, default_parameters(draws=480, trials=1, seed=7, trace=True),
+                          record_sink=writer.append)
+        writer.finish(compiled, result.parameters, result.counts)
+        reader = TraceReader.for_trace_store(path)
+        grants = reader.query_events(TraceFilter(event_type="character_grant"), limit=50, offset=0)
+        self.assertEqual(len(grants), 2)
+        self.assertEqual(sum(event["grant"]["quantity"] for event in grants), 4)
+        self.assertTrue(all(event["source"] is None and "draw_result" not in event for event in grants))
+        rows = reader.position_counts(source="main", trial_from=1, trial_to=1,
+                                      source_from=239, source_to=241)
+        self.assertEqual([row["observations"] for row in rows], [1, 1, 1])
 
-    def test_position_counts_have_exact_denominators_and_bonus_is_separate(self):
-        reader = TraceReader.for_trace_store(self.trace_path)
-        rows = reader.position_counts(
-            source="main", trial_from=1, trial_to=3, source_from=1, source_to=2,
-        )
-        self.assertEqual(rows, [
-            {"source_index": 1, "observations": 3, "four_count": 1, "five_count": 1,
-             "six_count": 1, "four_rate": 1 / 3, "five_rate": 1 / 3, "six_rate": 1 / 3},
-            {"source_index": 2, "observations": 3, "four_count": 2, "five_count": 1,
-             "six_count": 0, "four_rate": 2 / 3, "five_rate": 1 / 3, "six_rate": 0.0},
-        ])
-        eighty_one = reader.position_counts(
-            source="main", trial_from=1, trial_to=3, source_from=81, source_to=81,
-        )
-        self.assertEqual(eighty_one[0]["source_index"], 81)
-        self.assertEqual(eighty_one[0]["observations"], 3)
-        bonus = reader.position_counts(
-            source="bonus", trial_from=1, trial_to=3, source_from=1, source_to=10,
-        )
-        self.assertEqual(len(bonus), 10)
-        self.assertTrue(all(row["observations"] == 3 for row in bonus))
-        empty = reader.position_counts(
-            source="bonus", trial_from=1, trial_to=3, source_from=11, source_to=11,
-        )
-        self.assertEqual(empty, [])
-        with self.assertRaises(ValueError):
-            reader.position_counts(source="main", trial_from=1, trial_to=3,
-                                   source_from=1, source_to=1001)
 
 if __name__ == "__main__":
     unittest.main()
