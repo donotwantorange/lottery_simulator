@@ -14,13 +14,11 @@ from threading import Thread
 from uuid import UUID, uuid4
 
 from dashboard.job_models import JobState, RunParameters, read_json, write_json
-from dashboard.limits import SimulationLimits, TraceLimits
+from dashboard.limits import SimulationLimits
 from dashboard.repository import HistoryRepository
 from dashboard.trace_store import TraceFilter, TraceReader
-from lottery_simulator.cli import RULES
-from lottery_simulator.formats import RESULT_FORMAT_VERSION, require_version
-from lottery_simulator.rules.pool_config import PoolConfig, load_pool_config
-from lottery_simulator.rules.base import expected_bonus_draws
+from lottery_simulator.formats import EVENT_FORMAT_VERSION, RESULT_FORMAT_VERSION, require_version
+from lottery_simulator.rules.runtime import compile_pool
 
 
 ACTIVE_STATUSES = {"queued", "running"}
@@ -32,50 +30,6 @@ def timestamp():
 
 class JobAlreadyRunning(RuntimeError):
     pass
-
-
-def validate_parameters_for_active_rule(parameters: RunParameters, limits=None) -> RunParameters:
-    """Validate dashboard parameters against the selected rule without copying its limits."""
-    parameters.validate()
-    limits = limits or SimulationLimits()
-    for value, upper, label in (
-        (parameters.draws, getattr(limits, "max_draws", 10_000_000), "每轮主抽"),
-        (parameters.trials, getattr(limits, "max_trials", 1_000_000), "轮数"),
-        (parameters.draws * parameters.trials, getattr(limits, "max_main_draws", 100_000_000), "主抽总数"),
-    ):
-        if upper is not None and value > upper:
-            raise ValueError(f"{label}超过上限")
-    try:
-        rule_factory = RULES[parameters.rule_name]
-    except KeyError:
-        raise ValueError("未知规则") from None
-    config = (
-        load_pool_config()
-        if parameters.pool_config is None
-        else PoolConfig.from_dict(parameters.pool_config)
-    )
-    rule = rule_factory(config=config)
-    max_pity = rule.max_pity
-    if isinstance(max_pity, bool) or not isinstance(max_pity, int) or max_pity <= 0:
-        raise ValueError("当前规则的保底配置无效")
-    if parameters.initial_pity >= max_pity:
-        raise ValueError(f"初始保底必须在 0 到 {max_pity - 1} 之间")
-    five_star = config.five_star
-    if five_star.pity_enabled:
-        if parameters.initial_five_star_pity >= five_star.hard_pity:
-            raise ValueError(
-                f"初始五星保底必须在 0 到 {five_star.hard_pity - 1} 之间"
-            )
-    elif parameters.initial_five_star_pity != 0:
-        raise ValueError("关闭五星保底时初始五星保底必须为 0")
-    bonus = expected_bonus_draws(rule, parameters.initial_pity, parameters.draws)
-    total_records = parameters.trials * (parameters.draws + bonus)
-    if total_records > 2**63 - 1:
-        raise ValueError("总抽计数超过存储可表示范围")
-    if parameters.trace:
-        if limits.max_records is not None and total_records > limits.max_records:
-            raise ValueError("Trace记录数超过上限")
-    return replace(parameters, pool_config=config.to_dict())
 
 
 class JobManager:
@@ -110,8 +64,12 @@ class JobManager:
     def start(self, *, prepare, synchronous=False) -> JobState:
         """Only service-owned admission may produce the accepted snapshot."""
         with self._locked():
-            parameters, owner_id, pool_source, policy = prepare()
-            parameters = validate_parameters_for_active_rule(parameters, limits=policy)
+            parameters, owner_id, pool_source, rule_source, policy = prepare()
+            parameters.validate()
+            if parameters.seed is None:
+                raise ValueError("已接受任务必须冻结实际随机种子")
+            compiled = compile_pool(parameters.rule_snapshot, parameters.pool_snapshot)
+            counts = policy.validate(compiled, parameters.parameters)
             for previous in list(self._active_states()):
                 directory = self._job_dir(previous.job_id)
                 if not self._is_worker(previous.pid, directory):
@@ -119,9 +77,10 @@ class JobManager:
             if any(self._active_states()):
                 raise JobAlreadyRunning("已有模拟任务正在运行")
             state = JobState(str(uuid4()), "queued", parameters.to_dict(), 0,
-                             parameters.draws * parameters.trials, updated_at=timestamp(),
+                             counts.total_draws + counts.grant_triggers, updated_at=timestamp(),
                              phase="simulating", owner_id=owner_id, accepted_at=timestamp(),
-                             pool_source=pool_source, limit_policy=policy.to_dict())
+                             pool_source=pool_source, rule_source=rule_source,
+                             limit_policy=policy.to_dict())
             state.validate()
             job_dir = self.root / state.job_id
             job_dir.mkdir(mode=0o700)
@@ -199,6 +158,26 @@ class JobManager:
                 result.get("result_format_version"), RESULT_FORMAT_VERSION, "结果格式"
             )
             require_version(result.get("sampling_version"), state.sampling_version, "抽样")
+            require_version(result.get("event_format_version"), EVENT_FORMAT_VERSION, "事件")
+            parameters = RunParameters.from_dict(state.parameters)
+            compiled = compile_pool(parameters.rule_snapshot, parameters.pool_snapshot)
+            counts = SimulationLimits.from_dict(state.limit_policy).validate(compiled, parameters.parameters)
+            if (result.get("parameters") != parameters.parameters.to_dict()
+                    or result.get("rule_snapshot") != parameters.rule_snapshot.to_dict()
+                    or result.get("pool_snapshot") != parameters.pool_snapshot.to_dict()
+                    or result.get("initial_context") != parameters.initial_context.to_dict()
+                    or result.get("targets") != dict(parameters.resolved_targets)
+                    or result.get("seed") != parameters.seed
+                    or result.get("trace_enabled") is not parameters.trace
+                    or result.get("owner_id") != state.owner_id
+                    or result.get("accepted_at") != state.accepted_at
+                    or result.get("pool_source") != state.pool_source
+                    or result.get("rule_source") != state.rule_source
+                    or result.get("limit_policy") != state.limit_policy
+                    or result.get("counts") != {name: getattr(counts, name)
+                                                  for name in counts.__dataclass_fields__}
+                    or result.get("event_count") != counts.trace_events):
+                raise ValueError("任务结果与接受快照不一致")
             return result
         except FileNotFoundError:
             return None
@@ -221,7 +200,7 @@ class JobManager:
         trace_path = self._job_dir(job_id) / "trace.sqlite3"
         try:
             reader = TraceReader.for_trace_store(trace_path)
-            reader.query_records(TraceFilter(), limit=50)
+            reader.count_events(TraceFilter())
             return reader
         except (OSError, sqlite3.Error, ValueError):
             return None

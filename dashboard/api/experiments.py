@@ -44,13 +44,17 @@ def _ensure_fields(data, allowed):
 
 
 def _ensure_config_fields(data):
-    _ensure_fields(data, {"name", "pool_ref", "parameters", "owner_id"})
+    _ensure_fields(data, {"name", "pool_ref", "parameters", "initial_context", "owner_id",
+                          "expected_pool_revision", "expected_rule_revision"})
     if "pool_ref" in data:
         _ensure_fields(data["pool_ref"], {"id", "name"})
     if "parameters" in data:
         _ensure_fields(data["parameters"], {
-            "draws", "trials", "initial_pity", "initial_five_star_pity", "seed", "trace",
+            "draws", "trials", "initial_main_draws", "initial_small_pity",
+            "initial_big_pity", "seed", "trace",
         })
+        if "initial_big_pity" in data["parameters"]:
+            _ensure_fields(data["parameters"]["initial_big_pity"], {"target_obtained", "misses"})
 
 
 def _write_payload(validated):
@@ -59,6 +63,7 @@ def _write_payload(validated):
         "pool_ref": {"id": str(validated["pool_ref"]["id"]),
                      "name": validated["pool_ref"]["name"]},
         "parameters": validated["parameters"],
+        "initial_context": validated["initial_context"],
     }
 
 
@@ -93,7 +98,9 @@ def create_experiment_config(request):
         data = _json_body(request)
         _ensure_config_fields(data)
         values = _validated(ExperimentSaveSerializer, data)
-        config = save_experiment(actor, _write_payload(values), owner_id=values.get("owner_id"))
+        config = save_experiment(actor, _write_payload(values), owner_id=values.get("owner_id"),
+            expected_pool_revision=values["expected_pool_revision"],
+            expected_rule_revision=values["expected_rule_revision"])
         config = ExperimentConfig.objects.select_related("owner", "pool").get(pk=config.pk)
         return _data_response(ExperimentConfigSerializer(config, context={"actor": actor}).data,
                               status=201)
@@ -121,7 +128,8 @@ def experiment_config_mutation(request, config_id):
         actor = _actor_or_error(request)
         data = _json_body(request)
         if request.method == "PATCH":
-            _ensure_fields(data, {"name", "pool_ref", "parameters", "expected_revision"})
+            _ensure_fields(data, {"name", "pool_ref", "parameters", "initial_context",
+                                  "expected_revision", "expected_pool_revision", "expected_rule_revision"})
             _ensure_config_fields({key: value for key, value in data.items()
                                    if key != "expected_revision"})
             if "expected_revision" not in data:
@@ -129,11 +137,14 @@ def experiment_config_mutation(request, config_id):
             controls = _validated(RevisionOnlySerializer, {
                 "expected_revision": data["expected_revision"]
             })
-            payload_data = {key: data[key] for key in ("name", "pool_ref", "parameters")
+            payload_data = {key: data[key] for key in ("name", "pool_ref", "parameters", "initial_context",
+                                                       "expected_pool_revision", "expected_rule_revision")
                             if key in data}
             values = _validated(ExperimentSaveSerializer, payload_data)
             config = save_experiment(actor, _write_payload(values), config_id=config_id,
-                                     expected_revision=controls["expected_revision"])
+                                     expected_revision=controls["expected_revision"],
+                                     expected_pool_revision=values["expected_pool_revision"],
+                                     expected_rule_revision=values["expected_rule_revision"])
             config = ExperimentConfig.objects.select_related("owner", "pool").get(pk=config.pk)
             return _data_response(ExperimentConfigSerializer(config, context={"actor": actor}).data)
         if request.method == "DELETE":
@@ -172,11 +183,12 @@ def confirm_experiment_import_view(request):
     try:
         actor = _actor_or_error(request)
         body = _json_body(request)
-        _ensure_fields(body, {"document", "pool_id", "pool_revision", "owner_id"})
+        _ensure_fields(body, {"document", "pool_id", "pool_revision", "rule_revision", "owner_id"})
         values = _validated(ExperimentImportConfirmSerializer, body)
         config = confirm_experiment_import(
             actor, values["document"], pool_id=values["pool_id"],
-            pool_revision=values["pool_revision"], owner_id=values.get("owner_id"),
+            pool_revision=values["pool_revision"], rule_revision=values["rule_revision"],
+            owner_id=values.get("owner_id"),
         )
         config = ExperimentConfig.objects.select_related("owner", "pool").get(pk=config.pk)
         return _data_response(ExperimentConfigSerializer(config, context={"actor": actor}).data,

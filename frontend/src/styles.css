@@ -59,6 +59,19 @@ input:focus { border-color: #7188ee; box-shadow: 0 0 0 3px #4568e81c; }
 .readonly-summary { display: grid; grid-template-columns: auto 1fr; gap: 7px 12px; align-content: start; padding: 12px; border-radius: 8px; background: #f7f8fb; font-size: 13px; }
 .readonly-summary span { color: #77849a; }
 .success-note { margin: 0; color: #28714b; font-size: 13px; }
+.notice-note { margin: 14px 0; padding: 12px 14px; border-left: 3px solid #d89b35; border-radius: 6px; color: #775319; background: #fff8e9; font-size: 13px; }
+.rule-table-actions { display: flex; align-items: center; gap: 10px; }
+.pool-rule-summary { display: grid; grid-template-columns: minmax(120px, .3fr) 1fr; gap: 9px 14px; margin: 0; padding: 14px; border-radius: 9px; background: #f7f8fb; font-size: 13px; }
+.pool-rule-summary dt { color: #77849a; }
+.pool-rule-summary dd { margin: 0; }
+.pool-rarity { margin: 18px 0; padding: 16px; border: 1px solid #e9edf3; border-radius: 10px; }
+.pool-rarity h4 { margin: 0 0 6px; }
+.pool-reward { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; align-items: end; margin: 12px 0; padding: 14px; border: 1px solid #e9edf3; border-radius: 9px; }
+.pool-reward label, .rarity-mapping > label { display: grid; gap: 7px; color: #536176; font-size: 13px; font-weight: 600; }
+.rarity-mapping { display: grid; gap: 12px; margin: 12px 0; }
+.rarity-mapping > p { margin: 0; color: #68758a; font-size: 13px; }
+.pool-row-actions { display: flex; gap: 5px; }
+.pool-save-form { display: grid; gap: 16px; }
 .import-preview { display: grid; gap: 12px; margin-top: 18px; padding: 16px; border: 1px solid #e5eaf1; border-radius: 10px; background: #f9faff; }
 .import-preview p { margin: 0; color: #68758a; font-size: 13px; }
 .import-preview label { max-width: 440px; }

@@ -2,14 +2,15 @@
 
 本指南适用于新版 Django＋React 的单机部署。先准备服务器并获取项目，再选择手动安装或可选脚本安装；服务启动后统一按验收清单验证，后续查看运维与备份章节。
 
-截至2026-09-30，用户确认当前腾讯云服务器已使用手动指令完成部署。自动安装脚本已纳入master，但尚未实机测试；新服务器建议优先参考手动流程。已有服务器不需要重新安装，直接查看日常运维。
+截至2026-10-01，用户确认现有腾讯云服务器曾通过手动指令部署旧版。该事实不代表当前v6界面、接口或数据升级已在线验收。自动安装脚本尚未实机测试。
 
 日常本机开发见[本地使用手册](local-usage.md)，网页操作见[网页页面指南](dashboard-guide.md)，项目介绍见[README](../README.md)。
 
 | 你要做什么 | 阅读入口 |
 | --- | --- |
-| 在新服务器安装 | [准备服务器](#准备服务器) → [获取项目](#获取项目) → [手动安装](#手动安装) |
+| 在空服务器安装v6 | [准备服务器](#准备服务器) → [获取项目](#获取项目) → [手动安装](#手动安装) |
 | 了解自动安装脚本（尚未实机测试） | [可选交互式安装](#可选方式交互式安装) |
+| 保留v5账号并建立v6 | [v5账号保留与v6切换](#v5账号保留与v6切换) |
 | 已经部署，查看状态或更新 | [日常运维](#日常运维) |
 | 备份、恢复或迁移旧服务器数据 | [备份恢复与迁移](#备份恢复与迁移) |
 | 遇到报错 | [常见问题](#常见问题) |
@@ -21,7 +22,7 @@
 
 以下假设使用全新 Ubuntu 24.04 服务器、具有 sudo 权限的普通管理账号，以及一个可配置 DNS 的域名。采用仓库的 Docker Compose＋Caddy，不另装 Nginx、Python 虚拟环境；前端用临时 Node 容器构建。
 
-项目固定放在 `/opt/lottery-simulator`，与备份服务配置一致。本教程初始化全新 v5 数据库；如需迁移本机账号和历史，先读[备份恢复与迁移](#备份恢复与迁移)，不要运行 `init_admin`。当前方案是单机部署，不要让多台服务器直接共享 SQLite 和任务目录。
+项目固定放在 `/opt/lottery-simulator`，与备份服务配置一致。本教程初始化空 v6 数据库；如需保留v5账号，按[v5账号保留与v6切换](#v5账号保留与v6切换)操作，不运行 `init_admin`。旧池、实验、历史和会话不会导入。当前方案是单机部署，不要让多台服务器直接共享 SQLite 和任务目录。
 
 ### 域名与端口
 
@@ -283,7 +284,7 @@ sudo docker compose run --rm app python manage.py migrate
 sudo docker compose run --rm app python manage.py init_admin --username admin
 ```
 
-交互输入两次密码，同时创建默认公共池。程序最低要求 6 个字符，但公网管理员应使用更长、唯一的密码。成功时显示“首个管理员和默认公共池已创建”。
+交互输入两次密码，同时创建默认公共`zmd`规则和角色池。程序最低要求 6 个字符，但公网管理员应使用更长、唯一的密码。
 
 `init_admin` 只执行一次。如果提示已初始化，先确认卷中是否已有数据，不能删库重试。本机账号不会自动出现在服务器的新卷中。
 
@@ -303,7 +304,8 @@ sudo docker compose logs --tail=100 app caddy
 
 - [ ] 证书可信，HTTP 跳转 HTTPS；登录、退出、刷新正常。
 - [ ] 前端页面直接打开和刷新正常；不存在的 API 路径返回 404，不回退前端 HTML。
-- [ ] 默认规则开启赠送，主抽 30 次×2 轮并开启 Trace，共产生 80 条逐抽记录。
+- [ ] 规则页可查看/复制规则，池显示动态稀有度、UP组和权重；用隔离账号完成规则、初始状态和赠送验证。
+- [ ] 主抽30次×2轮并开启Trace时分别核对主抽、赠送抽、总抽、直接赠送和Trace事件口径。
 - [ ] 图表适应窗口，悬停与数值表一致；历史可重开、Trace 可下载。
 - [ ] 非 Trace 模拟正常，并显示无法读取逐抽明细的提示。
 - [ ] 两个普通用户的私有池、实验配置和历史互相隔离。
@@ -348,7 +350,7 @@ sudo docker compose up -d
 1. 通知暂停使用，确认活动任务结束或取消且 worker 退出。
 2. 完成[在线备份](#备份)，将备份复制到安全位置，并记录当前 `git rev-parse HEAD`。
 3. 如果启用了备份 timer，停止调度并确认已开始的备份完成。
-4. 停止服务、更新代码、重新构建前后端，在原持久卷执行迁移。
+4. 停止服务、更新代码、重新构建前后端；确认Compose连接v6数据库/目录，再执行迁移。
 5. 启动后验证登录、历史、Trace 和小型模拟，再恢复访问与备份调度。
 
 已安装 timer 时执行：
@@ -391,7 +393,23 @@ sudo systemctl start lottery-backup.timer
 
 ### 数据库版本边界
 
-本版本使用 Django migration 管理 v5 schema。迁移前先验证目标 `LOTTERY_DB_PATH` 是预期的 v5 路径；不要将新版本指向旧 Streamlit 数据库，也不要自动迁移旧历史。旧数据清理是历史操作，不是安装或迁移时应重复执行的步骤。
+当前程序使用 Django migration 管理 v6 schema。默认路径是 `/app/data/history_v6.sqlite3`、`/app/data/jobs_v6/` 和 `/app/data/exports_v6/`。v5数据库不能作为v6目标，也不会原地迁移；只读账号导入流程见下节。旧版文件保留为独立备份，不能改名伪装成v6数据库。
+
+### v5账号保留与v6切换
+
+此流程建立空v6库，再从明确的v5源只读复制账号与登录防护。池、实验配置、运行历史、Trace和会话不会迁入。真实环境操作前需核对源库、目标库和备份路径，并先在隔离副本演练；这里的步骤不授权删除或覆盖真实数据。
+
+切换前先按旧版受控流程停止服务和活动任务，并确认没有删除中账号或未完成删除清单。目标迁移、账号导入、默认初始化及验收成功后才切换到配套新版代码/前端；失败时保留旧库与备份，恢复旧代码和路径，不让旧代码打开v6。
+
+当前Compose将数据库和目录配置为`history_v6.sqlite3`、`jobs_v6/`、`exports_v6/`。先备份明确选定的v5数据库到新的私有文件；使用该备份作为导入来源，绝不能把`LOTTERY_DB_PATH`设为源库。目标v6必须是完整迁移后且业务表为空：
+
+```bash
+sudo docker compose run --rm app python manage.py migrate
+sudo docker compose run --rm app python manage.py import_v5_accounts --source /app/backups/selected-v5.sqlite3
+sudo docker compose run --rm app python manage.py init_business_defaults
+```
+
+导入命令只读验证源库版本、完整性、迁移状态和未完成账号删除标记，并要求目标为空；它只复制账号与登录限制，不复制会话。重复导入会拒绝。副本验收应确认账号可登录、默认`zmd`规则和池已建立，再核对最终运行数据路径。不得在已有账号库运行`init_admin`；该命令只用于全新空库。
 
 ### 备份
 
@@ -399,8 +417,8 @@ Compose 部署优先使用以下在线备份命令（app 需运行）：
 
 ```bash
 sudo docker compose exec -T app python3 scripts/backup_db.py \
-  /app/data/history_v5.sqlite3 \
-  "/app/backups/lottery-v5-$(date +%F-%H%M%S).sqlite3"
+  /app/data/history_v6.sqlite3 \
+  "/app/backups/lottery-v6-$(date +%F-%H%M%S).sqlite3"
 ```
 
 数据和备份分别保存在 `lottery_data`、`lottery_backups` 命名卷，实际卷名带 Compose 项目前缀；容器路径不是宿主机同名目录。不要直接编辑 Docker 内部卷文件。
@@ -410,18 +428,18 @@ sudo docker compose exec -T app python3 scripts/backup_db.py \
 ```bash
 sudo install -d -m 700 /opt/lottery-private-backups
 sudo docker compose cp \
-  app:/app/backups/lottery-v5-YYYY-MM-DD-HHMMSS.sqlite3 \
+  app:/app/backups/lottery-v6-YYYY-MM-DD-HHMMSS.sqlite3 \
   /opt/lottery-private-backups/
-sudo chmod 600 /opt/lottery-private-backups/lottery-v5-YYYY-MM-DD-HHMMSS.sqlite3
+sudo chmod 600 /opt/lottery-private-backups/lottery-v6-YYYY-MM-DD-HHMMSS.sqlite3
 ```
 
 此目录由 root 管理，复制和异机传输使用受控管理权限。还须将备份复制到受控异机位置，检查容量并安排保留周期；同机备份无法防止服务器整体丢失。
 
-备份包含账号、密码哈希、会话、角色池、配置和已提交历史。它不包含 `jobs_v5/` 或 `exports_v5/`。脚本成功时输出 `Backup integrity_check: ok`，目标文件权限设置为 `0600`。备份目录应限制为服务/运维账号可访问，并复制到受控异机位置；不得放入静态网站目录或提交 Git。
+备份包含账号、密码哈希、会话、规则、角色池、实验配置和已提交历史。它不包含 `jobs_v6/` 或 `exports_v6/`。脚本成功时输出 `Backup integrity_check: ok`，目标文件权限设置为 `0600`。备份目录应限制为服务/运维账号可访问，并复制到受控异机位置；不得放入静态网站目录或提交 Git。
 
 ### 每日自动备份
 
-仓库提供的 `deploy/lottery-backup.service` 与 `.timer` 是 systemd 备份接口示例，假设 Docker Compose 服务名 `app` 和容器路径 `/app/data`、`/app/backups`。它们已与当前 Compose 配置对齐，使用 `history_v5.sqlite3` 与 `lottery-v5-` 前缀。
+仓库提供的 `deploy/lottery-backup.service` 与 `.timer` 是 systemd 备份接口示例，假设 Docker Compose 服务名 `app` 和容器路径 `/app/data`、`/app/backups`，使用v6数据库和`lottery-v6-`前缀。
 
 标准安装路径为 `/opt/lottery-simulator`，Docker 路径为 `/usr/bin/docker`；若不同，先调整服务文件。安装与检查命令：
 
@@ -440,7 +458,7 @@ sudo systemctl list-timers lottery-backup.timer
 
 ### 恢复
 
-恢复前停止 Web、worker 和定时备份，保存当前数据库副本，再恢复明确选定的 v5 备份。确认实际卷、代码版本、文件属主和权限，不能在数据库使用中覆盖，不能混用旧 WAL/SHM 与恢复快照。检查 `PRAGMA integrity_check` 为 `ok`，必要时运行对应迁移，启动后验证账号登录、历史读取和小型模拟写入，再恢复访问和定时备份。
+恢复前停止 Web、worker 和定时备份，保存当前数据库副本，再恢复明确选定的v6备份。确认实际卷、代码版本、文件属主和权限，不能在数据库使用中覆盖，不能混用旧 WAL/SHM 与恢复快照。检查 `PRAGMA integrity_check` 为 `ok`，启动后验证账号登录、历史读取和小型模拟写入，再恢复访问和定时备份。v5备份不是v6恢复文件；账号保留导入见前文。
 
 迁移到新服务器时账号已包含在备份中，不执行 `init_admin`。恢复不会回滚或恢复任务目录；若任务状态与恢复后的数据库不一致，先保留目录并调查，不能递归清理数据目录。恢复演练应使用隔离目录与卷；涉及覆盖现有数据库时应先确定具体目标，不直接套用通用覆盖命令。
 
@@ -453,8 +471,8 @@ sudo systemctl list-timers lottery-backup.timer
 | Caddy | 对外发布 TCP 80/443，提供 HTTPS、静态网页和 API 反向代理 |
 | app | Django＋Gunicorn，仅在容器内部监听 8000；在容器内启动模拟 worker |
 | 前端 | 宿主机 `frontend/dist/` 只读挂载到 Caddy 的 `/srv` |
-| 数据库 | `/app/data/history_v5.sqlite3`，卷 `lottery_data` |
-| 任务与临时导出 | `/app/data/jobs_v5/`、`/app/data/exports_v5/`，卷 `lottery_data` |
+| 数据库 | `/app/data/history_v6.sqlite3`，卷 `lottery_data` |
+| 任务与临时导出 | `/app/data/jobs_v6/`、`/app/data/exports_v6/`，卷 `lottery_data` |
 | 备份 | `/app/backups/`，卷 `lottery_backups` |
 | 证书与 Caddy 状态 | `/data`、`/config`，卷 `caddy_data`、`caddy_config` |
 
@@ -474,9 +492,9 @@ SECRET_KEY=<.env中的随机密钥>
 LOTTERY_ALLOWED_HOSTS=<DOMAIN>
 LOTTERY_CSRF_TRUSTED_ORIGINS=https://<DOMAIN>
 LOTTERY_DATA_DIR=/app/data
-LOTTERY_DB_PATH=/app/data/history_v5.sqlite3
-LOTTERY_JOBS_DIR=/app/data/jobs_v5
-LOTTERY_EXPORTS_DIR=/app/data/exports_v5
+LOTTERY_DB_PATH=/app/data/history_v6.sqlite3
+LOTTERY_JOBS_DIR=/app/data/jobs_v6
+LOTTERY_EXPORTS_DIR=/app/data/exports_v6
 ```
 
 生产缺少密钥会拒绝启动。Caddy 保留 Host 并转发 `X-Forwarded-Proto`；当前 Django 未配置 `SECURE_PROXY_SSL_HEADER`。Secure Cookie 由生产环境明确启用，会话 Cookie 保持 HttpOnly、SameSite=Lax。
@@ -490,7 +508,7 @@ LOTTERY_EXPORTS_DIR=/app/data/exports_v5
 备份脚本可对运行中的SQLite源库执行在线备份。以下是非容器部署的路径示例，不是Compose命名卷在宿主机上的实际路径；维护者须先确认真实映射：
 
 ```bash
-python3 scripts/backup_db.py /srv/lottery/data/history_v5.sqlite3 /srv/lottery/backups/lottery-v5-$(date +%F-%H%M%S).sqlite3
+python3 scripts/backup_db.py /srv/lottery/data/history_v6.sqlite3 /srv/lottery/backups/lottery-v6-$(date +%F-%H%M%S).sqlite3
 ```
 
 ## 常见问题
@@ -534,10 +552,11 @@ curl -I --connect-timeout 15 --max-time 20 https://你的实际域名
 
 ## 验证状态
 
-截至2026-09-30，区分以下证据：
+截至2026-10-01，区分以下证据：
 
 | 项目 | 当前证据 |
 | --- | --- |
+| 任务16新版集中验收 | 后端242项、前端52项及构建通过，后续账号/夹具回归通过；浏览器与最终dist加载已核对。详见[实施记录](changes/2026-09-30-independent-rules-rarities.md)，不是服务器验收 |
 | 本地功能 | 已有[浏览器验收](changes/2026-09-29-user-pool-browser-acceptance.md)和[实施记录](changes/2026-09-24-user-pool-experiment.md) |
 | 腾讯云手动部署 | 用户已明确确认服务器使用手动指令完成部署；此前提供日志显示 app 健康、Caddy 启动、正式 Let's Encrypt 证书签发成功。本次未连接服务器复核 |
 | 服务器业务验收 | 未逐项记录登录、双用户隔离、模拟、下载、取消与恢复的服务器验收结果 |

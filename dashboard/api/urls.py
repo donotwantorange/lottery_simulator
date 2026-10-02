@@ -1,6 +1,7 @@
 from django.urls import path
 
 from dashboard.api import auth, experiments, jobs, management, pools, runs
+from dashboard.api import rules
 from dashboard.downloads import download_trace
 
 urlpatterns = [
@@ -11,6 +12,7 @@ urlpatterns = [
     path("management/jobs/", management.jobs),
     path("runs/<uuid:run_id>/download-trace/", download_trace),
     path("jobs/", jobs.create_job),
+    path("jobs/preview/", jobs.preview),
     path("jobs/busy/", jobs.busy),
     path("jobs/mine/", jobs.mine),
     path("jobs/<uuid:job_id>/", jobs.detail),
@@ -30,10 +32,18 @@ urlpatterns = [
     path("auth/change-password/", auth.change_password_view),
     path("auth/activity/", auth.activity),
     path("pools/import/", pools.import_pool),
+    path("pools/import/preview/", pools.preview_pool_import_view),
+    path("pools/import/confirm/", pools.confirm_pool_import_view),
     path("pools/", pools.pool_collection),
     path("pools/<uuid:pool_id>/copy/", pools.copy_pool_view),
     path("pools/<uuid:pool_id>/export/", pools.export_pool_view),
     path("pools/<uuid:pool_id>/", pools.pool_resource),
+    path("rules/import/preview/", rules.preview_rule_import),
+    path("rules/import/confirm/", rules.confirm_rule_import),
+    path("rules/", rules.rule_collection),
+    path("rules/<uuid:rule_id>/copy/", rules.copy_rule_view),
+    path("rules/<uuid:rule_id>/export/", rules.export_rule_view),
+    path("rules/<uuid:rule_id>/", rules.rule_resource),
     path("experiment-configs/import/preview/", experiments.preview_experiment_import),
     path("experiment-configs/import/confirm/", experiments.confirm_experiment_import_view),
     path("experiment-configs/", experiments.experiment_config_collection),

@@ -6,7 +6,7 @@ from django.views.decorators.csrf import csrf_protect
 
 from dashboard.api.errors import APIError, error_response
 from dashboard.api.pools import _actor_or_error, _error_response, _json_body, _page
-from dashboard.models import AppMeta, ExperimentConfig, Pool, SimulationRun, User
+from dashboard.models import AppMeta, ExperimentConfig, Pool, Rule, SimulationRun, User
 from dashboard.services.accounts import (
     AccountError, DeleteIncomplete, _admin_actor, create_account, delete_account,
     reset_password, unlock_login, update_account,
@@ -58,6 +58,7 @@ def _deletion_scope(target):
         exports = sum(1 for path in directory.glob(f"user_{target.pk.hex}_*.jsonl")
                        if path.is_file() and not path.is_symlink())
     return {
+        "private_rules": str(Rule.objects.filter(owner=target).count()),
         "private_pools": str(Pool.objects.filter(owner=target).count()),
         "experiment_configs": str(ExperimentConfig.objects.filter(owner=target).count()),
         "runs": str(SimulationRun.objects.filter(owner=target).count()),
@@ -65,7 +66,10 @@ def _deletion_scope(target):
         "export_files": str(exports),
         "other_users_pool_references": str(ExperimentConfig.objects.filter(
             pool__owner=target).exclude(owner=target).count()),
+        "other_users_rule_references": str(Pool.objects.filter(
+            rule__owner=target).exclude(owner=target).count()),
         "public_pools_preserved": str(Pool.objects.filter(kind=Pool.PUBLIC).count()),
+        "public_rules_preserved": str(Rule.objects.filter(kind=Rule.PUBLIC).count()),
     }
 
 

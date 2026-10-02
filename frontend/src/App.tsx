@@ -9,10 +9,12 @@ import { Results } from "./pages/Results";
 import { History } from "./pages/History";
 import { Management } from "./pages/Management";
 import { ChangePassword } from "./components/ChangePassword";
+import { Rules } from "./pages/Rules";
 
 const pageInfo = {
   "/experiments/new/": { title: "新建实验", description: "选择角色池并设置本次模拟参数。" },
   "/pools/": { title: "角色池", description: "管理可用角色池和来源信息。" },
+  "/rules/": { title: "规则", description: "管理稀有度概率和保底机制。" },
   "/results/": { title: "实验结果", description: "查看当前任务状态与模拟结果。" },
   "/history/": { title: "历史记录", description: "查找并管理已完成的实验。" },
   "/management/": { title: "管理员", description: "管理账号、实验配置和任务。" },
@@ -76,6 +78,7 @@ function AppShell() {
         <div className="brand"><span className="brand-mark">L</span><span>抽卡模拟器</span></div>
         <nav aria-label="主导航">
           <Link to="/experiments/new/">新建实验</Link><Link to="/pools/">角色池</Link>
+          <Link to="/rules/">规则</Link>
           <Link to="/results/">实验结果</Link><Link to="/history/">历史记录</Link>
           {user?.role === "admin" && <Link to="/management/">管理员</Link>}
         </nav>
@@ -116,6 +119,7 @@ export function App() {
           <Route path="/" element={<Navigate to="/experiments/new/" replace />} />
           <Route path="/experiments/new/" element={<NewExperiment />} />
           <Route path="/pools/" element={<Pools />} />
+          <Route path="/rules/" element={<Rules />} />
           <Route path="/results/" element={<Results />} />
           <Route path="/history/" element={<History />} />
           <Route path="/management/" element={<ManagementRoute />} />

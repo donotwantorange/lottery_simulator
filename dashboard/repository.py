@@ -1,77 +1,98 @@
-"""v5 history adapter. Main database schema belongs exclusively to migrations."""
+"""Transactional v6 history persistence and read-only Trace access."""
 
 from contextlib import closing, nullcontext
 import json
 from pathlib import Path
 import sqlite3
+from datetime import datetime
 from uuid import UUID
 
 from django.conf import settings
 from django.db import connection, transaction
 
-from dashboard.models import SimulationRun, User
-from dashboard.trace_store import TraceReader, validate_record
+from dashboard.models import SimulationEvent, SimulationRun, User
+from dashboard.trace_store import TraceReader, iter_validated_events, validate_event_row
 from lottery_simulator.control import check_cancelled
-from lottery_simulator.formats import (
-    CONFIG_FORMAT_VERSION, DATABASE_SCHEMA_VERSION, RESULT_FORMAT_VERSION,
-    SAMPLING_VERSION, TRACE_STORE_FORMAT_VERSION, require_version,
-)
-from lottery_simulator.rules.pool_config import PoolConfig
+from lottery_simulator.events import event_counts
+from lottery_simulator.formats import DATABASE_SCHEMA_VERSION, EVENT_FORMAT_VERSION, RESULT_FORMAT_VERSION, RULE_VERSION, SAMPLING_VERSION, require_version
+from lottery_simulator.rules.definitions import PoolDefinition, RuleDefinition, ExperimentParameters
+from lottery_simulator.rules.runtime import compile_pool, normalize_parameters, initial_context
 
 
-_IMPORT_BATCH_SIZE = 1000
-_FILTERS = {"rule_name": "rule_name", "trace_enabled": "trace_enabled",
-            "created_from": "created_at__gte", "created_to": "created_at__lte",
-            "owner_id": "owner_id"}
+IMPORT_BATCH_SIZE = 1000
+
+
+def _trace_connection(path):
+    db = sqlite3.connect(Path(path).resolve().as_uri() + "?mode=ro", uri=True)
+    db.row_factory = sqlite3.Row
+    db.execute("BEGIN")
+    return db
 
 
 def _validate_payload(payload):
     if not isinstance(payload, dict):
         raise ValueError("结果必须是对象")
     require_version(payload.get("result_format_version"), RESULT_FORMAT_VERSION, "结果")
+    require_version(payload.get("event_format_version"), EVENT_FORMAT_VERSION, "事件")
     require_version(payload.get("sampling_version"), SAMPLING_VERSION, "抽样")
-    if payload.get("rule_version") != "2.0":
+    if payload.get("rule_version") != RULE_VERSION:
         raise ValueError("规则版本不受支持")
-    config = payload.get("pool_config")
-    if not isinstance(config, dict):
-        raise ValueError("池快照无效")
-    require_version(config.get("format_version"), CONFIG_FORMAT_VERSION, "配置")
-    PoolConfig.from_dict(config)
-    if "records" in payload or type(payload.get("trace_enabled")) is not bool:
+    if "events" in payload or "records" in payload or not isinstance(payload.get("simulation"), dict) or not isinstance(payload.get("theoretical"), dict):
         raise ValueError("结果摘要格式无效")
-    for key, minimum in (("main_draws", 1), ("trials", 1), ("initial_pity", 0),
-                         ("initial_five_star_pity", 0), ("record_count", 0), ("bonus_draws", 0)):
-        if type(payload.get(key)) is not int or not minimum <= payload[key] <= 2**63 - 1:
-            raise ValueError(f"{key}超过存储可表示范围或类型无效")
-    if (payload.get("draws") != payload["main_draws"]
-            or payload.get("initial_main_draws") != payload["initial_pity"]
-            or payload.get("total_draws") != payload["main_draws"] + payload["bonus_draws"]):
-        raise ValueError("结果抽数与参数不一致")
-    expected = payload["trials"] * payload["total_draws"] if payload["trace_enabled"] else 0
-    if payload["record_count"] != expected:
-        raise ValueError("Trace条数与结果参数不一致")
-    if type(payload.get("seed")) is not int:
-        raise ValueError("种子必须是整数")
-    UUID(payload["owner_id"])
-    source = payload["pool_source"]
-    UUID(source["id"])
-    if type(source["revision"]) is not int or source["revision"] < 1:
-        raise ValueError("池来源版本无效")
-
-
-def _trace_connection(path):
-    database = sqlite3.connect(Path(path).resolve().as_uri() + "?mode=ro", uri=True)
-    database.row_factory = sqlite3.Row
-    return database
+    try:
+        json.dumps(payload, ensure_ascii=False, allow_nan=False)
+    except (TypeError, ValueError, OverflowError):
+        raise ValueError("结果包含无效或非有限数据") from None
+    rule = RuleDefinition.from_dict(payload.get("rule_snapshot"))
+    pool = PoolDefinition.from_dict(payload.get("pool_snapshot"))
+    compiled = compile_pool(rule, pool)
+    parameters = normalize_parameters(compiled, ExperimentParameters.from_dict(payload.get("parameters")))
+    counts = event_counts(rule, parameters)
+    if payload.get("counts") != {name: getattr(counts, name) for name in counts.__dataclass_fields__}:
+        raise ValueError("事件计数与规则快照不一致")
+    if (type(payload.get("trace_enabled")) is not bool or
+            payload["trace_enabled"] is not parameters.trace or
+            type(payload.get("event_count")) is not int or payload["event_count"] != counts.trace_events or
+            type(payload.get("seed")) is not int or payload["parameters"].get("seed") != payload["seed"]):
+        raise ValueError("Trace标记、抽样数量或种子无效")
+    if payload.get("targets") != dict(compiled.targets):
+        raise ValueError("机制目标与编译快照不一致")
+    from dashboard.limits import SimulationLimits
+    policy = SimulationLimits.from_dict(payload.get("limit_policy"))
+    if policy.validate(compiled, parameters) != counts:
+        raise ValueError("接受时限额与事件数量不一致")
+    try:
+        accepted = datetime.fromisoformat(payload["accepted_at"])
+        if accepted.tzinfo is None:
+            raise ValueError
+        UUID(payload["owner_id"])
+    except (KeyError, TypeError, ValueError):
+        raise ValueError("接受时间或所属账号无效") from None
+    pool_source, rule_source = payload.get("pool_source"), payload.get("rule_source")
+    for source, keys in ((pool_source, {"id", "name", "revision", "original_author"}),
+                         (rule_source, {"id", "name", "revision", "author"})):
+        if not isinstance(source, dict) or set(source) != keys or type(source["revision"]) is not int or source["revision"] < 1:
+            raise ValueError("配置来源快照无效")
+        if str(UUID(source["id"])) != source["id"]:
+            raise ValueError("配置来源ID必须是标准UUID")
+    if pool_source["id"] != pool.id or pool_source["name"] != pool.name:
+        raise ValueError("池来源与池快照不一致")
+    if rule_source["id"] != rule.id or rule_source["name"] != rule.name:
+        raise ValueError("规则来源与规则快照不一致")
+    if (pool_source["original_author"] != pool.original_author or
+            rule_source["author"] != rule.original_author):
+        raise ValueError("配置来源作者与快照不一致")
+    if payload.get("initial_context") != initial_context(compiled).to_dict():
+        raise ValueError("初始上下文无效")
+    return rule, pool, compiled, parameters, counts
 
 
 class HistoryRepository:
-    """Internal trusted adapter; web callers authorize through services.runs."""
+    """Internal persistence adapter; user-facing access is authorized in services.runs."""
 
     def __init__(self, path=None):
         self.path = Path(path or settings.DATABASES["default"]["NAME"]).resolve()
-        configured = Path(settings.DATABASES["default"]["NAME"]).resolve()
-        if self.path != configured:
+        if self.path != Path(settings.DATABASES["default"]["NAME"]).resolve():
             raise ValueError("历史路径必须与Django数据库设置一致")
 
     def initialize(self):
@@ -86,99 +107,118 @@ class HistoryRepository:
         if type(run_id) is not str or str(UUID(run_id)) != run_id:
             raise ValueError("运行ID必须是标准UUID")
         self.initialize()
-        _validate_payload(payload)
+        rule, pool, compiled, parameters, counts = _validate_payload(payload)
         if payload["trace_enabled"] != (trace_path is not None):
-            raise ValueError("Trace结果必须提供完整明细")
-        source = payload["pool_source"]
-        values = {
-            "owner_id": UUID(payload["owner_id"]),
-            "pool_id_snapshot": UUID(source["id"]),
-            "pool_revision_snapshot": source["revision"],
-            "pool_name_snapshot": source["name"],
-            "original_author_snapshot": source["original_author"],
-            **{key: payload[key] for key in ("rule_name", "rule_version", "main_draws", "trials",
-                "initial_pity", "initial_five_star_pity", "trace_enabled", "record_count")},
-            "seed": str(payload["seed"]), "pool_config_json": payload["pool_config"],
-            "result_json": payload, "schema_version": DATABASE_SCHEMA_VERSION,
-        }
+            raise ValueError("Trace结果必须提供完整事件明细")
+        owner_id = UUID(payload["owner_id"])
+        pool_source, rule_source = payload["pool_source"], payload["rule_source"]
+        values = dict(owner_id=owner_id, pool_id_snapshot=UUID(pool_source["id"]),
+            pool_revision_snapshot=pool_source["revision"], pool_name_snapshot=pool_source["name"],
+            pool_original_author_snapshot=pool_source["original_author"] or "",
+            rule_id_snapshot=UUID(rule_source["id"]), rule_revision_snapshot=rule_source["revision"],
+            rule_name_snapshot=rule_source["name"], rule_original_author_snapshot=rule_source["author"] or "",
+            rule_version=payload["rule_version"], main_draws=parameters.draws, trials=parameters.trials,
+            seed=str(payload["seed"]), trace_enabled=payload["trace_enabled"], event_count=payload["event_count"],
+            pool_config_json=payload["pool_snapshot"], rule_config_json=payload["rule_snapshot"],
+            parameters_json=payload["parameters"], initial_context_json=payload["initial_context"],
+            result_json=payload, schema_version=DATABASE_SCHEMA_VERSION)
         trace = _trace_connection(trace_path) if trace_path is not None else None
         try:
             if trace is not None:
-                trace.execute("BEGIN")
-                metadata = trace.execute("SELECT * FROM metadata WHERE id=1").fetchone()
-                expected = {"format_version": TRACE_STORE_FORMAT_VERSION, "complete": 1,
-                    "record_count": payload["record_count"], "trials": payload["trials"],
-                    "draws": payload["main_draws"], "initial_main_draws": payload["initial_pity"],
-                    "bonus_per_trial": payload["bonus_draws"]}
-                if metadata is None or any(metadata[key] != value for key, value in expected.items()):
-                    raise ValueError("Trace元数据与结果不一致")
-            # Acquire the job lock BEFORE the database write transaction.
+                meta = trace.execute("SELECT * FROM metadata WHERE id=1").fetchone()
+                from lottery_simulator.formats import TRACE_STORE_FORMAT_VERSION
+                expected = {"format_version": TRACE_STORE_FORMAT_VERSION, "complete": 1, "event_count": counts.trace_events,
+                    "trials": parameters.trials, "main_draws": parameters.draws,
+                    "initial_main_draws": parameters.initial_main_draws,
+                    "bonus_draws": counts.bonus_draws // parameters.trials}
+                if meta is None or any(meta[key] != value for key, value in expected.items()):
+                    raise ValueError("Trace元数据与冻结实验不一致")
             guard = commit_guard() if commit_guard else nullcontext()
             with guard:
                 with transaction.atomic():
-                    if authorize is not None:
+                    if authorize:
                         authorize()
-                    owner = User.objects.filter(pk=values["owner_id"], deleting=False).first()
+                    owner = User.objects.filter(pk=owner_id, deleting=False).first()
                     if owner is None:
                         raise ValueError("所属账号已删除或正在删除，拒绝保存")
                     existing = SimulationRun.objects.filter(pk=run_id).first()
                     if existing is not None:
-                        if (any(getattr(existing, key) != value for key, value in values.items())
-                                or existing.draw_records.count() != payload["record_count"]):
+                        if any(getattr(existing, key) != value for key, value in values.items()) or existing.events.count() != counts.trace_events:
                             raise ValueError("运行ID已有不同快照")
-                    else:
-                        SimulationRun.objects.create(id=run_id, **values)
-                        imported = 0
-                        if trace is not None:
-                            source_cursor = trace.execute(
-                                "SELECT trial_index, draw_index, source, source_index, rarity, "
-                                "character_name, record_json FROM records ORDER BY trial_index, draw_index")
-                            with connection.cursor() as cursor:
-                                while batch := source_cursor.fetchmany(_IMPORT_BATCH_SIZE):
-                                    check_cancelled(cancel_check)
-                                    records = []
-                                    for row in batch:
-                                        record = json.loads(row["record_json"])
-                                        validate_record(record)
-                                        projected = (record["trial_index"], record["draw_index"],
-                                            record["source"], record["source_index"],
-                                            record["draw_result"]["outcome"]["rarity"],
-                                            record["draw_result"]["outcome"]["character_name"])
-                                        if tuple(row[:6]) != projected:
-                                            raise ValueError("Trace索引与JSON不一致")
-                                        records.append((UUID(run_id).hex, *projected, row["record_json"]))
-                                    cursor.executemany(
-                                        "INSERT INTO draw_records (run_id, trial_index, draw_index, source, "
-                                        "source_index, rarity, character_name, record_json) "
-                                        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s)", records)
-                                    imported += len(records)
-                                    if progress_callback:
-                                        progress_callback(imported, payload["record_count"])
-                        if imported != payload["record_count"]:
-                            raise ValueError("导入Trace条数不一致")
+                        return run_id
+                    run = SimulationRun.objects.create(id=run_id, **values)
+                    imported = 0
+                    if trace is not None:
+                        rows = trace.execute("SELECT * FROM events ORDER BY trial_index,event_index")
+                        def stored_events():
+                            for row in rows:
+                                yield validate_event_row(row)
+                        iterator = iter_validated_events(compiled, parameters, counts,
+                            stored_events(), batch_size=IMPORT_BATCH_SIZE,
+                            cancel_check=cancel_check, progress_callback=progress_callback)
+                        batch = []
+                        for event in iterator:
+                            trial = event["trial_index"]
+                            event_index = event["event_index"]
+                            if event["event_type"] == "draw":
+                                outcome = event["draw_result"]["outcome"]
+                                rarity, character = outcome["rarity_id"], outcome["character_id"]
+                            else:
+                                rarity, character = event["grant"]["rarity_id"], event["grant"]["character_id"]
+                            batch.append(SimulationEvent(run_id=run.pk, trial_index=trial,
+                                event_index=event_index, event_type=event["event_type"],
+                                main_draws_completed=event["main_draws_completed"],
+                                mechanism_id=event["mechanism_id"], draw_index=event["draw_index"],
+                                source=event["source"], source_index=event["source_index"],
+                                rarity_id=rarity, character_id=character, event_json=event))
+                            imported += 1
+                            if len(batch) == IMPORT_BATCH_SIZE:
+                                SimulationEvent.objects.bulk_create(batch)
+                                batch.clear()
+                        if batch:
+                            SimulationEvent.objects.bulk_create(batch)
+                        if imported != counts.trace_events:
+                            raise ValueError("Trace事件数量不一致")
                     check_cancelled(cancel_check)
+            return run_id
         finally:
             if trace is not None:
                 trace.close()
-        return run_id
 
     @staticmethod
     def summary(run):
         result = dict(run.result_json)
         _validate_payload(result)
         require_version(run.schema_version, DATABASE_SCHEMA_VERSION, "数据库记录")
-        result.update(id=str(run.pk), owner_id=str(run.owner_id),
-                      created_at=run.created_at.isoformat(), seed=int(run.seed),
-                      pool_id_snapshot=str(run.pool_id_snapshot),
-                      pool_revision_snapshot=run.pool_revision_snapshot,
-                      pool_name_snapshot=run.pool_name_snapshot,
-                      original_author_snapshot=run.original_author_snapshot)
+        source, rule = result["pool_source"], result["rule_source"]
+        stored = {"owner_id": str(run.owner_id), "pool_id_snapshot": str(run.pool_id_snapshot),
+            "pool_revision_snapshot": run.pool_revision_snapshot, "pool_name_snapshot": run.pool_name_snapshot,
+            "pool_original_author_snapshot": run.pool_original_author_snapshot,
+            "rule_id_snapshot": str(run.rule_id_snapshot), "rule_revision_snapshot": run.rule_revision_snapshot,
+            "rule_name_snapshot": run.rule_name_snapshot, "rule_original_author_snapshot": run.rule_original_author_snapshot,
+            "main_draws": run.main_draws, "trials": run.trials, "seed": str(run.seed),
+            "trace_enabled": run.trace_enabled, "event_count": run.event_count}
+        expected = {"owner_id": result["owner_id"], "pool_id_snapshot": source["id"],
+            "pool_revision_snapshot": source["revision"], "pool_name_snapshot": source["name"],
+            "pool_original_author_snapshot": source["original_author"] or "",
+            "rule_id_snapshot": rule["id"], "rule_revision_snapshot": rule["revision"],
+            "rule_name_snapshot": rule["name"], "rule_original_author_snapshot": rule["author"] or "",
+            "main_draws": result["parameters"]["draws"], "trials": result["parameters"]["trials"],
+            "seed": str(result["seed"]), "trace_enabled": result["trace_enabled"],
+            "event_count": result["event_count"]}
+        if stored != expected:
+            raise ValueError("历史列与结果快照不一致")
+        result.update(id=str(run.pk), owner_id=str(run.owner_id), created_at=run.created_at.isoformat(),
+            pool_id_snapshot=str(run.pool_id_snapshot), pool_revision_snapshot=run.pool_revision_snapshot,
+            pool_name_snapshot=run.pool_name_snapshot, pool_original_author_snapshot=run.pool_original_author_snapshot,
+            rule_id_snapshot=str(run.rule_id_snapshot), rule_revision_snapshot=run.rule_revision_snapshot,
+            rule_name_snapshot=run.rule_name_snapshot, rule_original_author_snapshot=run.rule_original_author_snapshot)
         return result
 
-    def get_run(self, id):
+    def get_run(self, run_id):
         self.initialize()
         try:
-            run = SimulationRun.objects.filter(pk=id).first()
+            run = SimulationRun.objects.filter(pk=run_id).first()
         except (ValueError, TypeError):
             return None
         return self.summary(run) if run else None
@@ -187,24 +227,29 @@ class HistoryRepository:
         self.initialize()
         return TraceReader.for_history(self.path, str(run_id))
 
-    def _query(self, filters):
+    def list_runs(self, filters=None, limit=50, offset=0):
         self.initialize()
-        if filters.keys() - _FILTERS.keys():
+        filters = filters or {}
+        if set(filters) - {"owner_id", "rule_name", "trace_enabled"}:
             raise ValueError("不支持的历史筛选")
-        return SimulationRun.objects.filter(**{_FILTERS[key]: value for key, value in filters.items()})
-
-    def list_runs(self, filters, limit=50, offset=0):
         if type(limit) is not int or not 1 <= limit <= 200 or type(offset) is not int or offset < 0:
             raise ValueError("历史分页参数无效")
-        return [self.summary(run) for run in self._query(filters).order_by("-created_at", "-id")[offset:offset+limit]]
+        query = SimulationRun.objects.filter(**{("rule_name_snapshot" if key == "rule_name" else key): value
+            for key, value in filters.items()}).order_by("-created_at", "-id")
+        return [self.summary(run) for run in query[offset:offset+limit]]
 
-    def count_runs(self, filters):
-        return self._query(filters).count()
+    def count_runs(self, filters=None):
+        self.initialize()
+        filters = filters or {}
+        if set(filters) - {"owner_id", "rule_name", "trace_enabled"}:
+            raise ValueError("不支持的历史筛选")
+        return SimulationRun.objects.filter(**{("rule_name_snapshot" if key == "rule_name" else key): value
+            for key, value in filters.items()}).count()
 
-    def delete_run(self, id):
+    def delete_run(self, run_id):
         self.initialize()
         with transaction.atomic():
-            SimulationRun.objects.filter(pk=id).delete()
+            SimulationRun.objects.filter(pk=run_id).delete()
 
     def backup_to(self, path):
         self.initialize()

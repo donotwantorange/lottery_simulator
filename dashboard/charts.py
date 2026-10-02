@@ -4,9 +4,7 @@ import math
 
 import altair as alt
 
-from lottery_simulator.analysis import distribution_stats, waiting_time_distribution
-from lottery_simulator.rules.base import DrawState
-from lottery_simulator.rules.pool_config import PoolConfig
+from lottery_simulator.rules.definitions import PoolDefinition, RuleDefinition
 
 
 _COMPARISON_SERIES = ("模拟均值", "理论期望")
@@ -111,208 +109,52 @@ def comparison_bar_chart(
     return (bars + labels).properties(height=height, width="container")
 
 
-def _theoretical_values(payload: dict, source: str, field: str) -> dict:
-    summary = payload["theoretical_source_summaries"][source]
-    if field in summary:
-        return summary[field]
-    return summary[f"mean_{field}"]
-
-
-def rarity_comparison_rows(payload: dict, source: str) -> list[dict]:
-    simulated = payload["source_summaries"][source]["mean_rarity_counts"]
-    theoretical = _theoretical_values(payload, source, "rarity_counts")
-    return [
-        {"星级": label, "模拟均值": simulated[rarity], "理论期望": theoretical[rarity]}
-        for rarity, label in (("4", "四星"), ("5", "五星"), ("6", "六星"))
-    ]
-
-
-def six_star_category_rows(payload: dict, source: str) -> list[dict]:
-    simulated = payload["source_summaries"][source]["mean_six_star_categories"]
-    theoretical = _theoretical_values(payload, source, "six_star_categories")
-    return [
-        {"类型": label, "模拟均值": simulated[name], "理论期望": theoretical[name]}
-        for name, label in (
-            ("up", "UP限定"),
-            ("other_limited", "其他限定"),
-            ("standard", "常驻"),
-        )
-    ]
-
-
-def character_rows(payload: dict, source: str) -> list[dict]:
-    config = PoolConfig.from_dict(payload["pool_config"])
-    probabilities = config.character_probabilities(6)
-    simulated = payload["source_summaries"][source]["mean_character_counts"]
-    theoretical = _theoretical_values(payload, source, "character_counts")
-    six_mean = payload["source_summaries"][source]["mean_rarity_counts"]["6"]
-    return [
-        {
-            "角色": character.name,
-            "类型": (
-                "UP限定"
-                if character.is_up
-                else "其他限定"
-                if character.is_limited
-                else "常驻"
-            ),
-            "模拟均值": simulated[character.name],
-            "理论期望": theoretical[character.name],
-            "六星内实际占比": (
-                simulated[character.name] / six_mean if six_mean else None
-            ),
-            "六星内理论占比": probabilities[character.name],
-            "占比误差": (
-                simulated[character.name] / six_mean - probabilities[character.name]
-                if six_mean
-                else None
-            ),
-        }
-        for character in config.six_star_characters
-    ]
-
-
-def reward_rows(payload: dict, source: str) -> list[dict]:
-    config = PoolConfig.from_dict(payload["pool_config"])
-    simulated = payload["source_summaries"][source]["mean_rewards"]
-    theoretical = _theoretical_values(payload, source, "rewards")
-    return [
-        {
-            "奖励": reward.name,
-            "模拟均值": simulated[reward.name],
-            "理论期望": theoretical[reward.name],
-        }
-        for reward in config.rewards
-    ]
-
-
-def reward_distribution_rows(
-    payload: dict, source: str, reward_name: str
-) -> list[dict]:
-    distribution = payload["source_distributions"][source]["reward_totals"][reward_name]
-    trials = payload["trials"]
-    return [
-        {"奖励总量": float(total), "实验次数": frequency, "占比": frequency / trials}
-        for total, frequency in sorted(
-            distribution.items(), key=lambda item: float(item[0])
-        )
-    ]
-
-
-def pity_rows(payload: dict, source: str) -> list[dict]:
-    simulated = payload["source_summaries"][source]["mean_pity_triggers"]
-    theoretical = _theoretical_values(payload, source, "pity_triggers")
-    return [
-        {"保底类型": label, "模拟均值": simulated[name], "理论期望": theoretical[name]}
-        for name, label in (("five_star", "五星保底"), ("six_star_hard", "六星硬保底"))
-    ]
-
-
 def summary_chart_data(payload: dict, source: str) -> dict:
-    """Build the five snapshot-based category charts and their table rows."""
-    labels = payload["pool_config"].get("rarity_labels", {})
-    rarity = rarity_comparison_rows(payload, source)
-    for row, key in zip(rarity, ("4", "5", "6")):
-        row["星级"] = labels.get(key, row["星级"])
-    characters = character_rows(payload, source)
-    for row in characters:
-        row[f'{labels.get("6", "六星")}内实际占比'] = row.pop("六星内实际占比")
-        row[f'{labels.get("6", "六星")}内理论占比'] = row.pop("六星内理论占比")
-    pity = pity_rows(payload, source)
-    pity[0]["保底类型"] = f'{labels.get("5", "五星")}保底'
-    pity[1]["保底类型"] = f'{labels.get("6", "六星")}硬保底'
-    categories = {
-        "rarity": (rarity, "星级", "每轮平均数量"),
-        "six_star_categories": (six_star_category_rows(payload, source), "类型", "每轮平均数量"),
-        "characters": (characters, "角色", "每轮平均数量"),
-        "rewards": (reward_rows(payload, source), "奖励", "奖励量"),
-        "pity": (pity, "保底类型", "触发次数"),
-    }
-    specs = {}
-    for kind, (rows, field, unit) in categories.items():
-        if not rows:
-            specs[kind] = None
-            continue
-        horizontal = kind == "characters" and (
-            len(rows) > 8 or any(len(str(row[field])) > 8 for row in rows)
-        )
-        specs[kind] = comparison_bar_chart(
-            rows, category_field=field, unit=unit, horizontal=horizontal,
-        ).to_dict()
-    return {"specs": specs, "rows": {kind: rows for kind, (rows, _, _) in categories.items()},
-            "rarity_labels": labels}
-
-
-def probability_rows(rule) -> list[dict]:
-    probabilities = waiting_time_distribution(rule)
-    analyzed_probabilities = distribution_stats(rule).probabilities
-    cumulative = 0.0
-    rows = []
-    for pull, (first_probability, analyzed_probability) in enumerate(
-        zip(probabilities, analyzed_probabilities, strict=True), start=1
-    ):
-        cumulative += analyzed_probability
-        rows.append(
-            {
-                "抽次": pull,
-                "条件六星概率": rule.probability(DrawState(pull - 1)),
-                "首次六星概率": first_probability,
-                "首次六星累计概率": cumulative,
-            }
-        )
-    return rows
-
-
-def count_distribution_rows(payload: dict) -> list[dict]:
-    trials = payload["trials"]
-    return [
-        {"六星数量": int(count), "实验次数": frequency, "占比": frequency / trials}
-        for count, frequency in sorted(
-            payload["count_distribution"].items(), key=lambda item: int(item[0])
-        )
-    ]
-
-
-def source_comparison_rows(payload: dict) -> list[dict]:
-    return [
-        {
-            "来源": source,
-            "模拟均值": payload[simulated],
-            "理论期望": payload[theoretical],
-        }
-        for source, simulated, theoretical in (
-            (
-                "主池",
-                "mean_main_six_stars",
-                "theoretical_expected_main_count",
-            ),
-            (
-                "赠送",
-                "mean_bonus_six_stars",
-                "theoretical_expected_bonus_count",
-            ),
-            ("总计", "mean_six_stars", "theoretical_expected_count"),
-        )
-    ]
-
-
-def position_rows(rows: list[dict], mode: str = "count") -> list[dict]:
-    """Project one TraceReader position aggregate for table and chart use."""
-    if mode in ("比例", "rate"):
-        fields = ("four_rate", "five_rate", "six_rate")
-    elif mode in ("计数", "count"):
-        fields = ("four_count", "five_count", "six_count")
+    """Project frozen v6 summaries; UI refinements belong to the result page."""
+    rule = RuleDefinition.from_dict(payload["rule_snapshot"])
+    pool = PoolDefinition.from_dict(payload["pool_snapshot"])
+    if source not in {"main", "bonus", "total", "grants", "acquisitions"}:
+        raise ValueError("统计来源无效")
+    observed = payload["simulation"]
+    expected = payload["theoretical"]
+    if source in {"main", "bonus", "total"}:
+        observed, expected = observed["draws"][source], expected["draws"][source]
     else:
-        raise ValueError("mode must be count or rate")
-    return [
-        {
-            "抽次": row["source_index"],
-            "四星": row[fields[0]],
-            "五星": row[fields[1]],
-            "六星": row[fields[2]],
-        }
-        for row in rows
-    ]
-
-
-position_chart_rows = position_rows
+        observed, expected = observed[source], expected[source]
+    labels = {r.id: pool.rarity_labels.get(r.id, r.name) for r in rule.rarities}
+    chart_approximate = False
+    def row(label, key, simulated, theoretical):
+        nonlocal chart_approximate
+        chart_approximate |= any(type(value) in (int, float) and abs(value) > 9007199254740991
+                                 for value in (simulated, theoretical))
+        error = None if theoretical == 0 else (simulated - theoretical) / theoretical
+        return {key: label,
+                "模拟均值": str(simulated) if type(simulated) is int and abs(simulated) > 9007199254740991 else simulated,
+                "理论期望": str(theoretical) if type(theoretical) is int and abs(theoretical) > 9007199254740991 else theoretical,
+                "相对误差": error}
+    rarity = [row(labels[r.id], "稀有度", observed["rarity_counts"][r.id],
+                  expected["rarity_counts"][r.id]) for r in sorted(rule.rarities, key=lambda r:r.rank)]
+    characters = [row(f"{c.name}（{labels[c.rarity_id]}）", "角色",
+                      observed["character_counts"].get(c.id, 0),
+                      expected["character_counts"].get(c.id, 0))
+                  for group in pool.rarity_pools for c in group.characters]
+    categories = [row(f"{labels[r.id]} · {label}", "类型",
+                      observed["category_counts"][r.id][key], expected["category_counts"][r.id][key])
+                  for r in rule.rarities for key,label in
+                  (("up","UP"),("other_limited","其他限定"),("standard","常驻"),("unnamed","未配置名单"))]
+    rewards = [row(reward.name,"奖励",observed["reward_totals"][reward.id],
+                   expected["reward_totals"][reward.id]) for reward in pool.rewards] if "reward_totals" in observed else []
+    pity = []
+    if "pity_triggers" in observed:
+        for kind,label in (("soft","软保底"),("hard","硬保底")):
+            pity.extend(row(f"{labels[r.id]}{label}","保底类型",
+                observed["pity_triggers"][kind].get(r.id,0),
+                expected["pity_triggers"][kind].get(r.id,0)) for r in rule.rarities)
+        pity.append(row("大保底","保底类型",observed["pity_triggers"]["big"],expected["pity_triggers"]["big"]))
+    groups={"rarity":(rarity,"稀有度"),"categories":(categories,"类型"),
+            "characters":(characters,"角色"),"rewards":(rewards,"奖励"),"pity":(pity,"保底类型")}
+    return {"specs": {name: comparison_bar_chart(rows,category_field=field,
+                unit="每轮数量",horizontal=name=="characters").to_dict() if rows else None
+                for name,(rows,field) in groups.items()},
+            "rows": {name: rows for name,(rows,_) in groups.items()}, "rarity_labels":labels,
+            "chart_approximate": chart_approximate}

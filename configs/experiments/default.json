@@ -1,6 +1,25 @@
 {
-  "format_version": 1,
+  "format_version": 2,
   "name": "默认实验",
-  "pool_ref": {"id": "ad9e5c3a-a308-48be-8be7-6173a38e0831", "name": "默认角色池"},
-  "parameters": {"draws": 100, "trials": 1000, "initial_pity": 0, "initial_five_star_pity": 0, "seed": null, "trace": false}
+  "pool_ref": {
+    "id": "ad9e5c3a-a308-48be-8be7-6173a38e0831",
+    "name": "默认角色池"
+  },
+  "parameters": {
+    "draws": 100,
+    "trials": 1000,
+    "seed": null,
+    "trace": false,
+    "initial_main_draws": 0,
+    "initial_small_pity": {
+      "d566afb8-a779-4ec2-916e-a8bbc54defcf": 0,
+      "79413a4b-1c79-4a1c-9ed4-376ecd6f7dd4": 0,
+      "d6067ec9-0987-4688-b13c-0a6d32d0dc7d": 0
+    },
+    "initial_big_pity": {
+      "target_obtained": false,
+      "misses": 0
+    }
+  },
+  "initial_context": null
 }
