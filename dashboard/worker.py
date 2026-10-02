@@ -47,6 +47,17 @@ def run(job_dir: Path, database_path: Path):
     started = time.monotonic()
     last_phase = None
     last_notification = started
+    last_cancel_check = float("-inf")
+    cancelled = False
+
+    def computation_cancelled():
+        nonlocal last_cancel_check, cancelled
+        now = time.monotonic()
+        # ponytail: poll at most every 100ms; final persistence checks remain uncached.
+        if not cancelled and now - last_cancel_check >= 0.1:
+            cancelled = cancel_path.exists()
+            last_cancel_check = now
+        return cancelled
 
     def publish_phase(phase, completed=None, total=None):
         nonlocal last_phase, last_notification
@@ -78,14 +89,14 @@ def run(job_dir: Path, database_path: Path):
         result = simulate(
             compiled, experiment,
             progress_callback=lambda completed, total: publish_phase("simulating", completed, total),
-            cancel_check=cancel_path.exists,
+            cancel_check=computation_cancelled,
             record_sink=writer.append if writer is not None else None,
             phase_callback=publish_phase,
         )
         if writer is not None:
             writer.finish(
                 compiled=compiled, parameters=experiment, counts=counts,
-                cancel_check=cancel_path.exists,
+                cancel_check=computation_cancelled,
                 progress_callback=lambda completed, total: publish_phase("validating", completed, total),
             )
             writer.close()

@@ -24,6 +24,22 @@ def _no_pity_compiled(*, bonus=None, grant=None):
 
 
 class DynamicAnalysisTests(unittest.TestCase):
+    def test_theory_reports_main_and_bonus_progress(self):
+        compiled = _no_pity_compiled()
+        params = default_parameters(draws=6, trials=1, seed=42, trace=False,
+                                    initial_small_pity={})
+        progress = []
+        expected_simulation_results(compiled, params,
+                                    progress_callback=lambda done, total: progress.append((done, total)))
+        self.assertEqual(progress, [(done, 6) for done in range(7)])
+        compiled = compile_pool(default_rule(), default_pool())
+        params = default_parameters(draws=1, trials=1, seed=42, trace=False,
+                                    initial_main_draws=29, initial_small_pity={})
+        progress = []
+        expected_simulation_results(compiled, params,
+                                    progress_callback=lambda done, total: progress.append((done, total)))
+        self.assertEqual(progress, [(done, 11) for done in range(12)])
+
     def test_default_rule_completes_240_main_draw_theory_exactly(self):
         compiled = default_rule()
         pool = default_pool()

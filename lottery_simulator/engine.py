@@ -274,6 +274,9 @@ def simulate(
     if phase_callback is not None:
         phase_callback("theory", None, None)
     check_cancelled(cancel_check)
-    theoretical = expected_simulation_results(compiled, result.parameters, cancel_check=cancel_check)
+    theoretical = expected_simulation_results(
+        compiled, result.parameters, cancel_check=cancel_check,
+        progress_callback=(lambda done, total: phase_callback("theory", done, total))
+        if phase_callback is not None else None)
     check_cancelled(cancel_check)
     return replace(result, theoretical=theoretical)

@@ -4,7 +4,7 @@ from collections import defaultdict
 from dataclasses import replace
 import math
 
-from lottery_simulator.control import CancelCheck, check_cancelled
+from lottery_simulator.control import CancelCheck, ProgressCallback, check_cancelled
 from lottery_simulator.engine import (
     _empty_summary, _finite_add, _indicators, _merge, bonus_pool,
 )
@@ -138,7 +138,7 @@ def _aggregate_transitions(compiled, branches, metrics, caps, cancel_check):
 
 
 def _run_pool(compiled: CompiledPool, draws: int, start: DrawState, *,
-              cancel_check: CancelCheck | None = None):
+              cancel_check: CancelCheck | None = None, progress_callback: ProgressCallback | None = None):
     summary = _empty_summary(compiled, "draws")
     metrics = _metrics(compiled)
     caps = _state_caps(compiled)
@@ -207,6 +207,8 @@ def _run_pool(compiled: CompiledPool, draws: int, start: DrawState, *,
             raise ValueError("理论状态质量未守恒")
         masses = {state: tuple(values) for state, values in following.items()}
         summary["draw_count"] += 1
+        if progress_callback is not None:
+            progress_callback(pull + 1, draws)
     no_hit = [math.fsum(values[index] for values in masses.values())
               for index in range(1, len(metrics) + 1)]
     indicators = {"rarities": {}, "characters": {}, "categories":
@@ -243,11 +245,17 @@ def _acquisition_from_draws(compiled, main, bonus):
 def expected_simulation_results(
     compiled: CompiledPool, parameters: ExperimentParameters, *,
     cancel_check: CancelCheck | None = None,
+    progress_callback: ProgressCallback | None = None,
 ) -> dict:
     parameters = normalize_parameters(compiled, parameters)
     counts = event_counts(compiled.rule, parameters)
     main_start = initial_state(compiled, parameters)
-    main = _run_pool(compiled, parameters.draws, main_start, cancel_check=cancel_check)
+    total_steps = parameters.draws + (compiled.rule.bonus.draws if counts.bonus_draws else 0)
+    if progress_callback is not None:
+        progress_callback(0, total_steps)
+    main = _run_pool(compiled, parameters.draws, main_start, cancel_check=cancel_check,
+                     progress_callback=(lambda done, _: progress_callback(done, total_steps))
+                     if progress_callback is not None else None)
     bonus = _empty_summary(compiled, "draws")
     bonus["at_least_one"] = {"rarities": {r: 0.0 for r in bonus["rarity_counts"]},
                              "characters": {c: 0.0 for c in bonus["character_counts"]},
@@ -259,7 +267,9 @@ def expected_simulation_results(
                           initial_state(temporary, replace(parameters, initial_main_draws=0,
                               initial_small_pity={}, initial_big_pity=replace(
                                   parameters.initial_big_pity, target_obtained=False, misses=0))),
-                          cancel_check=cancel_check)
+                          cancel_check=cancel_check,
+                          progress_callback=(lambda done, _: progress_callback(parameters.draws + done, total_steps))
+                          if progress_callback is not None else None)
     total = _empty_summary(compiled, "draws")
     for source in (main, bonus):
         for key in ("rarity_counts", "character_counts", "category_counts", "reward_totals", "pity_triggers"):

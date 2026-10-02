@@ -238,3 +238,23 @@ assert not SimulationEvent.objects.exists()
 directory = get_manager().root / cancelled.job_id
 assert not (directory / 'trace.sqlite3').exists() and not (directory / 'result.json').exists()
 """)
+
+    def test_computation_cancel_polling_detects_request_after_100ms(self):
+        self.scenario("""
+from unittest.mock import patch
+from lottery_simulator.control import SimulationCancelled
+def calculation(*args, cancel_check, **kwargs):
+    directory = next(path for path in get_manager().root.iterdir() if path.is_dir())
+    with patch('dashboard.worker.time.monotonic', return_value=1000) as clock:
+        assert not cancel_check()
+        (directory / 'cancel.request').touch()
+        for _ in range(1000): assert not cancel_check()
+        clock.return_value = 1000.11
+        assert cancel_check()
+        clock.return_value = 1000.12
+        assert cancel_check()
+    raise SimulationCancelled()
+with patch('dashboard.worker.simulate', side_effect=calculation):
+    cancelled = submit_job(alice, payload, synchronous=True)
+assert cancelled.status == 'cancelled' and not cancelled.history_saved
+""")
