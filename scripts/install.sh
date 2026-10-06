@@ -1,24 +1,30 @@
 #!/usr/bin/env bash
-# 中文交互式首次安装或标准Compose部署升级；从完整项目目录运行。
+# 中文交互式服务器管理；从完整项目目录运行。
 set -Eeuo pipefail
 stage='检查安装环境'
-mode=install
+mode=menu
 backup_dir='尚未创建'
 upgrade_paused=0
 upgrade_helper_cid=''
 
 if [[ ${1:-} == --help ]]; then
-  printf '用法：bash scripts/install.sh [--upgrade]\n无参数：Ubuntu 24.04交互式首次部署，拒绝已有数据。\n--upgrade：已获取新版后升级本目录标准Compose v5/v6部署；先确认维护，备份后重建，不自动git pull。\nv5仅迁账号及登录限制；旧业务保留在旧库，不导入v6。\n失败不自动续跑/回滚，备份timer在业务及HTTPS验收后手动恢复。\n详见 docs/deployment.md；不要使用 curl | bash。\n'
+  printf '用法：bash scripts/install.sh [--install|--upgrade|--restore]\n无参数：选择安装、卸载、运维（启停/状态/日志/备份/定时备份）或更新。\n--install：直接首次安装，拒绝已有数据。\n--upgrade：直接升级已下载版本，不自动git pull。菜单更新可先拉取Git新版。\n--restore：重装保留的标准v6数据卷，不初始化账号；拒绝v5与活动/损坏数据。\nv5仅迁账号及登录限制；旧业务保留在旧库。卸载可保留数据或二次确认永久删除。\n失败不自动续跑/回滚，备份timer在业务及HTTPS验收后恢复。\n详见 docs/deployment.md；不要使用 curl | bash。\n'
   exit 0
 fi
-if [[ ${1:-} == --upgrade ]]; then mode=upgrade; shift; fi
+case ${1:-} in --upgrade) mode=upgrade; shift;; --install) mode=install; shift;; --restore) mode=restore; shift;; esac
 if (( $# )); then printf '不支持的参数；使用 --help 查看说明。\n' >&2; exit 1; fi
 project_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
 cd "$project_dir"
+[[ -t 0 ]] || { printf '请在交互式终端执行，不要使用 curl | bash。\n' >&2; exit 1; }
+if [[ $mode == menu ]]; then
+  [[ -f scripts/manage.sh ]] || { printf '缺少 scripts/manage.sh；请获取完整新版项目。\n' >&2; exit 1; }
+  source scripts/manage.sh
+  management_menu
+  exit
+fi
 for file in docker-compose.yml Dockerfile Caddyfile configs/pools/default.json configs/rules/zmd.json frontend/package-lock.json; do
   [[ -f $file ]] || { printf '缺少项目文件：%s；请下载完整 master 项目。\n' "$file" >&2; exit 1; }
 done
-[[ -t 0 ]] || { printf '请在交互式终端执行，不要使用 curl | bash。\n' >&2; exit 1; }
 if (( EUID == 0 )); then admin=(); else admin=(sudo); sudo -v; fi
 docker_cmd() { "${admin[@]}" docker "$@"; }
 has_runtime_material() {
@@ -43,6 +49,8 @@ report_failure() {
     fi
     printf '\n升级停止：%s失败（第%s行）。备份：%s。\n' "$stage" "$line" "$backup_dir" >&2
     printf '保留原卷、旧库及错误现场；入口/服务可能已停止。不会自动恢复已暂停的timer或服务；核对状态后按docs/deployment.md手动恢复，不自动覆盖或重试。\n' >&2
+  elif [[ $mode == restore ]]; then
+    printf '\n重装停止：%s失败（第%s行）；原卷与.env保留，不自动初始化或重试。\n' "$stage" "$line" >&2
   else
     if has_runtime_material; then found=0; else found=$?; fi
     if [[ $found == 0 ]]; then
@@ -70,6 +78,12 @@ if [[ $mode == upgrade ]]; then
   done
   source scripts/upgrade.sh
   prepare_upgrade
+elif [[ $mode == restore ]]; then
+  for file in scripts/manage.sh scripts/upgrade_probe.py; do
+    [[ -f $file ]] || { printf '缺少重装文件：%s。\n' "$file" >&2; exit 1; }
+  done
+  source scripts/manage.sh
+  management_restore_prepare
 else
 for path in data/history_v5.sqlite3 data/history_v6.sqlite3 data/jobs_v5 data/exports_v5; do
   [[ ! -e $path ]] || stop_existing_install
@@ -221,6 +235,13 @@ docker_cmd compose build app
 docker_cmd compose pull caddy
 if [[ $mode == upgrade ]]; then
   upgrade_database
+elif [[ $mode == restore ]]; then
+  stage='核对保留的v6数据与任务'
+  container_backup="/app/backups/upgrade-restore-$(date +%Y%m%d-%H%M%S-%N)"
+  docker_cmd compose run --rm -T --no-deps app python - backup 6 "$container_backup" < scripts/upgrade_probe.py
+  printf '重装前v6数据库快照已保存：%s/source.sqlite3\n' "$container_backup"
+  stage='迁移保留的v6数据库'
+  docker_cmd compose run --rm app python manage.py migrate
 else
 stage='检查全新v6数据目录'
 docker_cmd compose run --rm -T app python -c '
@@ -248,7 +269,7 @@ case "$initialized" in
 esac
 fi
 stage='启动服务'
-if [[ $mode == upgrade ]]; then
+if [[ $mode != install ]]; then
   docker_cmd compose up -d --wait --wait-timeout 120
 else
   docker_cmd compose up -d
@@ -257,6 +278,6 @@ docker_cmd compose ps
 printf '\n启动命令已完成。请使用 .env 中的域名通过 HTTPS 访问。\n'
 printf '证书可能仍在申请：sudo docker compose logs --tail=100 app caddy\n'
 printf '完成登录、小型模拟、Trace 与备份验收后再开放日常使用。\n'
-printf '定时备份安装和更新操作见 docs/deployment.md。\n'
+printf '再次运行脚本，选择运维，可配置或恢复每日备份；详情见 docs/deployment.md。\n'
 
 if [[ $mode == upgrade ]]; then finish_upgrade; fi

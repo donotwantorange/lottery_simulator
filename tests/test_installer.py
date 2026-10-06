@@ -89,7 +89,7 @@ class InstallerTest(unittest.TestCase):
                    'INSTALL_READ_MARKER': str(root / 'read-failed'), **flags}
             master, slave = pty.openpty()
             try:
-                process = subprocess.Popen(['bash', str(root / 'scripts/install.sh')],
+                process = subprocess.Popen(['bash', str(root / 'scripts/install.sh'), '--install'],
                                            stdin=slave, stdout=subprocess.PIPE,
                                            stderr=subprocess.STDOUT, env=env)
                 os.write(master, answers)

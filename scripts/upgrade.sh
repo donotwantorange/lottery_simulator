@@ -67,6 +67,12 @@ print(version, app["Image"])
   for container in $services; do
     [[ $container == "$app" || $container == "$caddy" ]] || { printf '项目含其它容器；请先人工核对，不自动清理。\n' >&2; exit 1; }
   done
+  # A running container can outlive its image; verify helper creation before maintenance.
+  if ! docker_cmd run --rm --pull never --network none --entrypoint python "$old_image" \
+    -c 'from dashboard.job_models import JobState, read_json; from scripts.backup_db import backup_database'; then
+    printf '旧镜像无法启动备份辅助容器：%s。尚未暂停备份或停止网站；保留旧app，先恢复对应旧镜像，不使用新版镜像替代。\n' "$old_image" >&2
+    exit 1
+  fi
   printf '升级目录：%s\nCompose项目：%s\n当前数据：v%s\n' "$project_dir" "$project_name" "$source_version"
   printf '请安排维护窗口，停止用户提交并等待任务结束。脚本会备份、停止服务、重建本项目网络，保留原卷/.env/证书。\n'
   if [[ $source_version == 5 ]]; then
@@ -97,7 +103,7 @@ print(version, app["Image"])
   docker_cmd pause "$app"
   upgrade_paused=1
   upgrade_helper_cid="$backup_dir/probe.cid"
-  "${admin[@]}" timeout --kill-after=10 600 "$(command -v docker)" run --rm -i \
+  "${admin[@]}" timeout --kill-after=10 600 "$(command -v docker)" run --rm --pull never -i \
     --cidfile "$upgrade_helper_cid" --network none --workdir /app --entrypoint python \
     -v "${project_name}_lottery_data:/app/data:ro" \
     -v "${project_name}_lottery_backups:/app/backups" \
@@ -133,8 +139,8 @@ finish_upgrade() {
   printf '\n升级服务已启动，尚需原账号登录、连续实验、Trace、取消和可信公网HTTPS验收。\n'
   printf '原卷/.env/证书与备份保留；失败时不要删除卷或覆盖数据库来重跑。\n'
   if [[ $timer_state == loaded ]]; then
-    printf '备份timer保持暂停。对照deploy/lottery-backup.service更新已安装unit的v6路径，保留自定义目录/参数，执行daemon-reload。\n'
-    printf '验收通过后才执行：sudo systemctl start lottery-backup.timer\n'
+    printf '备份timer保持暂停。标准部署再次运行脚本，选择运维→配置/更新每日备份；自定义unit需人工核对。\n'
+    printf '业务与HTTPS验收通过后，选择运维→恢复每日备份；脚本先实际备份，再启用timer。\n'
   fi
   printf '备份与手动恢复边界见docs/deployment.md。脚本没有git pull或自动回滚。\n'
 }

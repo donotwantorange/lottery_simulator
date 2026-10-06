@@ -8,11 +8,46 @@
 | 已有标准 Docker 部署，需要更新 | [版本更新](#版本更新) |
 | 安装或升级报错、中途停止 | [故障处理](#故障处理) |
 | 网站已运行，查看日志或备份 | [日常运维](#日常运维) |
+| 卸载服务，或用保留的v6数据重新部署 | [卸载与保留数据重装](#卸载与保留数据重装) |
 | 自定义环境，需要逐步操作 | [手动安装](#手动安装)、[手动版本更新](#手动版本更新) |
 
 本机开发见[本地使用手册](local-usage.md)，Windows 环境见[Windows＋WSL说明](windows-wsl-temporary.md)，网页操作见[页面指南](dashboard-guide.md)。
 
-**验证范围：** 安装／升级相关的45项隔离检查已通过；完整新服务器安装、完整服务器升级和本轮正式 HTTPS 尚未实测。详细证据见文末[验证状态](#验证状态)。
+**验证范围：** 安装、升级及管理菜单已有隔离检查记录；完整新服务器安装、完整服务器升级和本轮正式 HTTPS 尚未实测。详细证据见文末[验证状态](#验证状态)。
+
+## 统一管理菜单
+
+完整新版项目取得后，在服务器的项目目录执行：
+
+```bash
+cd /opt/lottery-simulator
+bash scripts/install.sh
+```
+
+| 一级菜单 | 功能 |
+| --- | --- |
+| 安装 | 全新安装；或重装保留的v6数据卷，不重新初始化账号 |
+| 卸载 | 保留数据卸载；或二次确认后永久删除本项目数据 |
+| 运维 | 启动、停止、重启原容器；状态、日志、数据库备份；配置或恢复每日备份 |
+| 更新 | 拉取 `origin/master` 后执行新版升级入口；或更新已下载的完整版本 |
+
+每次执行一项操作，结束后再次运行脚本即可选择下一项。启动原容器不使用新版Compose重建；旧app暂停时额外确认 `UNPAUSE`，适用于升级失败后核对并恢复尚在的原容器。停止/重启需先等待或取消任务、停止用户提交及在途请求，再确认 `STOP`；脚本停止Caddy、检查任务后才停止app，异常时保留现场，不自动开放入口。
+
+数据库备份根据原app实际v5/v6路径执行，保存备份卷及 `/var/backups/lottery/<项目名>/manual-<时间>/source.sqlite3`，含私密数据，仍需另存受控异机。定时备份自动配置仅支持 `/opt/lottery-simulator`、默认项目名及 `/usr/bin/docker`；附加unit配置、其他路径或指向其他service的timer拒绝自动处理。配置/更新前保存原unit，实际备份通过后才启用timer；操作者仍需确认业务与HTTPS验收。
+
+更新选择Git拉取时，要求本目录干净的master工作区和预期GitHub origin，输入 `UPDATE` 后只快进拉取；失败不停止网站。拉取完成后启动新版脚本，随后按原升级流程确认维护、备份与迁移。ZIP用户选择已下载版本更新；无参数入口现在是菜单，直接首次安装可用 `--install`，已下载版本直接升级仍可用 `--upgrade`。
+
+### 卸载与保留数据重装
+
+- 保留数据：输入 `UNINSTALL` 后移除本项目原app/Caddy容器及已核对网络，保留四个数据/备份/证书卷、`.env`和代码；原容器配置及环境副本另存私有目录。先确认旧镜像可创建容器，避免丢失唯一的旧运行环境；已有timer停用，unit定义保留。
+- 永久删除：先输入 `UNINSTALL`，再核对列出的四个卷、私有备份目录和 `.env`，输入 `DELETE-<实际项目名>`。脚本只删除经归属检查的本项目卷和 `/var/backups/lottery/<项目名>`、原 `.env`。其他容器使用的卷/网络、重定向备份目录拒绝自动删除。账号、历史、Trace、任务、备份及证书将随卷永久删除。
+- 两种卸载都保留项目代码、Docker及其他项目；已复制到 `/opt/lottery-private-backups`、其他自定义位置或异机的备份不自动删除。永久删除不是整盘数据擦除。
+
+保留v6数据卸载后，选择“安装 → 重装保留的v6数据”，确认 `RESTORE`。要求原 `.env`、四个原卷齐全，无残留项目容器或其它卷使用者，先准备受控备份。脚本核对v6库、任务和管理员，制作原备份卷中的独立快照，成功后才migrate并启动；不运行 `init_admin`，不重置密码。v5、未知/活动/损坏状态或部分安装不能自动重装；保留的v5库按[v5账号保留与v6切换](#v5账号保留与v6切换)手动处理，不将旧业务直接接入v6。
+
+`--restore`只使用服务器上仍存在的原卷重新部署，不会读取备份文件恢复数据库；从备份恢复见[恢复](#恢复)。重装完成后执行[上线验收](#上线验收)，再选择“运维 → 配置/更新每日备份”或“恢复每日备份”。
+
+本机Node/WSL开发服务不使用这套服务器菜单。完整服务器流程仍需实机验收，见[菜单实施记录](changes/2026-10-06-server-management.md)。
 
 ## 首次安装
 
@@ -57,6 +92,8 @@ bash scripts/install.sh
 
 在终端按中文提示操作：验证sudo权限、选择是否使用腾讯云内网镜像、填写域名、设置管理员用户名和密码。输入密码时不显示字符是正常现象。
 
+无参数先选择“安装 → 全新安装”，再按安装提示填写；需要直接进入可执行 `bash scripts/install.sh --install`。
+
 脚本会准备基础工具和Docker，生成应用密钥，构建前后端，建立v6数据库并启动服务。腾讯云内网镜像选项仅适用于腾讯云服务器。已有Docker软件源、冲突包或其他运行容器需要先人工核对，脚本不会替你卸载或停止它们。
 
 脚本保留已有 `.env`；发现数据库、容器或本项目数据卷时会停止首次安装。安装中断后，按[故障处理](#故障处理)判断能否重跑，不通过删除数据绕过保护。不要使用 `curl | bash`。
@@ -100,6 +137,8 @@ sudo docker compose ps
 
 **第二步：获取新版。** Git安装执行：
 
+已有统一菜单时，也可选择“更新 → 拉取Git新版后更新”一次完成拉取及新版脚本启动，使用相同的维护和数据保护；以下保留手动命令用于核对或旧入口升级。
+
 ```bash
 git pull --ff-only origin master
 ```
@@ -116,7 +155,7 @@ bash scripts/install.sh --upgrade
 
 缺文件或没有 `--upgrade` 帮助说明，表示尚未取得所需完整版本，不要继续。v5需输入 `ACCOUNTS` 确认只迁账号，所有升级需输入 `UPGRADE` 确认维护。
 
-脚本依次暂停已有定时备份、停止网站入口、检查任务、冻结旧app并再次检查、制作私有备份。备份成功后才移除旧app、重建本项目网络，随后构建新版、迁移数据库并启动服务。它不删除原卷、不重置密码或密钥、不自动拉取代码或回滚。
+脚本先用旧镜像启动无网络、无数据卷的临时容器，确认备份模块可用；不可用时在维护前退出。随后依次暂停已有定时备份、停止网站入口、检查任务、冻结旧app并再次检查、制作私有备份。备份成功后才移除旧app、重建本项目网络，随后构建新版、迁移数据库并启动服务。它不删除原卷、不重置密码或密钥、不自动拉取代码或回滚。
 
 记录脚本输出的备份目录：`/var/backups/lottery/<项目名>/upgrade-<时间>-<随机值>`。其中保存数据库快照、旧数据目录、旧前端、`.env`和容器配置，包含私密信息；仅管理员可访问，不放到网站目录或Git中。原备份卷也保留数据库快照。
 
@@ -143,113 +182,65 @@ bash scripts/install.sh --upgrade
 
 ## 日常运维
 
-### 查看状态与日志
+标准部署优先使用统一菜单，每次操作结束后重新运行：
 
 ```bash
 cd /opt/lottery-simulator
-sudo docker compose ps
-sudo docker compose logs --tail=100 app caddy
+bash scripts/install.sh
 ```
+
+### 查看状态与日志
+
+选择“运维 → 状态”或“运维 → 日志”。菜单核对本目录的原app和Caddy，日志显示最近100行。容器缺失或配置不符合标准时会停止，转到故障处理核对。
 
 排障时保留错误信息，但不要公开密码、`.env`、Cookie、数据库或完整Compose配置。
 
 ### 停止与重新启动
 
-先停止新提交，等待任务结束，或在网页取消并确认worker退出。关闭网页不会取消任务；容器重启也不能保证任务继续运行。
+先停止用户提交及在途请求，等待任务结束，或在网页取消并确认worker退出。关闭网页不会取消任务。
 
-停止服务：
+| 目的 | 菜单操作 |
+| --- | --- |
+| 暂停网站 | 运维 → 停止，确认 `STOP` |
+| 启动已停止的原容器 | 运维 → 启动原容器；若app暂停，核对后确认 `UNPAUSE` |
+| 停止后立即启动原容器 | 运维 → 重启原容器，确认 `STOP` |
 
-```bash
-sudo docker compose stop
-```
+停止和重启会暂停已有备份timer，并在停止入口后检查任务。启动只使用原容器，不按新版配置重建、不迁移数据库；容器已移除时不能用这个入口重建。
 
-重新启动：
+**启动或重启后，确认业务和HTTPS正常，再选择“运维 → 恢复每日备份”。** 启动网站不会自动恢复timer；尚未配置每日备份时按下一节先配置。
 
-```bash
-sudo docker compose up -d
-```
-
-不要执行 `docker compose down -v`、清理项目卷或清空任务目录来解决问题，这些操作可能丢失数据。
+不要用 `docker compose up -d`代替恢复旧容器：代码更新后它可能按新版配置重建。不要执行 `docker compose down -v`、清理项目卷或清空任务目录来解决问题。
 
 ### 备份
 
-下面用于运行中的v6服务。v5应使用对应旧版路径，不能把旧库改名为v6。
+app运行时选择“运维 → 备份数据库”。菜单根据原容器识别v5/v6，生成SQLite快照，并复制到宿主机私有目录。成功后会打印完整路径：
 
-```bash
-sudo docker compose exec -T app python3 scripts/backup_db.py \
-  /app/data/history_v6.sqlite3 \
-  "/app/backups/lottery-v6-$(date +%F-%H%M%S).sqlite3"
-```
+- 备份卷：`/app/backups/lottery-v<版本>-<时间>.sqlite3`。
+- 宿主机：`/var/backups/lottery/<项目名>/manual-<时间>/source.sqlite3`。
 
-成功标志是输出 `Backup integrity_check: ok`。备份包含账号、登录会话、规则、池、实验配置和已提交历史，不包含任务目录和临时导出目录。
+备份包含账号、登录会话、规则、池、实验配置和已提交历史，不包含任务目录及临时导出。保存输出路径，将快照另存到受控异机位置，并安排容量检查和保留期限。完整性检查通过不代替隔离恢复演练。
 
-将选定备份复制到宿主机，**替换下面的示例文件名**：
-
-```bash
-sudo install -d -m 700 /opt/lottery-private-backups
-sudo docker compose cp \
-  app:/app/backups/lottery-v6-YYYY-MM-DD-HHMMSS.sqlite3 \
-  /opt/lottery-private-backups/
-sudo chmod 600 /opt/lottery-private-backups/lottery-v6-YYYY-MM-DD-HHMMSS.sqlite3
-```
-
-备份含账号等私密数据，应再复制到受控异机位置，并安排容量检查和保留期限。同机备份无法防止整台服务器丢失。
+自定义部署或需要命令行操作时见[手动数据库备份](#手动数据库备份)。
 
 ### 每日自动备份
 
-仅在尚未安装这项定时备份时使用本节。已有备份服务按下一节更新，保留自定义配置。
+标准v6部署完成业务和HTTPS验收后，选择“运维 → 配置/更新每日备份”：
 
-仓库示例假定项目位于 `/opt/lottery-simulator`，Docker位于 `/usr/bin/docker`。先核对这两个路径，再安装：
+1. 核对目录、项目名和备份配置；确认 `BACKUP`。
+2. 脚本暂停原timer、保存已有unit副本并安装仓库配置。
+3. 提示时确认 `VERIFIED`，脚本实际执行一次备份，成功后启用每日timer并显示调度。
 
-```bash
-sudo install -m 644 deploy/lottery-backup.service /etc/systemd/system/lottery-backup.service
-sudo install -m 644 deploy/lottery-backup.timer /etc/systemd/system/lottery-backup.timer
-sudo systemctl daemon-reload
-sudo systemctl start lottery-backup.service
-sudo systemctl status lottery-backup.service
-sudo journalctl -u lottery-backup.service -n 50 --no-pager
-```
+自动配置要求 `/opt/lottery-simulator`、默认项目名 `lottery-simulator`及 `/usr/bin/docker`，不接受自定义unit路径或附加配置。需要保留自定义参数时使用[手动配置每日备份](#手动配置每日备份)，不要确认覆盖。
 
-确认执行成功且日志有完整性检查通过，再启用每日调度：
-
-```bash
-sudo systemctl enable --now lottery-backup.timer
-sudo systemctl list-timers lottery-backup.timer
-```
-
-一次性备份service执行后变为inactive是正常现象，以退出结果和日志为准。定时器按服务器时区每日运行，同一天再次运行会更新当天备份；不自动删除旧备份或异机复制。
+一次性备份service执行后变为inactive是正常现象，以退出结果和完整性日志为准。定时器按服务器时区每日运行，同一天再次运行会更新当天备份；不自动删除旧备份或异机复制。
 
 ### 备份服务配置随升级更新
 
-升级脚本会暂停已有timer，但不会覆盖系统中已安装的服务配置。更新仓库文件也不会自动更新 `/etc/systemd/system/` 中的副本。
+升级会暂停已有timer，但不会自动替换系统中的unit。完成上线验收后，标准部署选择“运维 → 配置/更新每日备份”，按上述流程更新配置并验证备份。
 
-先检查当前配置和附加配置：
+如果配置已经与当前版本匹配，只是停止或重启后需要恢复，选择“运维 → 恢复每日备份”，确认 `VERIFIED`。脚本会检查数据库版本并执行一次备份，成功后才启用timer。
 
-```bash
-sudo systemctl cat lottery-backup.service lottery-backup.timer
-```
-
-核对工作目录、Docker路径和数据库路径。标准安装可备份旧service再安装新版；有自定义参数时应保留，并将数据库路径和备份前缀改为v6。
-
-```bash
-sudo install -d -m 700 /opt/lottery-private-backups
-sudo cp /etc/systemd/system/lottery-backup.service \
-  "/opt/lottery-private-backups/lottery-backup.service-before-$(date +%F-%H%M%S)"
-sudo install -m 644 deploy/lottery-backup.service /etc/systemd/system/lottery-backup.service
-sudo systemctl daemon-reload
-sudo systemctl start lottery-backup.service
-sudo systemctl status lottery-backup.service
-sudo journalctl -u lottery-backup.service -n 50 --no-pager
-```
-
-确认业务及备份检查通过后，恢复原有timer：
-
-```bash
-sudo systemctl start lottery-backup.timer
-sudo systemctl list-timers lottery-backup.timer
-```
-
-失败时保持timer暂停并排查。原来没有timer的部署不需要执行本节；需要新增时使用上一节。
+失败时保持timer暂停并排查；自定义配置见[手动更新备份服务](#手动更新备份服务)。
 
 ## 故障处理
 
@@ -268,6 +259,22 @@ sudo systemctl list-timers lottery-backup.timer
 升级失败会尝试解除本次暂停的旧app，但不会自动恢复Caddy入口或timer。数据库已迁移时，旧代码未必能读取新库。恢复操作见[恢复](#恢复)。
 
 ### 常见问题
+
+#### 升级备份提示 No such image
+
+旧app仍运行，不代表它记录的镜像还能创建新容器；Docker允许某些情况下[强制移除运行中容器使用的镜像](https://docs.docker.com/reference/cli/docker/image/rm/)，但这不是对本次服务器原因的认定。升级必须使用旧镜像的任务验证器和备份模块；不能用新构建的v6镜像替代v5镜像。新版脚本先验证辅助容器可启动，避免到维护阶段才发现镜像不可用。
+
+若旧脚本已停止Caddy并在备份辅助容器启动时报此错，尚未执行移除旧app、网络重建或迁移。此时输出的备份目录可能只有空目录或CID文件，不是完整备份。先使用报错前输出的旧app ID核对状态（替换占位文字，不公开完整inspect）：
+
+```bash
+sudo docker inspect --format 'running={{.State.Running}} paused={{.State.Paused}} image={{.Image}}' 旧app容器ID
+sudo docker image inspect --format '{{.Id}}' 旧镜像ID
+sudo docker info --format 'server={{.ServerVersion}} driver={{.Driver}} root={{.DockerRootDir}}'
+```
+
+确认仍是原容器且 `paused=true` 时，执行 `sudo docker unpause 旧app容器ID`；确认旧app仍运行后，执行 `sudo docker start 原Caddy容器名`恢复原入口，核对日志和访问。保持timer暂停，确认原v5备份配置后再恢复。不要使用新版 `compose up`重建旧app，也不要删除卷、清理镜像、切换Docker存储或仅靠重试解决。
+
+优先从原镜像归档或原发布来源恢复同一旧镜像，核对原ID并验证无数据卷的辅助容器可启动后才重试。没有原镜像时，保留旧容器及数据，单独制定旧运行环境取证与备份方案；脚本不自动commit容器或重新构建一个镜像冒充原镜像。镜像缺失的具体原因须依据服务器检查确认，不能仅凭这条错误推断。
 
 | 现象 | 优先检查 |
 | --- | --- |
@@ -419,6 +426,86 @@ sudo docker compose up -d --wait --wait-timeout 120
 
 导入会校验源版本、完整性、迁移状态、删除标记以及目标为空。重复导入会拒绝；不运行 `init_admin`，不将v5改名或配置为v6目标。验收原账号、默认规则和池，保留旧库直到确认恢复方案。
 
+### 手动数据库备份
+
+下面用于运行中的v6服务。v5应使用对应旧版路径，不能把旧库改名为v6。
+
+```bash
+sudo docker compose exec -T app python3 scripts/backup_db.py \
+  /app/data/history_v6.sqlite3 \
+  "/app/backups/lottery-v6-$(date +%F-%H%M%S).sqlite3"
+```
+
+成功标志是输出 `Backup integrity_check: ok`。备份包含账号、登录会话、规则、池、实验配置和已提交历史，不包含任务目录和临时导出目录。
+
+将选定备份复制到宿主机，**替换下面的示例文件名**：
+
+```bash
+sudo install -d -m 700 /opt/lottery-private-backups
+sudo docker compose cp \
+  app:/app/backups/lottery-v6-YYYY-MM-DD-HHMMSS.sqlite3 \
+  /opt/lottery-private-backups/
+sudo chmod 600 /opt/lottery-private-backups/lottery-v6-YYYY-MM-DD-HHMMSS.sqlite3
+```
+
+备份含账号等私密数据，应再复制到受控异机位置，并安排容量检查和保留期限。同机备份无法防止整台服务器丢失。
+
+### 手动配置每日备份
+
+仅在尚未安装这项定时备份时使用本节。已有备份服务按下一节更新，保留自定义配置。
+
+仓库示例假定项目位于 `/opt/lottery-simulator`，Docker位于 `/usr/bin/docker`。先核对这两个路径，再安装：
+
+```bash
+sudo install -m 644 deploy/lottery-backup.service /etc/systemd/system/lottery-backup.service
+sudo install -m 644 deploy/lottery-backup.timer /etc/systemd/system/lottery-backup.timer
+sudo systemctl daemon-reload
+sudo systemctl start lottery-backup.service
+sudo systemctl status lottery-backup.service
+sudo journalctl -u lottery-backup.service -n 50 --no-pager
+```
+
+确认执行成功且日志有完整性检查通过，再启用每日调度：
+
+```bash
+sudo systemctl enable --now lottery-backup.timer
+sudo systemctl list-timers lottery-backup.timer
+```
+
+一次性备份service执行后变为inactive是正常现象，以退出结果和日志为准。定时器按服务器时区每日运行，同一天再次运行会更新当天备份；不自动删除旧备份或异机复制。
+
+### 手动更新备份服务
+
+升级脚本会暂停已有timer，但不会覆盖系统中已安装的服务配置。更新仓库文件也不会自动更新 `/etc/systemd/system/` 中的副本。
+
+先检查当前配置和附加配置：
+
+```bash
+sudo systemctl cat lottery-backup.service lottery-backup.timer
+```
+
+核对工作目录、Docker路径和数据库路径。标准安装可备份旧service再安装新版；有自定义参数时应保留，并将数据库路径和备份前缀改为v6。
+
+```bash
+sudo install -d -m 700 /opt/lottery-private-backups
+sudo cp /etc/systemd/system/lottery-backup.service \
+  "/opt/lottery-private-backups/lottery-backup.service-before-$(date +%F-%H%M%S)"
+sudo install -m 644 deploy/lottery-backup.service /etc/systemd/system/lottery-backup.service
+sudo systemctl daemon-reload
+sudo systemctl start lottery-backup.service
+sudo systemctl status lottery-backup.service
+sudo journalctl -u lottery-backup.service -n 50 --no-pager
+```
+
+确认业务及备份检查通过后，恢复原有timer：
+
+```bash
+sudo systemctl start lottery-backup.timer
+sudo systemctl list-timers lottery-backup.timer
+```
+
+失败时保持timer暂停并排查。原来没有timer的部署不需要执行本节；需要新增时使用上一节。
+
 ### 恢复
 
 恢复前停止网站、worker和备份调度，另存当前数据库及相关运行材料，再选择明确的v6备份。核对代码版本、实际卷、文件属主和权限；禁止在数据库使用中覆盖，也不能混用旧WAL/SHM文件与恢复快照。
@@ -470,7 +557,7 @@ app仅连接内部backend网络；Caddy还连接可出站的默认网络。app�
 | --- | --- |
 | 本地v6及可靠性修复 | 已合并，本机原账号连续实验、Trace及取消验收通过；不是服务器上线证明 |
 | 业务回归 | 记录有后端271项、前端65项通过；后续CSS经构建和浏览器复验，实际版本边界见[修复记录](changes/2026-10-02-v6-runtime-reliability-fixes.md) |
-| 安装与升级 | 提交前45项隔离检查通过，Shell语法通过；旧v5验证器和Docker暂停／复制／移除有独立探针记录，见[升级记录](changes/2026-10-06-compose-upgrade.md) |
+| 安装与升级 | 原升级提交前45项隔离检查通过，Shell语法通过；旧v5验证器和Docker暂停／复制／移除有独立探针记录，见[升级记录](changes/2026-10-06-compose-upgrade.md)。新增统一菜单及保留数据重装后，四组63项隔离回归通过，见[菜单记录](changes/2026-10-06-server-management.md) |
 | Docker／Caddy拓扑 | 本地代理来源、来源限流、固定地址重建和临时证书HTTPS已验证；可信公网HTTPS尚有缺口 |
 | 完整服务器部署 | 用户曾确认旧版手动部署成功；新版首次安装、完整升级、正式证书及生产备份恢复仍需实机验收 |
 
