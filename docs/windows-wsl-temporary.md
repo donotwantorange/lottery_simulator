@@ -177,3 +177,11 @@ Docker在WSL内，Windows本身不新增docker命令。Caddy使用项目指定�
 新一轮修复任务1—10、12、13完成，任务11本地代理拓扑/临时证书HTTPS通过，可信公网HTTPS仍待补。产品修复在 `D:\Web_project\lottery_simulator\.worktrees\v6-reliability-fixes`（WSL路径 `/mnt/d/Web_project/lottery_simulator/.worktrees/v6-reliability-fixes`），主目录master仍为 `9832bc0`，没有提交、合并或实际服务切换。前文“问题尚未修复”描述主目录基准代码；隔离工作树已修复并验收，不表示当前主目录运行服务已使用修复。
 
 当前Git主操作使用Windows Git，修复树使用命令级 `-c core.autocrlf=input`；不要套用旧工作树的Git指针说明。业务测试证据保留于 `D:\Web_project\lottery-repair-tests-20261002`，本次文档差异检查在其 `task13-20261006` 子目录。安装/拓扑临时材料已清理，重新验收需准备新配置、依赖与证书。后续本地集成/部署另行核对目标，原本地使用手册保持不变。详见[最终交付记录](changes/2026-10-02-v6-runtime-reliability-fixes.md#2026-10-06任务13文档与最终交付完成)。
+
+## 2026-10-06已完成本地集成与当前入口
+
+用户授权继续后，修复353cab0已合并到master（ca545d6），主目录前端已构建并切换本机服务。使用 http://127.0.0.1:18080/ ，原账号由用户亲自登录，连续10抽1轮和480抽10轮Trace均完成；第二项4920事件，取消测试也通过。前文未合并/未切换描述历史阶段；最新Git与验收见[本地集成记录](changes/2026-10-02-v6-runtime-reliability-fixes.md#2026-10-06授权本地集成备份与原账号验收)。
+
+本轮私有备份在WSL `/home/lottery/lottery-backups/local-repair-20261006`，不在Git或网站目录。验收保留两条新增完整历史，原账号/资源/旧历史均保持。后端PID为626，Windows前端PID为22296，仅为当次观察值；PID文件/本轮日志沿用上文运行目录。服务保留运行，关闭WSL或地址变化后需核对再启动，不盲停进程。当前WSL地址172.26.88.182，原忽略路径server.cjs仍指向该地址。Windows的Shell检出可为CRLF，当前install.sh保持物理LF且语法通过，未改Git全局配置。
+
+本轮未推送、未部署服务器，任务11可信公网HTTPS仍待补。部署/恢复前核对目标与活动任务；不要直接覆盖当前v6库或删除验收历史。原本地使用手册保持不变。

@@ -35,7 +35,7 @@
 
 | 日期／主题 | 当前状态 | 设计 | 计划 | 实施／修改记录 | Git状态 |
 |---|---|---|---|---|---|
-| 2026-10-02 v6回归问题修复 | 2026-10-06任务1—10、12、13完成；代码/业务及本地代理拓扑验收通过，任务11可信公网HTTPS待补；未标全范围已验证 | [设计](2026-10-02-v6-runtime-reliability-fixes-design.md) | [计划](2026-10-02-v6-runtime-reliability-fixes-plan.md) | [实施记录](2026-10-02-v6-runtime-reliability-fixes.md) | 隔离工作树基于`9832bc0`，源码/文档未提交，未合并/推送/部署 |
+| 2026-10-02 v6回归问题修复 | 已本地合并；2026-10-06任务1—10、12、13完成，原账号连续实验/取消验收通过，本机服务已切换；任务11可信公网HTTPS待补 | [设计](2026-10-02-v6-runtime-reliability-fixes-design.md) | [计划](2026-10-02-v6-runtime-reliability-fixes-plan.md) | [实施记录](2026-10-02-v6-runtime-reliability-fixes.md) | 修复`353cab0`，本地合并`ca545d6`；未推送或部署服务器 |
 | 2026-09-30 独立规则、通用稀有度与网页说明 | 已本地合并并切换v6；原账号验收通过；244项后端/52项前端与8组性能完成，新增问题待修复；任务17旧材料清理未执行 | [设计](2026-09-30-independent-rules-rarities-design.md) | [计划](2026-09-30-independent-rules-rarities-plan.md) | [实施记录](2026-09-30-independent-rules-rarities.md) | 功能`b234ce9`，本地合并`906bfe1`，进度/取消修复`9832bc0`；未推送或升级服务器；本次文档待提交 |
 | 2026-09-30 中文交互式首次安装 | 已实现，已有5项隔离检查记录；自动安装未实机测试 | — | — | [修改记录](2026-09-30-interactive-installer.md) | 已纳入master `a20a893`；本地origin/master包含 |
 | 2026-09-29 按抽次图表自适应与读数 | 已纳入master；已有定向测试及隔离浏览器验收记录 | — | — | [修改记录](2026-09-29-position-chart-usability.md) | 已纳入master `83d0654`；本地origin/master包含 |

@@ -1,6 +1,6 @@
 # v6回归问题修复实施记录
 
-当前状态（2026-10-06）：任务1—10、12、13完成；任务11本地隔离拓扑/HTTPS通过，可信公网HTTPS待补。修复留在隔离工作树，未提交、合并或部署。最新交付见末节；以下按日期保留历史过程。
+当前状态（2026-10-06）：任务1—10、12、13完成；修复已本地合并到master并完成原账号连续实验/取消验收，本机服务已切换。任务11本地拓扑/HTTPS通过，可信公网HTTPS仍待补，未推送或部署服务器。最新本地集成见末节；以下保留历史过程。
 
 ## 2026-10-02：修复任务1隔离准备
 
@@ -200,3 +200,54 @@ git -c core.autocrlf=input -C D:/Web_project/lottery_simulator/.worktrees/v6-rel
 检查结果与完整文件清单保存在仓库外 `D:\Web_project\lottery-repair-tests-20261002\task13-20261006\final-audit.json`。核对主检出仅文档变更、两处暂存区为空；修复工作树变更限于产品修复、测试和文档。原 `docs/local-usage.md`、configs、任务格式模型、迁移及依赖清单/锁文件对HEAD无差异；无真实.env/数据或测试产物进入待提交清单。本任务前后非文档变更文件的SHA-256一致，未访问或修改真实数据库内容。
 
 新修复文件包括 `dashboard/api/query.py`、`scripts/check_proxy_network.py`、`tests/test_job_state_reading.py`、`tests/web/test_query_numbers.py`；新设计/计划/记录也尚未加入Git暂存区。既有未提交文档全部保留。没有新提交号/合并号；未推送、未fetch复核远端状态，不能用本地origin引用判断GitHub现状。下一阶段若要求本地集成或部署，应另行核对目标、数据与公网HTTPS缺口。
+
+## 2026-10-06：授权本地集成、备份与原账号验收
+
+任务13交付后，用户要求继续建议的本地集成与实际使用验收，随后亲自在浏览器用原账号登录。此次授权补充允许本地提交、合并、备份和本机服务切换；没有推送GitHub、连接服务器或补做公网HTTPS。修复由隔离工作树合并到master，当前本机已经运行修复代码及配套前端。任务11可信公网HTTPS缺口仍保留，不能称全范围已验证。
+
+### Git集成
+
+| 步骤 | 实际提交 |
+|---|---|
+| 保存主目录既有文档 | `bbe4c4bddc7c8e1a3fae228fb26d20c0bc52bcc5` |
+| 隔离工作树修复 | `353cab04119802cde441cd43319277cc17af9e9e` |
+| 合并到本地master | `ca545d6ce61c9ecd114770d394041e15f84fa3e2` |
+
+合并仅有 `docs/deployment.md` 一处内容冲突：保留共同的已有安装保护说明及新增网络预检段落，解决后整份部署文档与修复树一致。全部合并文件按规范化换行与已验收修复树逐项比较，无产品实现差异；没有用reset或覆盖方式丢弃主目录文档。Windows检出会把Shell变为CRLF，主目录 `scripts/install.sh` 仅保持物理LF供WSL执行，Git内容未变，没有新增换行配置。
+
+### 私有备份与启动
+
+切换前没有本项目监听或worker。真实v6库 `integrity_check=ok`，1账号、1规则、1池、0实验配置、1历史/10事件；任务目录为1 completed、1 cancelled，无未知或活动任务。没有停止其它服务。
+
+复用 `scripts/backup_db.py` 在WSL创建新私有目录 `/home/lottery/lottery-backups/local-repair-20261006`（目录0700，文件0600），含 `history_v6.sqlite3`、任务/导出/前端及旧运行文件归档、版本元数据；数据库备份完整性通过，没有覆盖旧备份或重建真实库。此备份在Git之外，不复制到公开静态目录。
+
+主目录Django check通过，迁移状态检查无待执行迁移，没有运行初始化、账号迁移或密码重置。部署/安装定向30项在合并后再次通过，21.736秒；`bash -n scripts/install.sh`通过。主目录 `npm --prefix frontend run build`通过，最终浏览器实际加载 `index-C_IEEesT.js`、`index-D4WdI3j_.css`。既有RawSQL/full_clean和大chunk提示仍存在；没有重复已通过且源码一致的完整271/65回归。
+
+本机入口为 `http://127.0.0.1:18080/`，Windows静态前端/代理指向WSL 8000后端。Python仍用 `/home/lottery/.venvs/lottery-simulator/bin/python`，后端实际cwd为主检出，显式指定主目录data中的v6库/jobs/exports。Windows代理仅绑定127.0.0.1；没有更改Windows防火墙、代理、系统信任或WSL网络模式。本机运行是开发模式，不将Node代理的连接来源用于生产Caddy验收。
+
+后端PID文件为 `/home/lottery/lottery-runtime-v6/backend.pid`，本轮日志 `backend-20261006.log`；前端PID及 `frontend-20261006.log`、`frontend-error-20261006.log` 在主目录忽略路径 `data/local-v6-runtime/`。这次结束保留日常服务和登录后的浏览器页面，当前无活动worker；WSL重启后须重新核对地址/端口和PID，不能假定旧PID或地址仍有效。
+
+### 原账号连续实验与取消
+
+用户在Codex浏览器自行用原密码登录。没有读取或重置原密码，没有注入真实账号会话，没有创建临时账号混入真实库；通过页面预览确认后提交以下两项，seed均为42、开启Trace：
+
+| 实验 | job_id | 实际结果 |
+|---|---|---|
+| 10抽×1轮 | `a13a9dc4-5bd8-4ad2-b301-040e521effa4` | completed/history_saved；10个主抽、10个事件；状态全流程耗时0.610秒 |
+| 紧接着480抽×10轮 | `cf3e06fe-c09c-431f-8a5c-cc94103e5442` | completed/history_saved；4800主抽、100赠送抽、20直接赠送事件，共4920事件；状态全流程耗时68.409秒 |
+
+页面报告的模拟/理论耗时分别0.437和60.074秒，与状态全流程耗时口径不同，不混用。第二项页面成功轮询到completed，没有复现此前的第二次任务卡住。原账号能查看两条新历史、第一项10行Trace，以及第二项全部轮次4920事件/50页；分类图表实际加载并显示数值，无alert。历史、结果文件、数据库事件行数和主抽事件数已逐项核对。
+
+另外通过同一页面提交100000抽×1轮Trace专用于取消，job_id `9ce61b8a-57b1-43fd-8ffa-d97cf2f8e748`。浏览器确认running/simulating后点击停止，最终cancelled，worker退出，无历史行、结果或Trace残片，没有继续等待其完整运算。未删除取消任务目录。
+
+验收后仍为1个账号，规则/池/配置与备份一致，原历史行完整保留；新增2条完整验收历史，现共3历史/4940事件。没有清理这些真实账号的验收历史或任务，避免把本地集成误当作数据删除授权。真实v6库再次完整性通过。
+
+### 证据、脚本修正与回滚边界
+
+本轮证据位于仓库外 `D:\Web_project\lottery-local-integration-20261006`：`preflight.json`、`commits.json`、`real-backend.json`、`merged-deployment-tests.log`、`main-frontend-build.log`、`consecutive-real-jobs.json`、`cancellation-and-preservation.json`、最终差异核对 `final-audit.json`，以及real-history/real-trace-all/real-charts/cancelled截图。脚本也保留在此处，不提交测试输出、日志、账号或凭据。
+
+外置只读结果检查脚本初次遗漏Django初始化，在读取任务前失败；补初始化后核对通过，未修改产品代码。Trace浏览器等待初次使用未格式化的4920文字，而界面显示4,920；依据实际DOM确认正确计数，不将选择器超时当作接口故障。取消和两项完成验收没有重放提交。
+
+回滚前先确认无活动任务，仅停止PID文件对应且身份核实的本机服务。源代码可在隔离的基准 `9832bc0` 检出运行；本轮没有schema变化，但要保留当前v6数据和新增历史，不能直接覆盖数据库。若确需恢复备份，应先保存当前库，核对路径及私有归档并在停止服务后按既有恢复流程处理；不要reset --hard、删data或降级TLS。原v5库、原本地使用手册及真实.env保持不变。
+
+本次本地集成与验收记录随文档提交纳入master；最终Git状态与提交号见本轮commits/final-audit证据。隔离修复树仍保留在353cab0用于对照，不自动删除。任务11可信公网HTTPS仍待补，服务器部署另行执行。
