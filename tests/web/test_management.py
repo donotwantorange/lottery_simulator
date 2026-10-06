@@ -42,6 +42,49 @@ class ManagementAPITests(TestCase):
         response = self.client.get("/api/v1/management/jobs/")
         self.assertEqual(response.status_code, 403)
 
+    def test_unavailable_state_has_safe_api_errors_and_no_deletion(self):
+        from dashboard.services.runs import get_manager
+        from dashboard.models import User, AppMeta
+        manager = get_manager()
+        state = replace(valid_state(), job_id=str(uuid4()), status='completed',
+                        owner_id=str(self.user.pk))
+        path = manager.root / state.job_id / 'state.json'
+        write_json(path, state.to_dict())
+        url = f'/api/v1/jobs/{state.job_id}/'
+        with patch('dashboard.jobs.read_json', side_effect=OSError(61, 'private path and seed')) as read:
+            self.assertEqual(self.client.get(url).status_code, 401)
+            read.assert_not_called()
+        self.assertEqual(self.login_as('admin').status_code, 200)
+        with patch('dashboard.jobs.read_json', side_effect=OSError(61, 'private path and seed')), \
+             patch('dashboard.jobs.time.sleep'), patch('shutil.rmtree') as cleanup:
+            for endpoint in (url, url+'result/', url+'trace/',
+                             '/api/v1/jobs/mine/', '/api/v1/jobs/busy/',
+                             '/api/v1/management/jobs/', f'/api/v1/management/users/{self.user.pk}/'):
+                response = self.client.get(endpoint)
+                self.assertEqual(response.status_code, 503, endpoint)
+                self.assertEqual(response.json()['error'], {
+                    'code': 'storage_busy', 'message': '任务状态暂不可用，请稍后重试', 'fields': {}})
+            for action in ('cancel/', 'resave/'):
+                self.assertEqual(self.client.post(url+action).status_code, 503)
+            self.assertEqual(self.client.delete(f'/api/v1/management/users/{self.user.pk}/',
+                data=json.dumps({'confirm': True}), content_type='application/json').status_code, 503)
+            cleanup.assert_not_called()
+            self.assertFalse(AppMeta.objects.filter(key=f'account_deletion:{self.user.pk}').exists())
+            self.assertFalse(User.objects.get(pk=self.user.pk).deleting)
+            self.assertFalse((path.parent/'cancel.request').exists())
+        with patch('dashboard.jobs.read_json', side_effect=[FileNotFoundError(2, 'transient'), state.to_dict()]), \
+             patch('dashboard.jobs.time.sleep'):
+            self.assertEqual(self.client.get(url).status_code, 200)
+        self.assertEqual(self.client.get(f'/api/v1/jobs/{uuid4()}/').status_code, 404)
+        self.assertEqual(self.login_as('user').status_code, 200)
+        other = replace(state, owner_id=str(self.admin.pk))
+        write_json(path, other.to_dict())
+        self.assertEqual(self.client.get(url).status_code, 404)
+        User.objects.filter(pk=self.user.pk).update(auth_version=2)
+        with patch('dashboard.jobs.read_json') as read:
+            self.assertEqual(self.client.get(url).status_code, 401)
+            read.assert_not_called()
+
     def test_admin_task_list_includes_owner_name_and_paginates(self):
         from dashboard.services.runs import get_manager
 
@@ -58,6 +101,11 @@ class ManagementAPITests(TestCase):
             accepted_at="2026-09-28T12:00:00+00:00")
         write_json(job_dir / "state.json", state.to_dict())
         self.assertEqual(self.login_as("admin").status_code, 200)
+        response = self.client.get("/api/v1/management/jobs/?page=1&page_size=1")
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.json()['error']['code'], 'storage_busy')
+        (broken_dir / 'state.json').unlink()
+        broken_dir.rmdir()
         response = self.client.get("/api/v1/management/jobs/?page=1&page_size=1")
         self.assertEqual(response.status_code, 200)
         body = response.json()

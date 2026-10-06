@@ -82,6 +82,28 @@ class AccountDeletionTests(TestCase):
         delete_account(self.admin, self.target.pk)
         self.assertFalse(User.objects.filter(pk=self.target.pk).exists())
 
+    def test_state_unavailable_mid_deletion_retains_manifest_and_files(self):
+        from dataclasses import replace
+        from dashboard.jobs import JobManager, JobStateUnavailable
+        from dashboard.services.runs import get_manager
+        from dashboard.job_models import write_json
+        from tests.test_job_models import valid_state
+        manager = get_manager()
+        state = replace(valid_state(), job_id=str(uuid4()), owner_id=str(self.target.pk), status='completed')
+        path = manager.root / state.job_id
+        write_json(path / 'state.json', state.to_dict())
+        with patch.object(JobManager, 'states', side_effect=[[state], JobStateUnavailable('unknown')]), \
+                patch('shutil.rmtree') as cleanup:
+            with self.assertRaises(JobStateUnavailable):
+                delete_account(self.admin, self.target.pk)
+            cleanup.assert_not_called()
+        self.target.refresh_from_db()
+        self.assertTrue(self.target.deleting)
+        self.assertEqual(AppMeta.objects.get(key=f'account_deletion:{self.target.pk}').value, [state.job_id])
+        self.assertTrue((path / 'state.json').exists())
+        delete_account(self.admin, self.target.pk)
+        self.assertFalse(path.exists())
+
     def test_durable_manifest_survives_missing_state_on_retry(self):
         from uuid import uuid4
         from dashboard.services.runs import get_manager
@@ -91,9 +113,16 @@ class AccountDeletionTests(TestCase):
         directory.mkdir()
         (directory / "result.json").touch()
         AppMeta.objects.create(key=f"account_deletion:{self.target.pk}", value=[job_id])
-        with patch("shutil.rmtree", side_effect=OSError("partial cleanup")):
-            with self.assertRaises(DeleteIncomplete):
+        from dashboard.jobs import JobStateUnavailable
+        with patch('shutil.rmtree') as cleanup:
+            with self.assertRaises(JobStateUnavailable):
                 delete_account(self.admin, self.target.pk)
+            cleanup.assert_not_called()
+        self.assertEqual(AppMeta.objects.get(key=f'account_deletion:{self.target.pk}').value, [job_id])
+        # A missing state cannot prove its worker stopped. Explicit maintenance
+        # removes this test's known orphan, then the durable manifest can finish.
+        (directory / 'result.json').unlink()
+        directory.rmdir()
         delete_account(self.admin, self.target.pk)
         self.assertFalse(directory.exists())
         self.assertFalse(User.objects.filter(pk=self.target.pk).exists())

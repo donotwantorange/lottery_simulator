@@ -187,7 +187,7 @@ export function PoolEditor({ value, rule, rules, kind, visibility, canEdit, canC
           value={value.name} onChange={(event) => change((draft) => { draft.name = event.target.value; })} /></label>
         <label>池类型<select aria-label="池类型" disabled={!canEdit || editing || !canCreatePublic}
           value={kind} onChange={(event) => onKind(event.target.value as "private" | "public")}>
-          <option value="private">私有池</option>{canCreatePublic && <option value="public">公共池</option>}
+          <option value="private">私有池</option>{(canCreatePublic || kind === "public") && <option value="public">公共池</option>}
         </select></label>
         {kind === "private" && <label>可见性<select aria-label="池可见性" disabled={!canEdit} value={visibility}
           onChange={(event) => onVisibility(event.target.value as "public" | "hidden")}>
@@ -255,7 +255,7 @@ export function PoolEditor({ value, rule, rules, kind, visibility, canEdit, canC
 
     <section className="editor-section"><h3>机制目标绑定</h3>
       <p>目标按角色ID绑定，不会因同名角色自动替换。</p>
-      {rule?.document.big_pity.enabled && <p>大保底目标：{bigTarget?.name ?? "未解析；请在最高稀有度标记UP角色"}（规则按最高档UP解析）</p>}
+      {rule?.document.big_pity.enabled && <><p>大保底目标：{bigTarget?.name ?? "未解析；请在最高稀有度标记UP角色"}（规则使用最高稀有度中排序第一的UP）</p><p className="muted">按这一档角色名单从上到下选择第一个标记UP的角色，与权重大小无关。</p></>}
       {rule?.document.grant.enabled && rule.document.grant.target === "pool_selected" && <label className="compact-field">周期赠送角色
         <select aria-label="周期赠送角色" disabled={dataDisabled} value={value.mechanism_targets.periodic_grant ?? ""}
           onChange={(event) => change((draft) => { if (event.target.value) draft.mechanism_targets.periodic_grant = event.target.value; else delete draft.mechanism_targets.periodic_grant; })}>

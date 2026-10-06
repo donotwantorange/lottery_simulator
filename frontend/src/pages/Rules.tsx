@@ -246,6 +246,9 @@ export function Rules() {
       {selected?.structure_locked && <p className="notice-note">此规则已有角色池引用，稀有度结构不能修改；如需调整结构，请复制为新规则。</p>}
       <form className="stack-form" onSubmit={(event) => void save(event)}>
         <fieldset disabled={!editable || busy || mode === "view"} className="plain-fieldset">
+          <section className="editor-section"><h3>基本信息与权限</h3>
+            <p className="muted">名称便于识别。公共规则由管理员维护；私有规则归创建者所有。私有规则设为公开后，其他用户可查看、绑定和复制，但不能编辑。</p>
+          </section>
           <div className="field-grid">
             <label>规则名称<input value={name} onChange={(event) => setName(event.target.value)} maxLength={255} required /></label>
             {!selected && <label>规则类型<select value={kind} onChange={(event) => setKind(event.target.value as "private" | "public")}>

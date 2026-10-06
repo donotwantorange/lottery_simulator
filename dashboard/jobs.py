@@ -2,10 +2,12 @@ from contextlib import contextmanager
 from dataclasses import replace
 from datetime import datetime, timezone
 import fcntl
+import errno
 import logging
 import os
 from pathlib import Path
 import signal
+import stat
 import sqlite3
 import subprocess
 import sys
@@ -32,6 +34,10 @@ class JobAlreadyRunning(RuntimeError):
     pass
 
 
+class JobStateUnavailable(RuntimeError):
+    """State cannot be safely determined; retain admission and owned files."""
+
+
 class JobManager:
     def __init__(self, root: str | Path, database_path: str | Path):
         self.root = Path(root).resolve()
@@ -50,12 +56,37 @@ class JobManager:
             directory = self.root / str(UUID(job_id))
         except (ValueError, TypeError, AttributeError):
             return None
-        return directory if directory.resolve().parent == self.root else None
+        try:
+            mode = directory.lstat().st_mode
+        except FileNotFoundError:
+            return directory
+        except OSError as error:
+            raise JobStateUnavailable("任务目录不可读") from error
+        if not stat.S_ISDIR(mode):
+            raise JobStateUnavailable("任务目录不安全")
+        return directory
+
+    def states(self):
+        """Scan directories, not replaceable state files; fail closed on unknowns."""
+        try:
+            candidates = list(self.root.iterdir())
+        except OSError as error:
+            raise JobStateUnavailable("任务目录无法枚举") from error
+        states = []
+        for path in candidates:
+            try:
+                canonical = str(UUID(path.name)) == path.name
+            except ValueError:
+                continue
+            if canonical:
+                state = self.get(path.name)
+                if state is not None:
+                    states.append(state)
+        return states
 
     def _active_states(self):
-        for path in self.root.glob("*/state.json"):
-            state = self.get(path.parent.name)
-            if state is not None and state.status in ACTIVE_STATUSES:
+        for state in self.states():
+            if state.status in ACTIVE_STATUSES:
                 yield state
 
     def get_active(self) -> JobState | None:
@@ -127,16 +158,29 @@ class JobManager:
         job_dir = self._job_dir(job_id)
         if job_dir is None:
             return None
-        try:
-            state = JobState.from_dict(read_json(job_dir / "state.json"))
-            if state.job_id != job_dir.name:
-                raise ValueError("任务状态与目录不一致")
-            return state
-        except FileNotFoundError:
-            return None
-        except (OSError, TypeError, ValueError):
-            logging.getLogger(__name__).warning("Ignoring invalid job state %s", job_id)
-            return None
+        for attempt in range(3):
+            try:
+                state_path = job_dir / "state.json"
+                if not stat.S_ISREG(state_path.lstat().st_mode):
+                    raise ValueError("任务状态文件不安全")
+                state = JobState.from_dict(read_json(state_path))
+                if state.job_id != job_dir.name:
+                    raise ValueError("任务状态与目录不一致")
+                return state
+            except (OSError, TypeError, ValueError) as error:
+                if isinstance(error, FileNotFoundError) or (isinstance(error, OSError)
+                        and error.errno in {errno.ENOENT, errno.ENODATA}):
+                    if attempt < 2:
+                        time.sleep(0.01 * (attempt + 1))
+                        continue
+                    try:
+                        job_dir.lstat()
+                    except FileNotFoundError:
+                        return None
+                    except OSError as metadata_error:
+                        raise JobStateUnavailable("任务目录不可读") from metadata_error
+                logging.getLogger(__name__).warning("Job state unavailable: %s", job_id, exc_info=True)
+                raise JobStateUnavailable("任务状态不可读") from error
 
     def get_result(self, job_id) -> dict | None:
         state = self.get(job_id)
@@ -212,7 +256,7 @@ class JobManager:
                 authorize(state)
             if state is not None and state.status in ACTIVE_STATUSES:
                 try:
-                    saved = HistoryRepository(self.database_path).get_run(job_id)
+                    saved = self._saved_run(state)
                 except (OSError, sqlite3.Error, ValueError):
                     saved = None
                 if saved is not None:
@@ -241,6 +285,24 @@ class JobManager:
         except FileNotFoundError:
             # The containing data directory was removed after the child exited.
             return
+        except JobStateUnavailable:
+            logging.getLogger(__name__).exception("Retaining unavailable job %s after exit", job_id)
+
+    def _saved_run(self, state):
+        saved = HistoryRepository(self.database_path).get_run(state.job_id)
+        if saved is None:
+            return None
+        parameters = RunParameters.from_dict(state.parameters)
+        expected = dict(owner_id=state.owner_id, accepted_at=state.accepted_at,
+                        pool_source=state.pool_source, rule_source=state.rule_source,
+                        limit_policy=state.limit_policy, parameters=parameters.parameters.to_dict(),
+                        pool_snapshot=parameters.pool_snapshot.to_dict(),
+                        rule_snapshot=parameters.rule_snapshot.to_dict(),
+                        initial_context=parameters.initial_context.to_dict(),
+                        targets=dict(parameters.resolved_targets))
+        if any(saved.get(key) != value for key, value in expected.items()):
+            raise JobStateUnavailable("历史与任务冻结快照不一致")
+        return saved
 
     def _recover_committed(self, state, job_dir):
         if not self.database_path.exists():
@@ -249,7 +311,7 @@ class JobManager:
             )
             return None
         try:
-            saved = HistoryRepository(self.database_path).get_run(state.job_id)
+            saved = self._saved_run(state)
         except (OSError, sqlite3.Error, ValueError):
             logging.getLogger(__name__).warning(
                 "History commit not confirmed for job %s; retaining active state", state.job_id
@@ -291,9 +353,8 @@ class JobManager:
 
     def reconcile_after_restart(self):
         with self._locked():
-            for path in self.root.glob("*/state.json"):
-                current = self.get(path.parent.name)
-                job_dir = self._job_dir(path.parent.name)
+            for current in self.states():
+                job_dir = self._job_dir(current.job_id)
                 if (current is None or job_dir is None or
                         (current.status not in ACTIVE_STATUSES and not current.cleanup_error
                          and not (job_dir / "cancel.request").exists())):

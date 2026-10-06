@@ -25,12 +25,12 @@ export function RuleSummary({ rule, pool }: Props) {
       <dt>规则 / 修订</dt><dd>{rule.name} · {rule.revision}</dd>
       <dt>基础概率</dt><dd>{byRank.slice().reverse().map((rarity) =>
         `${rarity.name} ${(rarity.base_probability * 100).toFixed(3)}%`).join(" · ")}</dd>
-      <dt>大保底目标</dt><dd>{rule.document.big_pity.enabled ? big?.name ?? "未解析：需绑定最高档UP角色" : "已关闭"}</dd>
+      <dt>大保底目标</dt><dd>{rule.document.big_pity.enabled ? `${big?.name ?? "未解析：需绑定最高档UP角色"}（最高稀有度名单中排序第一的UP）` : "已关闭"}</dd>
       <dt>首次赠送</dt><dd>{rule.document.bonus.enabled
         ? `主抽第${rule.document.bonus.at_main_draw}抽触发，另抽${rule.document.bonus.draws}次（独立保底）`
         : "已关闭"}</dd>
       <dt>周期直接赠送</dt><dd>{rule.document.grant.enabled
-        ? `每${rule.document.grant.period}抽赠送${rule.document.grant.quantity}名：${grant?.name ?? "未解析，请选择目标角色"}`
+        ? `每${rule.document.grant.period}抽赠送${rule.document.grant.quantity}名：${grant?.name ?? "未解析，请选择目标角色"}${rule.document.grant.target === "first_up" ? "（按稀有度由高到低寻找第一个UP）" : "（池指定角色）"}`
         : "已关闭"}</dd>
     </dl>
   </section>;

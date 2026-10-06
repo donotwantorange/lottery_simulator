@@ -33,14 +33,15 @@ input:focus { border-color: #7188ee; box-shadow: 0 0 0 3px #4568e81c; }
 .login-page { display: grid; min-height: 100vh; place-items: center; padding: 24px; background: radial-gradient(ellipse at 15% 12%, #e3eaff, transparent 37%), #f3f6fa; }
 .login-card { width: min(100%, 410px); padding: 38px; border: 1px solid #e5eaf1; border-radius: 16px; background: #fff; box-shadow: 0 18px 60px #18294412; }
 .login-card h1 { margin-bottom: 8px; }
-.page-stack { display: grid; gap: 20px; }
-.section-heading { display: flex; justify-content: space-between; align-items: flex-start; gap: 18px; margin-bottom: 20px; }
+.page-stack { display: grid; grid-template-columns: minmax(0, 1fr); gap: 20px; min-width: 0; }
+.section-heading { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: flex-start; gap: 18px; margin-bottom: 20px; }
 .section-heading p { margin: 0; }
 .button-row { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin: 14px 0; }
 .button-row button, .editor-section button, .import-preview button, .page-stack button:not(.primary-button) { padding: 9px 12px; border: 1px solid #dbe2eb; border-radius: 8px; color: #40516a; background: #fff; }
-.field-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 230px), 1fr)); gap: 16px; margin: 16px 0; }
+.field-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 230px), 1fr)); gap: 16px; margin: 16px 0; min-width: 0; }
+.field-grid > *, .stack-form label { min-width: 0; }
 .field-grid > label, .compact-field, .import-preview label { display: grid; align-content: start; gap: 7px; color: #536176; font-size: 13px; font-weight: 600; }
-.field-grid select, .compact-field select, .import-preview select { min-height: 42px; padding: 9px 11px; border: 1px solid #dbe2eb; border-radius: 8px; color: #1a2638; background: #fff; font: inherit; }
+.field-grid select, .compact-field select, .import-preview select, .stack-form select { width: 100%; min-width: 0; min-height: 42px; padding: 9px 11px; border: 1px solid #dbe2eb; border-radius: 8px; color: #1a2638; background: #fff; font: inherit; }
 .plain-fieldset { min-width: 0; margin: 0; padding: 0; border: 0; }
 .editor-section { margin: 22px 0; padding-top: 18px; border-top: 1px solid #eef1f5; }
 .editor-section h3, .import-preview h3 { margin: 0 0 14px; font-size: 15px; }
@@ -61,9 +62,9 @@ input:focus { border-color: #7188ee; box-shadow: 0 0 0 3px #4568e81c; }
 .success-note { margin: 0; color: #28714b; font-size: 13px; }
 .notice-note { margin: 14px 0; padding: 12px 14px; border-left: 3px solid #d89b35; border-radius: 6px; color: #775319; background: #fff8e9; font-size: 13px; }
 .rule-table-actions { display: flex; align-items: center; gap: 10px; }
-.pool-rule-summary { display: grid; grid-template-columns: minmax(120px, .3fr) 1fr; gap: 9px 14px; margin: 0; padding: 14px; border-radius: 9px; background: #f7f8fb; font-size: 13px; }
+.pool-rule-summary { display: grid; grid-template-columns: minmax(0, 120px) minmax(0, 1fr); gap: 9px 14px; margin: 0; padding: 14px; border-radius: 9px; background: #f7f8fb; font-size: 13px; }
 .pool-rule-summary dt { color: #77849a; }
-.pool-rule-summary dd { margin: 0; }
+.pool-rule-summary dd { min-width: 0; margin: 0; overflow-wrap: anywhere; }
 .pool-rarity { margin: 18px 0; padding: 16px; border: 1px solid #e9edf3; border-radius: 10px; }
 .pool-rarity h4 { margin: 0 0 6px; }
 .pool-reward { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; align-items: end; margin: 12px 0; padding: 14px; border: 1px solid #e9edf3; border-radius: 9px; }
@@ -71,7 +72,8 @@ input:focus { border-color: #7188ee; box-shadow: 0 0 0 3px #4568e81c; }
 .rarity-mapping { display: grid; gap: 12px; margin: 12px 0; }
 .rarity-mapping > p { margin: 0; color: #68758a; font-size: 13px; }
 .pool-row-actions { display: flex; gap: 5px; }
-.pool-save-form { display: grid; gap: 16px; }
+.pool-save-form { display: grid; grid-template-columns: minmax(0, 1fr); gap: 16px; min-width: 0; }
+.pool-save-form > * { min-width: 0; }
 .import-preview { display: grid; gap: 12px; margin-top: 18px; padding: 16px; border: 1px solid #e5eaf1; border-radius: 10px; background: #f9faff; }
 .import-preview p { margin: 0; color: #68758a; font-size: 13px; }
 .import-preview label { max-width: 440px; }

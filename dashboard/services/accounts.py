@@ -62,11 +62,11 @@ def delete_account(actor, target_id):
         return fresh
 
     def owned_states():
-        return [state for path in manager.root.glob("*/state.json")
-                if (state := manager.get(path.parent.name)) is not None
-                and getattr(state, "owner_id", None) == str(target_id)]
+        return [state for state in manager.states()
+                if state.owner_id == str(target_id)]
 
     with manager._locked():
+        authorize()
         states = owned_states()
         with transaction.atomic():
             authorize()

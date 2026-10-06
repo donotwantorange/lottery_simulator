@@ -1,5 +1,6 @@
 """Django settings with v6 data paths isolated from the legacy application."""
 
+import ipaddress
 import os
 from pathlib import Path
 
@@ -97,7 +98,14 @@ LOTTERY_IDLE_SECONDS = int(os.environ.get("LOTTERY_IDLE_SECONDS", "1800"))
 LOTTERY_ABSOLUTE_SECONDS = int(os.environ.get("LOTTERY_ABSOLUTE_SECONDS", "43200"))
 LOTTERY_ACCOUNT_FAILURES = int(os.environ.get("LOTTERY_ACCOUNT_FAILURES", "5"))
 LOTTERY_SOURCE_FAILURES = int(os.environ.get("LOTTERY_SOURCE_FAILURES", "20"))
-LOTTERY_TRUSTED_PROXIES = frozenset(filter(None, os.environ.get("LOTTERY_TRUSTED_PROXIES", "").split(",")))
+_trusted_proxy_text = os.environ.get("LOTTERY_TRUSTED_PROXIES", "").strip()
+try:
+    LOTTERY_TRUSTED_PROXIES = frozenset(
+        str(ipaddress.ip_address(value.strip()))
+        for value in _trusted_proxy_text.split(",")
+    ) if _trusted_proxy_text else frozenset()
+except ValueError as exc:
+    raise ImproperlyConfigured("LOTTERY_TRUSTED_PROXIES 只能包含精确 IP 地址") from exc
 CSRF_TRUSTED_ORIGINS = [x for x in os.environ.get("LOTTERY_CSRF_TRUSTED_ORIGINS", "").split(",") if x]
 if not IS_PRODUCTION:
     CSRF_TRUSTED_ORIGINS.append("http://127.0.0.1:5173")

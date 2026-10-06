@@ -187,6 +187,21 @@ class PoolAPITests(TestCase):
         self.assertEqual(exported.status_code, 200)
         self.assertEqual(exported.json()["name"], "隐藏池")
 
+    def test_query_integer_limits_apply_to_pool_pagination_and_export(self):
+        pool = save_pool(self.user, self.pool_doc("整数边界池"),
+                         expected_rule_revision=self.rule.revision)
+        self.login_as(self.user)
+        for value in ("9" * 5000, "0" * 1024 + "1"):
+            self.assertEqual(self.client.get(f"/api/v1/pools/?page={value}").status_code, 400)
+            self.assertEqual(self.client.get(
+                f"/api/v1/pools/{pool.pk}/export/?expected_revision={value}").status_code, 400)
+        accepted = "0" * 1023 + "1"
+        self.assertEqual(self.client.get(f"/api/v1/pools/?page={accepted}").status_code, 200)
+        self.assertEqual(self.client.get(
+            f"/api/v1/pools/{pool.pk}/export/?expected_revision={accepted}").status_code, 200)
+        self.assertEqual(self.client.get(f"/api/v1/pools/?page=1&page_size=201").status_code, 400)
+        self.assertEqual(self.client.get("/api/v1/pools/?page=2147483648").status_code, 400)
+
     def test_import_preview_confirm_is_strict_and_preserves_private_owner(self):
         raw = self.pool_doc("导入池")
         raw["rule_ref"]["id"] = str(uuid4())

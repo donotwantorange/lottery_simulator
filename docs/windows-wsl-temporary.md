@@ -137,8 +137,43 @@ Windows保留端口范围包含5173，本轮使用WSL虚拟网卡绑定和127.0.
 
 下一步任务17：先明确选用本机v5库还是旧Ubuntu备份作为真实账号来源，再进行经授权的本地集成与切换。不得把本轮临时账号/库迁入正式环境。
 
-## 任务17本机启动入口（2026-10-02，待真实账号验收）
+## 任务17本机启动入口（2026-10-02，真实账号验收已完成）
 
-实现已合并本地master，主检出v6库已保留本机原管理员并初始化默认资源。当前入口 http://127.0.0.1:18080/ ，使用原账号密码登录；新版history_v6/jobs_v6/exports_v6路径均在主检出data。前端静态资源与CSRF实际200，用户登录及小实验尚待确认。源history_v5仍保留，私有备份位于WSL `/home/lottery/lottery-backups/cutover-20261002-1010/`。原本地使用手册未改，未推送或升级服务器。
+实现已合并本地master，主检出v6库已保留本机原管理员并初始化默认资源。本次切换使用入口 http://127.0.0.1:18080/ （不表示服务始终在线） ，使用原账号密码登录；新版history_v6/jobs_v6/exports_v6路径均在主检出data。前端静态资源与CSRF实际200，用户已确认原账号10抽1轮Trace成功；历史和Trace访问已核对。源history_v5仍保留，私有备份位于WSL `/home/lottery/lottery-backups/cutover-20261002-1010/`。原本地使用手册未改，未推送或升级服务器。
 
 临时前端启动器及PID在 `data/local-v6-runtime/`，后端PID和日志在WSL `/home/lottery/lottery-runtime-v6/`。均为本机运行文件，不提交Git。WSL关闭或地址变化后需重新核对启动，当前地址172.26.88.182。回滚边界见实施记录任务17进度。
+
+
+## 2026-10-02完整回归及WSL运行注意事项
+
+最近理论阶段进度和取消文件检查修复已提交`9832bc0`。本轮隔离后端244项、前端52项及构建通过；8组240/480抽、10轮、Trace开关、Linux/Windows目录任务全部完成，数值一致。480抽10轮Trace在Windows目录66.486秒、Linux临时目录55.498秒，均为单次测量。
+
+Windows挂载目录的状态文件更新过程中实测偶发FileNotFoundError/OSError(61)；当前代码会误报404，而页面对404停止轮询。此问题尚未修复。另有超长参数异常、轮询旧错误残留、保存/提交显示回跳及可信代理共享来源限流风险，详见[实施记录最新测试节](changes/2026-09-30-independent-rules-rarities.md#2026-10-02最近修改完整测试与待处理问题)。不要据此把无更新页面直接当作worker已停止。
+
+测试证据在 `D:\Web_project\lottery-tests-20261002`；本轮8001后端、18081代理和测试标签页已关闭，Linux临时数据已清理。真实v6路径与账号不是本轮临时账号/数据。启动或恢复实际页面需先核对WSL地址、监听、PID和日志；本页保存的地址是当次测量值，不能保证重启后有效。原本地使用手册不改，未推送或升级服务器。
+
+## 2026-10-02补齐Docker环境
+
+用户明确授权后，在WSL Ubuntu-24.04中通过[Docker官方APT源](https://docs.docker.com/engine/install/ubuntu/)安装Docker Engine 29.8.2、containerd 2.3.6、Compose 5.5.1及Buildx 0.37.1；docker/containerd服务已启用。没有安装Windows Docker Desktop，没有修改Windows代理、防火墙或WSL网络模式，也没有将普通用户加入docker组。
+
+从PowerShell调用：
+
+```powershell
+wsl -d Ubuntu-24.04 -u root -- docker version
+wsl -d Ubuntu-24.04 -u root -- docker compose version
+wsl -d Ubuntu-24.04 -u root -- docker run --rm --pull=never caddy:2.11.4-alpine caddy version
+```
+
+Docker在WSL内，Windows本身不新增docker命令。Caddy使用项目指定的容器镜像，不需要另装WSL内的独立caddy程序。实际hello-world运行、Caddy 2.11.4运行及项目Caddyfile校验均通过；原手册、真实数据库、账号和.env未改，修复源码仍保留于隔离工作树，未合并或部署。
+
+本机网络仍限制WSL直连Docker Hub。Windows已有代理127.0.0.1:7897可访问官方仓库，但仅绑定Windows回环地址，WSL NAT无法直接使用。本轮通过该现有代理下载官方linux/amd64镜像，校验manifest/config/layer SHA-256及解压后的layer diff ID，再导入Docker。Windows原生curl保持系统TLS校验；没有关闭证书校验、配置非官方镜像源或改变系统证书信任。当时已备齐Python基础镜像及项目既有依赖wheel用于离线构建；wheel随后已按用户要求清理，当前不能直接复用该离线构建材料。
+
+本轮原临时目录`D:\Web_project\lottery-environment-20261002`已按用户要求整体删除，下载档案、wheel、脚本、日志和临时证书不再保留；安装及验证结果摘要见[实施记录](changes/2026-10-02-v6-runtime-reliability-fixes.md)。后续直接pull仍需可达的WSL网络/代理，不能将本轮离线导入当作直连成功。测试容器、网络、卷、验收镜像和构建缓存均已清除，仅保留Docker服务与官方Caddy/Python运行镜像；重新验收需重新准备独立配置和证书。
+
+真实容器验收另发现先启动的app会占用原Caddy固定地址`.2`。隔离工作树已为backend设置独立动态范围`LOTTERY_PROXY_DYNAMIC_RANGE`（默认172.30.96.128/25），与Caddy地址分开，新增范围、显式网关（LOTTERY_PROXY_GATEWAY，默认172.30.96.1）及内置null网络处理，部署/安装30项定向回归通过。自定义子网时需同步调整范围、固定地址与网关。本地HTTPS/来源桶分离/重建已实测通过，但可信公网HTTPS证书验证失败，任务11仍有网络验证缺口；详细证据见新一轮实施记录。
+
+## 2026-10-06修复交付状态
+
+新一轮修复任务1—10、12、13完成，任务11本地代理拓扑/临时证书HTTPS通过，可信公网HTTPS仍待补。产品修复在 `D:\Web_project\lottery_simulator\.worktrees\v6-reliability-fixes`（WSL路径 `/mnt/d/Web_project/lottery_simulator/.worktrees/v6-reliability-fixes`），主目录master仍为 `9832bc0`，没有提交、合并或实际服务切换。前文“问题尚未修复”描述主目录基准代码；隔离工作树已修复并验收，不表示当前主目录运行服务已使用修复。
+
+当前Git主操作使用Windows Git，修复树使用命令级 `-c core.autocrlf=input`；不要套用旧工作树的Git指针说明。业务测试证据保留于 `D:\Web_project\lottery-repair-tests-20261002`，本次文档差异检查在其 `task13-20261006` 子目录。安装/拓扑临时材料已清理，重新验收需准备新配置、依赖与证书。后续本地集成/部署另行核对目标，原本地使用手册保持不变。详见[最终交付记录](changes/2026-10-02-v6-runtime-reliability-fixes.md#2026-10-06任务13文档与最终交付完成)。

@@ -202,6 +202,8 @@ class RuleAPITests(TestCase):
         self.assertEqual(self.client.get("/api/v1/rules/").status_code, 401)
         self.login_as(self.bob)
         self.assertEqual(self.client.get(f"/api/v1/rules/{hidden.pk}/").status_code, 404)
+        self.assertEqual(self.client.get(
+            f"/api/v1/rules/{hidden.pk}/export/?expected_revision=1").status_code, 404)
         self.login_as(self.alice)
         bad = self.client.patch(f"/api/v1/rules/{hidden.pk}/", data=json.dumps({
             "expected_revision": True,
@@ -217,6 +219,21 @@ class RuleAPITests(TestCase):
         }), content_type="application/json")
         self.assertEqual(copied.status_code, 201, copied.content)
         self.assertNotEqual(copied.json()["id"], str(hidden.pk))
+
+    def test_query_integer_limits_apply_to_rule_pagination_and_export(self):
+        rule = save_rule(self.alice, default_rule().to_dict())
+        self.login_as(self.alice)
+        for value in ("9" * 5000, "0" * 1024 + "1"):
+            self.assertEqual(self.client.get(f"/api/v1/rules/?page={value}").status_code, 400)
+            self.assertEqual(self.client.get(
+                f"/api/v1/rules/{rule.pk}/export/?expected_revision={value}").status_code, 400)
+        accepted = "0" * 1023 + "1"
+        self.assertEqual(self.client.get(f"/api/v1/rules/?page={accepted}").status_code, 200)
+        self.assertEqual(self.client.get(
+            f"/api/v1/rules/{rule.pk}/export/?expected_revision={accepted}").status_code, 200)
+        self.assertEqual(self.client.get(f"/api/v1/rules/?page=1&page_size=201").status_code, 400)
+        self.assertEqual(self.client.get(
+            f"/api/v1/rules/00000000-0000-0000-0000-000000000000/export/?expected_revision=1").status_code, 404)
 
     def test_rule_import_is_definition_only_and_creates_private_hidden_resource(self):
         self.login_as(self.alice)

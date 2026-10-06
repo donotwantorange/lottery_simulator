@@ -51,6 +51,43 @@ class OwnedRunTests(SimpleTestCase):
                     input=stdin, text=True, cwd=ROOT, env=environment, capture_output=True)
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
+    def test_before_commit_idempotent_boundary_and_final_cancel(self):
+        self.scenario("""
+from uuid import uuid4
+from dataclasses import replace
+from django.db import connection
+from dashboard.job_models import RunParameters, read_json
+from lottery_simulator.engine import simulate, SimulationCancelled
+from lottery_simulator.results import simulation_payload
+params = RunParameters.from_dict(read_json(get_manager().root / state.job_id / 'parameters.json'))
+result = simulate(compiled, replace(params.parameters, trace=False))
+summary = simulation_payload(result, compiled, 0)
+summary.update(owner_id=state.owner_id, accepted_at=state.accepted_at,
+    pool_source=state.pool_source, rule_source=state.rule_source, limit_policy=state.limit_policy)
+run_id = str(uuid4()); notices = []
+def before():
+    assert connection.in_atomic_block
+    assert SimulationRun.objects.filter(pk=run_id).exists()
+    notices.append('before_commit')
+repository = HistoryRepository()
+repository.save_run(run_id, summary, before_commit=before)
+repository.save_run(run_id, summary, before_commit=before)
+assert notices == ['before_commit', 'before_commit']
+cancelled = False
+def final_cancel():
+    global cancelled
+    cancelled = True
+rejected = str(uuid4())
+try: repository.save_run(rejected, summary, before_commit=final_cancel, cancel_check=lambda: cancelled)
+except SimulationCancelled: pass
+else: raise AssertionError('final cancellation ignored')
+assert not SimulationRun.objects.filter(pk=rejected).exists()
+try: repository.save_run(run_id, {**summary, 'simulation': {**summary['simulation'], 'changed': 1}}, before_commit=before)
+except ValueError: pass
+else: raise AssertionError('different same-ID snapshot accepted')
+assert len(notices) == 2
+""")
+
     def test_atomic_event_history_and_owner_isolation(self):
         self.scenario("""
 run = get_run_for_actor(alice, state.run_id)

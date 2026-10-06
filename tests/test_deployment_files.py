@@ -3,18 +3,142 @@
 import configparser
 from contextlib import closing
 import json
+import ipaddress
 import os
 from pathlib import Path
 import shlex
 import sqlite3
 import subprocess
 import sys
+import textwrap
 from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import patch
 from uuid import UUID, uuid4
+from scripts.check_proxy_network import preflight
 
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+class ProxyNetworkPreflightTest(unittest.TestCase):
+    def config(self, subnet="172.30.96.0/24", address="172.30.96.2"):
+        return {"networks": {"backend": {"internal": True, "ipam": {"config": [{"subnet": subnet, "ip_range": "172.30.96.128/25", "gateway": "172.30.96.1"}]}}},
+                "services": {"caddy": {"networks": {"backend": {"ipv4_address": address}}}}}
+
+    def test_default_route_is_not_a_conflict(self):
+        with patch("scripts.check_proxy_network.inspect", return_value=[]), \
+             patch("scripts.check_proxy_network.subprocess.run") as run:
+            run.return_value.stdout = "net1\n"
+            self.assertEqual(preflight(self.config(), "project", "docker",
+                                       lambda: json.dumps([{"dst": "default", "gateway": "172.30.96.1"},
+                                                           {"dst": "192.168.1.0/24", "dev": "eth0"}])),
+                             (ipaddress.ip_network("172.30.96.0/24"), ipaddress.ip_address("172.30.96.2")))
+
+    def test_builtin_networks_without_ipam_ranges_are_valid(self):
+        networks = [{'Name': name, 'Labels': None, 'IPAM': {'Config': None}}
+                    for name in ('host', 'none')]
+        with patch('scripts.check_proxy_network.inspect', return_value=networks), \
+             patch('scripts.check_proxy_network.subprocess.run') as run:
+            run.return_value.stdout = 'host-id none-id'
+            self.assertEqual(preflight(self.config(), 'project', 'docker', lambda: '[]')[1],
+                             ipaddress.ip_address('172.30.96.2'))
+
+    def test_invalid_addresses_and_small_subnets_fail(self):
+        for subnet, address in (("172.30.96.0/24", "172.30.97.2"),
+                                ("172.30.96.0/30", "172.30.96.2"),
+                                ("172.30.96.0/24", "172.30.96.1"),
+                                ("172.30.96.1/24", "172.30.96.2"),
+                                ("172.30.96.0/255.255.255.0", "172.30.96.2")):
+            with self.subTest(subnet=subnet, address=address), self.assertRaises(ValueError):
+                preflight(self.config(subnet, address), "project", "docker", lambda: [])
+
+    def test_host_route_overlap_fails(self):
+        with patch("scripts.check_proxy_network.inspect", return_value=[]), \
+             patch("scripts.check_proxy_network.subprocess.run") as run:
+            run.return_value.stdout = ""
+            with self.assertRaisesRegex(ValueError, "主机路由"):
+                preflight(self.config(), "project", "docker",
+                          lambda: json.dumps([{"dst": "172.30.0.0/16", "dev": "eth0"}]))
+
+    def test_typed_and_other_table_routes_fail_closed(self):
+        conflicts = (
+            {"dst": "172.30.96.0/24", "type": "blackhole", "table": "main"},
+            {"dst": "172.30.96.0/24", "type": "unreachable", "table": 77},
+            {"dst": "172.30.96.0/24", "type": "throw", "table": 77},
+        )
+        for route in conflicts:
+            with self.subTest(route=route), \
+                 patch("scripts.check_proxy_network.inspect", return_value=[]), \
+                 patch("scripts.check_proxy_network.subprocess.run") as run:
+                run.return_value.stdout = "network-id\n"
+                with self.assertRaisesRegex(ValueError, "主机路由"):
+                    preflight(self.config(), "project", "docker", lambda: json.dumps([route]))
+        for malformed in ('[{"type":"unreachable"}]', '[{"dst":"not-a-route","type":"blackhole"}]'):
+            with self.subTest(malformed=malformed), \
+                 patch("scripts.check_proxy_network.inspect", return_value=[]), \
+                 patch("scripts.check_proxy_network.subprocess.run") as run:
+                run.return_value.stdout = "network-id\n"
+                with self.assertRaises(ValueError):
+                    preflight(self.config(), "project", "docker", lambda: malformed)
+
+    def test_same_project_network_is_reused_but_other_overlap_fails(self):
+        own = {"Name": "project_backend", "Labels": {"com.docker.compose.project": "project",
+               "com.docker.compose.network": "backend"}, "Internal": True,
+               "Driver": "bridge", "Id": "0123456789ab0000",
+               "Options": {}, "IPAM": {"Config": [{"Subnet": "172.30.96.0/24",
+               "Gateway": "172.30.96.1", "IPRange": "172.30.96.128/25"}]}}
+        other = {"Name": "other", "Labels": {}, "Internal": False,
+                 "IPAM": {"Config": [{"Subnet": "172.30.96.0/24"}]}}
+        with patch("scripts.check_proxy_network.subprocess.run") as run, \
+             patch("scripts.check_proxy_network.inspect", return_value=[own]):
+            run.return_value.stdout = "network-id\n"
+            self.assertEqual(preflight(self.config(), "project", "docker",
+                lambda: json.dumps([
+                    {"dst": "172.30.96.0/24", "type": "unicast", "table": "main", "dev": "br-0123456789ab"},
+                    {"dst": "172.30.96.1", "type": "local", "table": "local", "dev": "br-0123456789ab"},
+                    {"dst": "172.30.96.0", "type": "broadcast", "table": "local", "dev": "br-0123456789ab"},
+                    {"dst": "172.30.96.255", "type": "broadcast", "table": "local", "dev": "br-0123456789ab"},
+                ]))[0],
+                             ipaddress.ip_network("172.30.96.0/24"))
+        with patch("scripts.check_proxy_network.subprocess.run") as run, \
+             patch("scripts.check_proxy_network.inspect", return_value=[other]):
+            run.return_value.stdout = "network-id\n"
+            with self.assertRaisesRegex(ValueError, "现存 Docker 网络"):
+                preflight(self.config(), "project", "docker", lambda: [])
+
+    def test_docker_and_route_read_failures_are_rejected(self):
+        with patch("scripts.check_proxy_network.subprocess.run",
+                   side_effect=subprocess.CalledProcessError(1, "docker")), \
+             self.assertRaises(subprocess.CalledProcessError):
+            preflight(self.config(), "project", "docker", lambda: [])
+        with patch("scripts.check_proxy_network.inspect", return_value=[]), \
+             patch("scripts.check_proxy_network.subprocess.run",
+                   side_effect=[type("R", (), {"stdout": ""})(), OSError("permission denied")]), \
+             self.assertRaises(OSError):
+            preflight(self.config(), "project", "docker")
+
+    def test_dynamic_range_reserves_caddy_address_and_rejects_mismatched_reuse(self):
+        for value in (None, "172.30.96.0/24", "172.30.97.128/25", "172.30.96.129/25", "172.30.96.255/32"):
+            config = self.config()
+            config['networks']['backend']['ipam']['config'][0]['ip_range'] = value
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                preflight(config, 'project', 'docker', lambda: [])
+        network = {'Name': 'project_backend', 'Labels': {'com.docker.compose.project': 'project',
+            'com.docker.compose.network': 'backend'}, 'Internal': True, 'Driver': 'bridge',
+            'IPAM': {'Config': [{'Subnet': '172.30.96.0/24', 'Gateway': '172.30.96.1'}]}}
+        with patch('scripts.check_proxy_network.subprocess.run') as run, \
+             patch('scripts.check_proxy_network.inspect', return_value=[network]):
+            run.return_value.stdout = 'id'
+            with self.assertRaisesRegex(ValueError, '现存 Docker 网络'):
+                preflight(self.config(), 'project', 'docker', lambda: [])
+
+    def test_gateway_is_explicit_and_cannot_occupy_caddy_or_invalid_addresses(self):
+        for value in (None, '172.30.96.2', '172.30.96.0', '172.30.96.255', '172.30.97.1'):
+            config = self.config()
+            config['networks']['backend']['ipam']['config'][0]['gateway'] = value
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                preflight(config, 'project', 'docker', lambda: [])
 
 
 def mapping(text):
@@ -94,6 +218,15 @@ class DeploymentFilesTest(unittest.TestCase):
         self.assertIn("caddy_config:/config", caddy["volumes"])
         self.assertEqual(set(compose["volumes"]),
                          {"lottery_data", "lottery_backups", "caddy_data", "caddy_config"})
+        self.assertEqual(app["networks"], ["backend"])
+        self.assertNotIn("ports", app)
+        self.assertEqual(caddy["networks"]["backend"]["ipv4_address"], "${LOTTERY_CADDY_IP:-172.30.96.2}")
+        backend = compose["networks"]["backend"]
+        self.assertEqual(backend["internal"], "true")
+        self.assertEqual(backend["ipam"]["config"][0]["subnet"], "${LOTTERY_PROXY_SUBNET:-172.30.96.0/24}")
+        self.assertEqual(backend["ipam"]["config"][0]["ip_range"], "${LOTTERY_PROXY_DYNAMIC_RANGE:-172.30.96.128/25}")
+        self.assertEqual(backend["ipam"]["config"][0]["gateway"], "${LOTTERY_PROXY_GATEWAY:-172.30.96.1}")
+        self.assertEqual(environment["LOTTERY_TRUSTED_PROXIES"], "${LOTTERY_CADDY_IP:-172.30.96.2}")
 
     def test_image_runs_unprivileged_gunicorn_with_health_probe(self):
         lines = self.read("Dockerfile").splitlines()
@@ -121,12 +254,60 @@ class DeploymentFilesTest(unittest.TestCase):
         self.assertIn("LOTTERY_ALLOWED_HOSTS", health[2])
         self.assertIn("headers={'Host': host}", health[2])
 
+    def test_trusted_proxy_settings_normalize_exact_ips_and_reject_ranges(self):
+        base = {**os.environ, "LOTTERY_ENV": "development"}
+        result = subprocess.run([sys.executable, "-c",
+            "from webapp.settings import LOTTERY_TRUSTED_PROXIES; assert LOTTERY_TRUSTED_PROXIES == frozenset({'2001:db8::1', '192.0.2.4'})"],
+            cwd=ROOT, env={**base, "LOTTERY_TRUSTED_PROXIES": " 2001:0db8::1 , 192.0.2.4 "},
+            capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        for invalid in ("*", "192.0.2.0/24", "proxy.example", "not-an-ip", "192.0.2.4,"):
+            with self.subTest(invalid=invalid):
+                result = subprocess.run([sys.executable, "-c", "import webapp.settings"],
+                    cwd=ROOT, env={**base, "LOTTERY_TRUSTED_PROXIES": invalid},
+                    capture_output=True, text=True)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("只能包含精确 IP 地址", result.stderr)
+
+    def test_login_source_separates_trusted_ipv4_ipv6_and_ignores_untrusted_spoof(self):
+        script = textwrap.dedent("""\
+            import django
+            django.setup()
+            from django.core.management import call_command
+            from django.test import RequestFactory, override_settings
+            from dashboard.models import LoginLimit
+            from dashboard.services.accounts import login_source, record_login_failure
+            call_command('migrate', verbosity=0, interactive=False)
+            factory = RequestFactory()
+            with override_settings(LOTTERY_TRUSTED_PROXIES=frozenset({'172.30.96.2'})):
+                ipv4 = login_source(factory.get('/', REMOTE_ADDR='172.30.96.2', HTTP_X_FORWARDED_FOR='198.51.100.8'))
+                ipv6 = login_source(factory.get('/', REMOTE_ADDR='172.30.96.2', HTTP_X_FORWARDED_FOR='2001:0db8::2'))
+                spoof = login_source(factory.get('/', REMOTE_ADDR='198.51.100.9', HTTP_X_FORWARDED_FOR='203.0.113.7'))
+                malformed = login_source(factory.get('/', REMOTE_ADDR='172.30.96.2', HTTP_X_FORWARDED_FOR='not-an-ip'))
+            assert ipv4 == '198.51.100.8' and ipv6 == '2001:db8::2'
+            assert ipv4 != ipv6 and spoof == '198.51.100.9' and malformed == 'unknown'
+            for source in (ipv4, ipv6, spoof, malformed):
+                record_login_failure('fixture-user', source)
+            assert set(LoginLimit.objects.filter(scope='source').values_list('key', flat=True)) == {ipv4, ipv6, spoof, malformed}
+        """)
+        with TemporaryDirectory() as directory:
+            data = Path(directory) / "data"
+            data.mkdir()
+            result = subprocess.run([sys.executable, "-c", script], cwd=ROOT,
+                env={**os.environ, "DJANGO_SETTINGS_MODULE": "webapp.settings", "LOTTERY_ENV": "development",
+                     "LOTTERY_TRUSTED_PROXIES": "", "LOTTERY_DATA_DIR": str(data),
+                     "LOTTERY_DB_PATH": str(data / "history_v6.sqlite3"), "LOTTERY_JOBS_DIR": str(data / "jobs_v6"),
+                     "LOTTERY_EXPORTS_DIR": str(data / "exports_v6")},
+                capture_output=True, text=True, timeout=60)
+            self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_proxy_and_backup_scheduler_contract(self):
         caddyfile = self.read("Caddyfile")
         self.assertIn("@api path /api /api/*", caddyfile)
         self.assertIn("handle @api", caddyfile)
         self.assertIn("reverse_proxy app:8000", caddyfile)
         self.assertIn("header_up X-Forwarded-Proto {scheme}", caddyfile)
+        self.assertIn("header_up X-Forwarded-For {remote_host}", caddyfile)
         self.assertIn("root * /srv", caddyfile)
         self.assertIn("try_files {path} /index.html", caddyfile)
         self.assertIn("file_server", caddyfile)

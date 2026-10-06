@@ -19,8 +19,13 @@ describe("RuleEditor", () => {
 
     expect(screen.getByText(/复制为新规则/)).toBeTruthy();
     expect(screen.getByRole("button", { name: "添加稀有度" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "四星下移" })).toBeDisabled();
+    expect(screen.getAllByRole("button", { name: "删除稀有度" }).every((button) => (button as HTMLButtonElement).disabled)).toBe(true);
     expect(screen.getAllByText(/百分点/).length).toBeGreaterThan(0);
-    expect(screen.getAllByText(new RegExp(`第${example.soft_start - 1}抽不增加，第${example.soft_start}抽开始增加`)).length).toBeGreaterThan(0);
+    expect(screen.getByText(new RegExp(`当前${example.name}基础概率${(example.base_probability * 100).toFixed(3)}%，每抽增加${(example.soft_step * 100).toFixed(3)}个百分点`))).toBeInTheDocument();
+    expect(screen.getByText(new RegExp(`起点为第${example.soft_start}抽`))).toBeInTheDocument();
+    expect(screen.getByText(/从上到下，稀有度等级逐渐升高/)).toBeInTheDocument();
+    expect(screen.getByText(/赠送抽和直接赠送不改变大保底/)).toBeInTheDocument();
     expect(screen.queryByText(/周期直接赠送已关闭/)).toBeNull();
   });
 
@@ -43,6 +48,17 @@ describe("RuleEditor", () => {
     expect(onValidityChange).toHaveBeenLastCalledWith(false);
   });
 
+  it("labels the rarity direction and updates the unique-tier label", () => {
+    const value = makeRuleDocument();
+    value.rarities = [value.rarities[1]];
+    value.rarities[0].rank = 0;
+    value.bonus.rarities = value.bonus.rarities.filter((item) => item.id === value.rarities[0].id);
+    renderRuleEditor({ value, onChange: vi.fn(), structureLocked: false });
+    expect(screen.getByText(/从上到下，稀有度等级逐渐升高/)).toBeInTheDocument();
+    expect(screen.getByText("唯一稀有度")).toBeInTheDocument();
+    expect(screen.queryByText("最高稀有度")).toBeNull();
+  });
+
   it("keeps bonus rarity IDs and rank aligned when main rarities are reordered", () => {
     const rule = makeRuleDocument();
     rule.bonus.enabled = false;
@@ -56,10 +72,29 @@ describe("RuleEditor", () => {
     editor.current = renderRuleEditor({ value: current, onChange, structureLocked: false });
     const firstId = current.rarities[0].id;
     fireEvent.click(screen.getByRole("button", { name: "四星下移" }));
+    expect(screen.getByRole("textbox", { name: /稀有度名称 最低稀有度/ })).toHaveValue("五星");
+    expect(screen.getByRole("textbox", { name: /稀有度名称 最高稀有度/ })).toHaveValue("六星");
+    fireEvent.click(screen.getByRole("button", { name: "四星下移" }));
+    expect(screen.getByRole("textbox", { name: /稀有度名称 最高稀有度/ })).toHaveValue("四星");
     expect(current.bonus.rarities).toHaveLength(0);
     fireEvent.click(screen.getByRole("checkbox", { name: "启用首次赠送" }));
-    expect(current.rarities.findIndex((item) => item.id === firstId)).toBe(1);
+    expect(current.rarities.findIndex((item) => item.id === firstId)).toBe(2);
     expect(current.bonus.rarities.map((item) => [item.id, item.rank])).toEqual(current.rarities.map((item) => [item.id, item.rank]));
+  });
+
+  it("updates the big-pity threshold example and both obtain modes", () => {
+    const value = makeRuleDocument();
+    value.big_pity.hard_pity = 4;
+    value.big_pity.after_obtain = "disable_after_obtain";
+    const { rerender } = renderRuleEditor({ value, onChange: vi.fn(), structureLocked: false });
+    expect(screen.getByText(/连续3次主抽未中，第4次主抽必得目标/)).toBeInTheDocument();
+    expect(screen.getByText(/本轮后续大保底关闭；下一轮按初始条件重新开始/)).toBeInTheDocument();
+    const reset = structuredClone(value);
+    reset.big_pity.hard_pity = 2;
+    reset.big_pity.after_obtain = "reset_after_obtain";
+    rerender(<RuleEditor value={reset} onChange={vi.fn()} structureLocked={false} />);
+    expect(screen.getByText(/连续1次主抽未中，第2次主抽必得目标/)).toBeInTheDocument();
+    expect(screen.getByText(/未中计数归零，大保底继续有效/)).toBeInTheDocument();
   });
 
   it("disables fields for closed mechanisms and keeps bonus soft and hard pity editable when enabled", () => {

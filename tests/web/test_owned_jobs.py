@@ -45,6 +45,42 @@ class OwnedJobTests(SimpleTestCase):
                     input=stdin, text=True, cwd=ROOT, env=environment, capture_output=True)
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
+    def test_unknown_state_blocks_admission_command_and_worker_cleanup(self):
+        self.scenario("""
+from unittest.mock import patch
+from dashboard.jobs import JobStateUnavailable
+from django.core.management import call_command
+from django.core.management.base import CommandError
+from types import SimpleNamespace
+from uuid import uuid4
+from dashboard.worker import run
+manager = get_manager()
+orphan = manager.root / str(uuid4()); orphan.mkdir()
+with patch('dashboard.jobs.subprocess.Popen') as launch, patch('dashboard.jobs.time.sleep'):
+    for operation in (lambda: submit_job(alice, payload), lambda: job_busy(alice)):
+        try: operation()
+        except JobStateUnavailable: pass
+        else: raise AssertionError('unknown state was skipped')
+    launch.assert_not_called()
+    try: call_command('run_job', job_dir=str(orphan))
+    except CommandError: pass
+    else: raise AssertionError('command silently ignored unreadable state')
+orphan.rmdir()
+with patch('dashboard.jobs.subprocess.Popen', return_value=SimpleNamespace(pid=12345)), \\
+     patch('dashboard.jobs.JobManager._reap'):
+    accepted = submit_job(alice, payload)
+directory = manager.root / accepted.job_id
+original_get = manager.get
+with patch('dashboard.worker.JobManager.get', side_effect=[accepted, JobStateUnavailable('fault')]), \\
+     patch('dashboard.jobs.JobManager._clean_stopped_files') as cleanup:
+    try: run(directory, manager.database_path)
+    except JobStateUnavailable: pass
+    else: raise AssertionError('worker converted unknown state into terminal failure')
+    cleanup.assert_not_called()
+assert original_get(accepted.job_id).status == 'running'
+assert (directory / 'parameters.json').exists()
+""")
+
     def test_frozen_owner_seed_and_private_mine(self):
         self.scenario("""
 state = submit_job(alice, payload, synchronous=True)
@@ -62,6 +98,80 @@ else: raise AssertionError('任务越权读取')
 assert job_detail(state)['parameters']['seed'] == str(2**100+1)
 assert get_job_result_for_actor(alice, state.job_id)['seed'] == str(2**100+1)
 assert get_job_result_for_actor(alice, state.job_id, serialize=False)['seed'] == 2**100+1
+""")
+
+    def test_save_phase_boundary_rollback_and_post_commit_recovery(self):
+        self.scenario("""
+from unittest.mock import patch
+from types import SimpleNamespace
+from django.db import connection, OperationalError
+from dashboard.models import SimulationRun, SimulationEvent
+from dashboard.worker import run
+from dashboard.jobs import JobStateUnavailable
+from dashboard.job_models import write_json as actual_write
+payload = make_payload(pool, draws='30', trace=True)
+def accept():
+    with patch('dashboard.jobs.subprocess.Popen', return_value=SimpleNamespace(pid=12345)), \\
+         patch('dashboard.jobs.JobManager._reap'):
+        return submit_job(alice, payload)
+phases = []
+def observe(path, value):
+    if path.name == 'state.json':
+        phase = value['phase']
+        if phase and (not phases or phases[-1] != phase): phases.append(phase)
+        if phase == 'saving' and value['phase_total'] is not None and value['phase_completed'] == value['phase_total']:
+            assert connection.in_atomic_block
+            assert SimulationEvent.objects.filter(run_id=value['job_id']).count() == value['phase_total']
+        if phase == 'committing': assert connection.in_atomic_block
+        if value['history_saved']:
+            assert not connection.in_atomic_block
+            assert SimulationRun.objects.filter(pk=value['job_id']).exists()
+    actual_write(path, value)
+accepted = accept()
+with patch('dashboard.worker.write_json', side_effect=observe):
+    run(get_manager().root / accepted.job_id, get_manager().database_path)
+assert phases == ['simulating', 'theory', 'validating', 'saving', 'committing'], phases
+assert get_manager().get(accepted.job_id).history_saved
+
+for fail_at in ('last_batch', 'saving', 'before_commit', 'database_commit'):
+    accepted = accept()
+    directory = get_manager().root / accepted.job_id
+    def fail_write(path, value):
+        if path.name == 'state.json' and ((fail_at == 'before_commit' and value['phase'] == 'committing') or
+                (fail_at == 'saving' and value['phase'] == 'saving' and value['phase_total'] is not None)):
+            raise OSError('notification failed')
+        actual_write(path, value)
+    def fail_commit(): raise OperationalError('commit failed')
+    from contextlib import nullcontext
+    failure = (patch.object(SimulationEvent.objects, 'bulk_create', side_effect=RuntimeError('last batch failed'))
+               if fail_at == 'last_batch' else patch.object(connection, 'commit', side_effect=fail_commit)
+               if fail_at == 'database_commit' else nullcontext())
+    with failure, patch('dashboard.worker.write_json', side_effect=fail_write):
+        run(directory, get_manager().database_path)
+    assert not SimulationRun.objects.filter(pk=accepted.job_id).exists(), fail_at
+    assert not SimulationEvent.objects.filter(run_id=accepted.job_id).exists(), fail_at
+    assert get_manager().get(accepted.job_id).status == 'completed'
+    assert not get_manager().get(accepted.job_id).history_saved
+
+accepted = accept()
+manager = get_manager()
+real_get = manager.get
+def unavailable_after_commit(job_id):
+    if SimulationRun.objects.filter(pk=job_id).exists() and not connection.in_atomic_block:
+        raise JobStateUnavailable('terminal publication unreadable')
+    return real_get(job_id)
+with patch('dashboard.worker.JobManager.get', side_effect=unavailable_after_commit):
+    try: run(manager.root / accepted.job_id, manager.database_path)
+    except JobStateUnavailable: pass
+    else: raise AssertionError('unknown terminal state did not stop worker')
+assert SimulationRun.objects.filter(pk=accepted.job_id).exists()
+assert real_get(accepted.job_id).phase == 'committing'
+assert (manager.root / accepted.job_id / 'trace.sqlite3').exists()
+with patch('dashboard.worker.simulate') as simulation:
+    manager.reconcile_after_restart()
+    simulation.assert_not_called()
+assert real_get(accepted.job_id).history_saved
+assert SimulationEvent.objects.filter(run_id=accepted.job_id).count() == 40
 """)
 
     def test_preview_is_read_only_preserves_unset_seed_and_counts_exactly(self):

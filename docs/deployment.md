@@ -84,9 +84,10 @@ bash scripts/install.sh
 运行边界：
 
 - 本安装目录已有运行容器时直接显示状态并退出；已成功部署的网站不需要再安装。日常更新使用维护章节。
-- `.env` 已存在则保留，不换域名或密钥；数据库已初始化则跳过管理员创建。不删除数据库、卷或任务。
+- `.env` 已存在则保留，不换域名或密钥；发现已有数据库、容器（含停止状态）或本项目数据卷时，首次安装脚本停止，不自动跳过初始化后继续部署。不删除数据库、卷或任务。
+- 安装器会在构建和数据库操作前检查代理后端子网与现存 Docker 网络、主机路由；无法读取或发现重叠时停止。默认子网为 `172.30.96.0/24`、Caddy 地址为 `172.30.96.2`，需要调整时在首次安装前设置 `.env` 的 `LOTTERY_PROXY_SUBNET` 、`LOTTERY_CADDY_IP`、`LOTTERY_PROXY_DYNAMIC_RANGE` 与 `LOTTERY_PROXY_GATEWAY`，动态范围必须在子网内、排除 Caddy 固定地址并留有 app 地址；默认动态范围为 `172.30.96.128/25`，防止先启动的 app 占用代理地址。默认显式网关为 `172.30.96.1`，需在子网内且不能占用 Caddy、网络或广播地址。
 - 选择配置镜像时，若 Docker 中存在其他运行容器，安装脚本会退出，不停止这些容器；已有 Docker 软件源或冲突包需要手动确认。
-- 任一步失败即停止并显示步骤。处理后重跑会复用现有配置和数据，但可能重新拉取镜像、构建及检查迁移，并非完全跳过所有成功步骤。
+- 任一步失败即停止并显示步骤。尚未创建数据卷/数据库/容器时，可处理错误后重跑并保留`.env`；一旦留下这些运行材料，重跑会被已有安装保护阻止。先核对实际状态与备份，再按手动部署或升级步骤恢复，不删除数据卷来绕过检查。2026-10-02隔离测试已复现迁移或管理员初始化失败后的这一边界。
 - 结束只代表启动命令完成；HTTPS、登录、模拟、Trace 和恢复仍须按清单验证。该脚本尚未在全新服务器实机验收。
 
 脚本成功后直接进入[上线验收](#上线验收)，不再重复下面的手动安装。
@@ -469,7 +470,7 @@ sudo systemctl list-timers lottery-backup.timer
 | 组件或数据 | 位置与作用 |
 | --- | --- |
 | Caddy | 对外发布 TCP 80/443，提供 HTTPS、静态网页和 API 反向代理 |
-| app | Django＋Gunicorn，仅在容器内部监听 8000；在容器内启动模拟 worker |
+| app | Django＋Gunicorn，仅在 internal backend 网络监听 8000，不发布宿主机端口；在容器内启动模拟 worker |
 | 前端 | 宿主机 `frontend/dist/` 只读挂载到 Caddy 的 `/srv` |
 | 数据库 | `/app/data/history_v6.sqlite3`，卷 `lottery_data` |
 | 任务与临时导出 | `/app/data/jobs_v6/`、`/app/data/exports_v6/`，卷 `lottery_data` |
@@ -495,9 +496,14 @@ LOTTERY_DATA_DIR=/app/data
 LOTTERY_DB_PATH=/app/data/history_v6.sqlite3
 LOTTERY_JOBS_DIR=/app/data/jobs_v6
 LOTTERY_EXPORTS_DIR=/app/data/exports_v6
+LOTTERY_PROXY_SUBNET=172.30.96.0/24
+LOTTERY_CADDY_IP=172.30.96.2
+LOTTERY_PROXY_DYNAMIC_RANGE=172.30.96.128/25
+LOTTERY_PROXY_GATEWAY=172.30.96.1
+LOTTERY_TRUSTED_PROXIES=172.30.96.2
 ```
 
-生产缺少密钥会拒绝启动。Caddy 保留 Host 并转发 `X-Forwarded-Proto`；当前 Django 未配置 `SECURE_PROXY_SSL_HEADER`。Secure Cookie 由生产环境明确启用，会话 Cookie 保持 HttpOnly、SameSite=Lax。
+生产缺少密钥会拒绝启动。Compose 将 app 放在 internal backend 网络，Caddy同时接入可对外访问的默认网络并使用固定 backend IPv4。Caddy覆盖转发的 `X-Forwarded-For` 为其连接对端；app只信任由同一 `LOTTERY_CADDY_IP` 生成的精确代理地址。不得将这些设置改成CIDR或整段私网信任。新增 CDN 或多层代理须另行定义可信链。Caddy保留Host并转发 `X-Forwarded-Proto`；当前 Django 未配置 `SECURE_PROXY_SSL_HEADER`。Secure Cookie 由生产环境明确启用，会话 Cookie 保持 HttpOnly、SameSite=Lax。
 
 本安装流程使用域名＋HTTPS，不提供公网 IP＋HTTP 登录配置。前端构建变量 `VITE_*` 会进入公开资源，不放密钥、数据库、任务、备份或环境文件。
 
@@ -564,3 +570,9 @@ curl -I --connect-timeout 15 --max-time 20 https://你的实际域名
 | 生产备份与维护 | 定时器、恢复及活动任务跨容器生命周期未实机验收 |
 
 用户的手动部署成功不等于新安装脚本已实测；证书签发成功也不能代替业务验收。本文所列安装、备份和恢复步骤不构成删除已有数据的许可。
+
+### 2026-10-06修复交付补充
+
+最新v6可靠性修复仍位于隔离工作树，未合并主检出或部署服务器；本文已有服务器结果保留原时点，不代表本轮版本已上线。任务1—10、12、13完成；271项后端、65项前端及后续30项部署/安装定向回归的实际版本边界见[实施记录](changes/2026-10-02-v6-runtime-reliability-fixes.md#2026-10-06任务13文档与最终交付完成)。最后前端CSS调整经重新构建及浏览器复验，没有重复65项全套。
+
+本轮隔离Docker/Caddy实际peer/XFF、两个来源限流桶、固定地址重建和临时CA HTTPS通过；Caddy出站公网TLS曾收到不受信任自签证书，可信公网HTTPS仍待验证。不是正式域名/ACME或全新服务器首次安装实测。部署前需使用独立环境补网络验证，不能关闭TLS校验绕过。测试配置/证书/卷/原始拓扑日志已按用户要求删除，历史恢复命令不可直接执行；重新验收需准备新材料。当前部署步骤也不构成服务器升级或数据清理授权。
