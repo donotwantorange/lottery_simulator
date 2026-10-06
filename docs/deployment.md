@@ -1,6 +1,6 @@
 # 部署指南与运维说明
 
-本指南适用于新版 Django＋React 的单机部署。先准备服务器并获取项目，再选择手动安装或可选脚本安装；服务启动后统一按验收清单验证，后续查看运维与备份章节。
+本指南适用于新版 Django＋React 的单机部署。首次部署选择手动或脚本安装；已有标准Compose部署使用脚本升级，非标准配置使用手动更新。启动后统一按验收清单验证，后续查看运维与备份章节。
 
 截至2026-10-01，用户确认现有腾讯云服务器曾通过手动指令部署旧版。该事实不代表当前v6界面、接口或数据升级已在线验收。自动安装脚本尚未实机测试。
 
@@ -11,7 +11,7 @@
 | 在空服务器安装v6 | [准备服务器](#准备服务器) → [获取项目](#获取项目) → [手动安装](#手动安装) |
 | 了解自动安装脚本（尚未实机测试） | [可选交互式安装](#可选方式交互式安装) |
 | 保留v5账号并建立v6 | [v5账号保留与v6切换](#v5账号保留与v6切换) |
-| 已经部署，查看状态或更新 | [日常运维](#日常运维) |
+| 已经部署，查看状态或更新 | [脚本升级](#脚本升级)或[手动版本更新](#手动版本更新) |
 | 备份、恢复或迁移旧服务器数据 | [备份恢复与迁移](#备份恢复与迁移) |
 | 遇到报错 | [常见问题](#常见问题) |
 | 查看配置及验证范围 | [配置参考](#配置参考)、[验证状态](#验证状态) |
@@ -348,6 +348,71 @@ sudo docker compose up -d
 
 ### 版本更新
 
+已有部署可选下方脚本或手动路径。先确认服务器运行v5还是v6：v5必须执行账号保留流程，不能只迁移新库后直接启动。安装目录、Compose项目名、`.env`、数据/备份/证书卷须保持不变。
+
+#### 脚本升级
+
+已加入同一安装入口：
+
+```bash
+cd /opt/lottery-simulator
+bash scripts/install.sh --upgrade
+```
+
+在服务器本机使用标准Docker Unix socket执行，不支持远程Docker上下文或rootless服务。无参数仍是首次安装，会拒绝已有数据；`--upgrade`只支持原app和Caddy各一个、app健康的标准命名卷部署。脚本依据旧运行容器的真实数据库路径及版本区分v5/v6，不根据新版Compose猜来源。非标准挂载/网络、app发布宿主端口、额外项目容器、停止或部分安装均拒绝自动升级，按手动流程处理。
+
+先在维护窗口取得完整新版。Git安装时记录旧提交、确认工作区无待保留修改，再拉取已发布版本：
+
+```bash
+git status --short
+git rev-parse HEAD
+git pull --ff-only origin master
+bash scripts/install.sh --upgrade
+```
+
+ZIP安装先保存旧版本，再取得完整新版并保留原`.env`和安装目录。脚本不自动git pull，也不自动发布本机未推送代码；确认服务器取得的版本已经包含upgrade.sh/upgrade_probe.py。运行升级脚本前不要照抄手动路径先停止所有容器，它需要旧app运行以核对真实部署和旧任务。
+
+交互确认维护；v5还需要输入ACCOUNTS确认仅迁账号。脚本随后：
+
+1. 暂停已有备份timer，确认备份服务不在执行，停止Caddy入口。
+2. 在旧app内检查任务及worker；暂停旧app后，用无网络的旧镜像、只读数据卷再次检查冻结状态并备份。辅助容器最多运行10分钟，失败解除本次app暂停，入口与timer不自动恢复。
+3. 创建私有SQLite快照并复查完整性，保留数据目录、旧前端、原环境及容器/卷身份；完成备份后移除旧app并重建本项目网络，保留所有原命名卷。
+4. 执行代理网络冲突预检、重新构建前后端。冲突时停止，先调整`.env`中配套子网/固定地址/动态范围/网关，不清理其它项目网络来绕过检查。
+5. v6执行migrate并保留原账号与业务；v5建立空v6，导入旧快照的账号和登录限制，再初始化默认规则/池，不运行init_admin。v5的旧池、实验、历史、Trace和会话不迁入，旧库继续保留。
+6. 启动并等待app健康，提示操作者完成[上线验收](#上线验收)及备份检查。用原账号登录验收，v5切换需重新登录；重点运行小Trace实验后紧接第二个实验，并验证取消和可信HTTPS。
+
+主机备份位于`/var/backups/lottery/<项目名>/upgrade-<时间>-<随机值>`，目录0700，含密钥/账号等私有信息，不公开、不提交Git。原备份卷保留相同名称目录内的source.sqlite3用于v5只读导入。记录脚本输出的路径和旧版本，另存受控异机备份。不要把完整inspect/Compose解析配置贴到公开排障信息。
+
+如果升级中断，按报告的阶段检查容器与备份；不要盲目重跑。旧app尚在时先核实是否已解除暂停，需要恢复入口时使用旧容器身份；旧app已移除时按原版本、镜像和卷映射手动恢复。覆盖数据库前保存当前数据，考虑已提交历史，不能只回退代码或删v6库重新迁账号。脚本不自动续跑、回滚或恢复timer，禁止down -v。
+
+#### 备份服务配置随升级更新
+
+脚本会暂停已经安装的timer，但保留现有unit以免覆盖自定义参数。Git更新仓库不会自动更新`/etc/systemd/system/`中的副本。升级后检查当前WorkingDirectory、Docker路径、drop-in和数据库路径；标准`/opt/lottery-simulator`安装可先备份原unit，再更新：
+
+```bash
+sudo install -d -m 700 /opt/lottery-private-backups
+sudo cp /etc/systemd/system/lottery-backup.service \
+  "/opt/lottery-private-backups/lottery-backup.service-before-$(date +%F-%H%M%S)"
+sudo install -m 644 deploy/lottery-backup.service /etc/systemd/system/lottery-backup.service
+sudo systemctl daemon-reload
+```
+
+仅对已经安装且确认适用的标准服务执行；自定义路径/参数须保留并对照改为history_v6.sqlite3及lottery-v6前缀。没有timer则不按上述命令创建调度。完成业务验收后运行并检查一次备份，再恢复原有timer：
+
+```bash
+sudo systemctl start lottery-backup.service
+sudo systemctl status lottery-backup.service
+sudo journalctl -u lottery-backup.service -n 50 --no-pager
+sudo systemctl start lottery-backup.timer
+```
+
+失败则保持timer暂停并排查，不将启动命令返回成功当作备份完整性通过。
+
+#### 手动版本更新
+
+以下路径用于已经运行v6的部署；v5另见[v5账号保留与v6切换](#v5账号保留与v6切换)，或使用上面的脚本升级。
+
+
 1. 通知暂停使用，确认活动任务结束或取消且 worker 退出。
 2. 完成[在线备份](#备份)，将备份复制到安全位置，并记录当前 `git rev-parse HEAD`。
 3. 如果启用了备份 timer，停止调度并确认已开始的备份完成。
@@ -371,6 +436,17 @@ git pull --ff-only origin master
 
 工作区有本地改动或拉取失败时先处理，不强制覆盖。ZIP 安装没有 Git 元数据，应取得新版本并核对文件替换，保留原 `.env`、安装目录和持久卷，不能执行上述 `git pull`。
 
+网络配置也随本轮升级调整；在无活动任务、已经备份及停止服务后，先重建本项目网络再预检，保留原项目名和所有命名卷：
+
+```bash
+sudo docker compose down
+sudo docker compose config --format json | sudo python3 scripts/check_proxy_network.py \
+  --project "$(sudo docker compose config --format json | python3 -c 'import json,sys; print(json.load(sys.stdin)["name"])')" \
+  --docker "$(command -v docker)"
+```
+
+上述down不带-v、不删除卷；不要使用remove-orphans或system prune处理未知资源。预检失败先核对网络冲突和四个代理配置变量，不执行后续启动。
+
 然后重新执行[构建前后端](#构建前后端)中的命令，再执行：
 
 ```bash
@@ -386,7 +462,7 @@ sudo docker compose logs --tail=100 app caddy
 sudo systemctl start lottery-backup.timer
 ```
 
-更新不重复初始化管理员。若数据库已迁移，不能假设只回退代码就安全，应按代码与数据库版本确定恢复方案。
+更新不重复初始化管理员；恢复timer前还须按上面的备份服务配置章节更新已安装unit并验证备份。若数据库已迁移，不能假设只回退代码就安全，应按代码与数据库版本确定恢复方案。
 
 2026-09-29图表修改要求后端 API 与新前端配套发布，没有数据库格式变化或新依赖。已有 Trace 可直接读取，不需要清空历史或重新模拟。发布后检查窗口联动、悬停与表格一致、非 Trace 提示，详见[图表修改记录](changes/2026-09-29-position-chart-usability.md)。
 
@@ -580,3 +656,7 @@ curl -I --connect-timeout 15 --max-time 20 https://你的实际域名
 ### 2026-10-06本地合并状态更新
 
 用户后续授权本地集成后，修复353cab0已合并master（ca545d6），主目录构建及原账号连续实验/取消验收通过，本机开发服务已切换；上一节未合并说明保留交付时点。此结果不等于服务器部署、正式证书或新安装脚本实机验收。公网HTTPS缺口仍保留，没有推送或连接服务器，详情见[本地集成记录](changes/2026-10-02-v6-runtime-reliability-fixes.md#2026-10-06授权本地集成备份与原账号验收)。
+
+### 2026-10-06升级入口验证状态
+
+安装脚本新增--upgrade，控制流程、旧任务验证器和临时SQLite检查已隔离验收；Docker暂停/暂停时复制/移除只使用独立无网络无数据卷测试容器，成功后已清理。不是完整Compose服务器升级或正式证书验收，也未操作真实备份timer、系统unit或数据库。最新数量与证据见[升级实施记录](changes/2026-10-06-compose-upgrade.md)。

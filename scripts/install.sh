@@ -1,12 +1,17 @@
 #!/usr/bin/env bash
-# 中文交互式首次安装；从完整项目目录运行，不用于线上更新。
+# 中文交互式首次安装或标准Compose部署升级；从完整项目目录运行。
 set -Eeuo pipefail
 stage='检查安装环境'
+mode=install
+backup_dir='尚未创建'
+upgrade_paused=0
+upgrade_helper_cid=''
 
 if [[ ${1:-} == --help ]]; then
-  printf '用法：bash scripts/install.sh\n适用：Ubuntu 24.04，从完整项目目录交互执行首次部署。\n先完成域名解析及80/443端口配置，再获取完整项目。\n已有运行服务时退出；日常更新按 docs/deployment.md 的版本更新章节执行。\n启动后按上线验收清单验证；定时备份另行设置。\n'
+  printf '用法：bash scripts/install.sh [--upgrade]\n无参数：Ubuntu 24.04交互式首次部署，拒绝已有数据。\n--upgrade：已获取新版后升级本目录标准Compose v5/v6部署；先确认维护，备份后重建，不自动git pull。\nv5仅迁账号及登录限制；旧业务保留在旧库，不导入v6。\n失败不自动续跑/回滚，备份timer在业务及HTTPS验收后手动恢复。\n详见 docs/deployment.md；不要使用 curl | bash。\n'
   exit 0
 fi
+if [[ ${1:-} == --upgrade ]]; then mode=upgrade; shift; fi
 if (( $# )); then printf '不支持的参数；使用 --help 查看说明。\n' >&2; exit 1; fi
 project_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
 cd "$project_dir"
@@ -25,13 +30,47 @@ has_runtime_material() {
   volumes=$(docker_cmd volume ls -q --filter 'label=com.docker.compose.volume=lottery_data') || return 2
   [[ -z $volumes ]] && return 1 || return 0
 }
-trap 'status=$?; if has_runtime_material; then found=0; else found=$?; fi; if [[ $found == 0 ]]; then printf "\n安装停止：%s失败（第 %s 行）。已存在运行材料；先核对状态并备份，再按 docs/deployment.md 手动恢复或升级。脚本不会自动续跑或清理数据。\n" "$stage" "$LINENO" >&2; elif [[ $found == 1 ]]; then printf "\n安装停止：%s失败（第 %s 行）。未发现数据库、容器或数据卷；处理错误后可重新运行，现有 .env 会保留。\n" "$stage" "$LINENO" >&2; else printf "\n安装停止：%s失败（第 %s 行）。无法读取Docker状态，现有数据状态未知；请核对状态与备份后按 docs/deployment.md 手动恢复或升级。\n" "$stage" "$LINENO" >&2; fi; exit "$status"' ERR
+report_failure() {
+  local status=$1 line=$2
+  if [[ $mode == upgrade ]]; then
+    if [[ -n $upgrade_helper_cid ]] && "${admin[@]}" test -f "$upgrade_helper_cid"; then
+      helper_id=$("${admin[@]}" cat "$upgrade_helper_cid")
+      if [[ $helper_id =~ ^[a-f0-9]{64}$ ]]; then docker_cmd rm --force "$helper_id" >/dev/null 2>&1 || true; fi
+    fi
+    if [[ $upgrade_paused == 1 ]]; then
+      if docker_cmd unpause "$app" >/dev/null; then upgrade_paused=0;
+      else printf '旧app仍可能暂停；请人工核对后docker unpause，不要删除数据。\n' >&2; fi
+    fi
+    printf '\n升级停止：%s失败（第%s行）。备份：%s。\n' "$stage" "$line" "$backup_dir" >&2
+    printf '保留原卷、旧库及错误现场；入口/服务可能已停止。不会自动恢复已暂停的timer或服务；核对状态后按docs/deployment.md手动恢复，不自动覆盖或重试。\n' >&2
+  else
+    if has_runtime_material; then found=0; else found=$?; fi
+    if [[ $found == 0 ]]; then
+      printf '\n安装停止：%s失败（第 %s 行）。已存在运行材料；先核对状态并备份，再按 docs/deployment.md 手动恢复或升级。脚本不会自动续跑或清理数据。\n' "$stage" "$line" >&2
+    elif [[ $found == 1 ]]; then
+      printf '\n安装停止：%s失败（第 %s 行）。未发现数据库、容器或数据卷；处理错误后可重新运行，现有 .env 会保留。\n' "$stage" "$line" >&2
+    else
+      printf '\n安装停止：%s失败（第 %s 行）。无法读取Docker状态，现有数据状态未知；请核对状态与备份后按 docs/deployment.md 手动恢复或升级。\n' "$stage" "$line" >&2
+    fi
+  fi
+  exit "$status"
+}
+trap 'report_failure "$?" "$LINENO"' ERR
+trap 'report_failure 130 "$LINENO"' INT
+trap 'report_failure 143 "$LINENO"' TERM
 
 stop_existing_install() {
   printf '检测到已有安装或数据库数据，首次安装已停止。请先核对状态并备份，再按 docs/deployment.md 手动恢复或升级；不会自动续跑、创建账号或改动现有数据。\n' >&2
   exit 1
 }
 
+if [[ $mode == upgrade ]]; then
+  for file in scripts/upgrade.sh scripts/upgrade_probe.py; do
+    [[ -f $file ]] || { printf '缺少升级文件：%s；请获取完整新版。\n' "$file" >&2; exit 1; }
+  done
+  source scripts/upgrade.sh
+  prepare_upgrade
+else
 for path in data/history_v5.sqlite3 data/history_v6.sqlite3 data/jobs_v5 data/exports_v5; do
   [[ ! -e $path ]] || stop_existing_install
 done
@@ -164,6 +203,8 @@ PY
   (umask 077; set -o noclobber; printf 'DOMAIN=%s\nSECRET_KEY=%s\n' "$domain" "$app_secret" > .env)
   unset app_secret
 fi
+fi
+
 docker_cmd compose config --quiet
 
 stage='检查代理网络配置'
@@ -178,6 +219,9 @@ docker_cmd run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp \
 stage='构建后端'
 docker_cmd compose build app
 docker_cmd compose pull caddy
+if [[ $mode == upgrade ]]; then
+  upgrade_database
+else
 stage='检查全新v6数据目录'
 docker_cmd compose run --rm -T app python -c '
 from pathlib import Path
@@ -202,10 +246,17 @@ case "$initialized" in
     ;;
   *) printf '初始化状态异常：请检查数据库，不会自动删除或重置数据。\n' >&2; exit 1 ;;
 esac
+fi
 stage='启动服务'
-docker_cmd compose up -d
+if [[ $mode == upgrade ]]; then
+  docker_cmd compose up -d --wait --wait-timeout 120
+else
+  docker_cmd compose up -d
+fi
 docker_cmd compose ps
 printf '\n启动命令已完成。请使用 .env 中的域名通过 HTTPS 访问。\n'
 printf '证书可能仍在申请：sudo docker compose logs --tail=100 app caddy\n'
 printf '完成登录、小型模拟、Trace 与备份验收后再开放日常使用。\n'
 printf '定时备份安装和更新操作见 docs/deployment.md。\n'
+
+if [[ $mode == upgrade ]]; then finish_upgrade; fi

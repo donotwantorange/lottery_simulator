@@ -35,6 +35,7 @@
 
 | 日期／主题 | 当前状态 | 设计 | 计划 | 实施／修改记录 | Git状态 |
 |---|---|---|---|---|---|
+| 2026-10-06 Compose交互式升级 | 已实现，提交前45项复核通过；整机服务器升级与正式HTTPS未实测 | [设计](2026-10-06-compose-upgrade-design.md) | [计划](2026-10-06-compose-upgrade-plan.md) | [实施记录](2026-10-06-compose-upgrade.md) | 基于master `7ea72c9`，实现与文档随本提交纳入；未推送或实际部署 |
 | 2026-10-02 v6回归问题修复 | 已本地合并；2026-10-06任务1—10、12、13完成，原账号连续实验/取消验收通过，本机服务已切换；任务11可信公网HTTPS待补 | [设计](2026-10-02-v6-runtime-reliability-fixes-design.md) | [计划](2026-10-02-v6-runtime-reliability-fixes-plan.md) | [实施记录](2026-10-02-v6-runtime-reliability-fixes.md) | 修复`353cab0`，本地合并`ca545d6`；未推送或部署服务器 |
 | 2026-09-30 独立规则、通用稀有度与网页说明 | 已本地合并并切换v6；原账号验收通过；244项后端/52项前端与8组性能完成，新增问题待修复；任务17旧材料清理未执行 | [设计](2026-09-30-independent-rules-rarities-design.md) | [计划](2026-09-30-independent-rules-rarities-plan.md) | [实施记录](2026-09-30-independent-rules-rarities.md) | 功能`b234ce9`，本地合并`906bfe1`，进度/取消修复`9832bc0`；未推送或升级服务器；本次文档待提交 |
 | 2026-09-30 中文交互式首次安装 | 已实现，已有5项隔离检查记录；自动安装未实机测试 | — | — | [修改记录](2026-09-30-interactive-installer.md) | 已纳入master `a20a893`；本地origin/master包含 |

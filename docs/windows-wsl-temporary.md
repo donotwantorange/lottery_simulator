@@ -185,3 +185,7 @@ Docker在WSL内，Windows本身不新增docker命令。Caddy使用项目指定�
 本轮私有备份在WSL `/home/lottery/lottery-backups/local-repair-20261006`，不在Git或网站目录。验收保留两条新增完整历史，原账号/资源/旧历史均保持。后端PID为626，Windows前端PID为22296，仅为当次观察值；PID文件/本轮日志沿用上文运行目录。服务保留运行，关闭WSL或地址变化后需核对再启动，不盲停进程。当前WSL地址172.26.88.182，原忽略路径server.cjs仍指向该地址。Windows的Shell检出可为CRLF，当前install.sh保持物理LF且语法通过，未改Git全局配置。
 
 本轮未推送、未部署服务器，任务11可信公网HTTPS仍待补。部署/恢复前核对目标与活动任务；不要直接覆盖当前v6库或删除验收历史。原本地使用手册保持不变。
+
+## 2026-10-06服务器升级脚本
+
+完整新版项目提供 `bash scripts/install.sh --upgrade`，仅用于已有健康的标准Docker Compose app/Caddy部署，支持v5账号保留及v6更新。当前本机18080/8000由Node和WSL runserver运行，并非该Compose部署，不使用这个入口切换本机服务。没有安装Windows Docker Desktop或更改本机网络；本轮仅编写与隔离验证，真实账号库、运行服务及原本地使用手册保持不变。服务器维护、备份、重建网络、业务验收及备份unit更新见[部署说明](deployment.md#脚本升级)和[升级记录](changes/2026-10-06-compose-upgrade.md)。
