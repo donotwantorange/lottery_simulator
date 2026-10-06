@@ -6,7 +6,7 @@ from pathlib import Path
 import sys
 import time
 
-from dashboard.jobs import ACTIVE_STATUSES, JobManager, timestamp
+from dashboard.jobs import ACTIVE_STATUSES, JobManager, JobStateUnavailable, timestamp
 from dashboard.limits import SimulationLimits
 from dashboard.job_models import RunParameters, read_json, result_payload, write_json
 from dashboard.repository import HistoryRepository
@@ -107,6 +107,10 @@ def run(job_dir: Path, database_path: Path):
                        limit_policy=state.limit_policy)
     except SimulationCancelled:
         status = "cancelled"
+    except JobStateUnavailable:
+        if writer is not None:
+            writer.close()
+        raise
     except Exception:
         logging.getLogger(__name__).exception("Simulation failed for job %s", state.job_id)
         status, error = "failed", "模拟任务失败"
@@ -151,7 +155,7 @@ def run(job_dir: Path, database_path: Path):
             if cancel_path.exists():
                 raise SimulationCancelled()
             current_state = replace(
-                current_state, phase="committing", phase_completed=None, phase_total=None,
+                current_state, phase="saving", phase_completed=None, phase_total=None,
                 updated_at=timestamp(), duration_seconds=time.monotonic() - started,
             )
             write_json(state_path, current_state.to_dict())
@@ -174,6 +178,13 @@ def run(job_dir: Path, database_path: Path):
             updated_at=timestamp(), duration_seconds=time.monotonic() - started,
         ).to_dict())
 
+    def before_commit():
+        current_state = manager.get(state.job_id)
+        write_json(state_path, replace(
+            current_state, phase="committing", phase_completed=None, phase_total=None,
+            updated_at=timestamp(), duration_seconds=time.monotonic() - started,
+        ).to_dict())
+
     try:
         repository = HistoryRepository(database_path)
         repository.initialize()
@@ -183,9 +194,11 @@ def run(job_dir: Path, database_path: Path):
             trace_path=trace_path if parameters.trace else None,
             cancel_check=cancel_path.exists, commit_guard=commit_guard,
             progress_callback=saving_progress,
+            before_commit=before_commit,
         )
         if published:
             with manager._locked():
+                manager.get(state.job_id)
                 cleanup_error = manager._clean_stopped_files(job_dir)
                 if cleanup_error:
                     write_json(state_path, replace(
@@ -202,10 +215,15 @@ def run(job_dir: Path, database_path: Path):
                     cleanup_error=cleanup_error, updated_at=timestamp(),
                     duration_seconds=time.monotonic() - started,
                 ).to_dict())
+    except JobStateUnavailable:
+        # Leave the durable state and outputs for restart reconciliation.
+        raise
     except Exception:
         logging.getLogger(__name__).exception("History save failed for job %s", state.job_id)
         try:
-            history_committed = HistoryRepository(database_path).get_run(state.job_id) is not None
+            history_committed = manager._saved_run(state) is not None
+        except JobStateUnavailable:
+            raise
         except Exception:
             history_committed = None
         with manager._locked():

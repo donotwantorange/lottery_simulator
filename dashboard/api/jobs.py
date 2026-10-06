@@ -8,6 +8,7 @@ from dashboard.api.errors import APIError, error_response
 from dashboard.api.experiments import _data_response
 from dashboard.api.pools import _actor_or_error, _error_response, _json_body, _page
 from dashboard.services.accounts import AccountError
+from dashboard.jobs import JobStateUnavailable
 from dashboard.services.runs import (
     RunError, cancel_job, get_job_for_actor, get_job_result_for_actor, preview_submission,
     get_job_trace_reader_for_actor, job_busy, job_detail, list_my_jobs,
@@ -15,10 +16,12 @@ from dashboard.services.runs import (
 )
 
 
-ERRORS = (APIError, RunError, AccountError, OperationalError, ValueError)
+ERRORS = (APIError, RunError, AccountError, OperationalError, ValueError, JobStateUnavailable)
 
 
 def _error(error):
+    if isinstance(error, JobStateUnavailable):
+        return error_response("storage_busy", "任务状态暂不可用，请稍后重试", 503)
     if isinstance(error, RunError):
         return error_response(error.code, str(error), error.status)
     if isinstance(error, OperationalError):

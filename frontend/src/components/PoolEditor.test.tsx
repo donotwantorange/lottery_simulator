@@ -32,6 +32,52 @@ it("shows a dynamic read-only rule summary and explains weight ratios", () => {
   expect(container.querySelectorAll(".pool-rarity")).toHaveLength(rule.document.rarities.length);
 });
 
+it("shows the actual type of a public pool in read-only mode without enabling changes", () => {
+  const rule = makeRule();
+  render(<PoolEditor value={makePoolDocument()} rule={rule} rules={[rule]} kind="public" visibility="public"
+    canEdit={false} canCreatePublic={false} editing={false} poolOwnerId={null} onChange={vi.fn()}
+    onKind={vi.fn()} onVisibility={vi.fn()} onRuleMapping={vi.fn()} onCancelRuleMapping={vi.fn()} />);
+  const type = screen.getByLabelText("池类型");
+  expect(type).toHaveValue("public");
+  expect(type).toBeDisabled();
+  expect(type.querySelector('option[value="public"]')).toHaveTextContent("公共池");
+});
+
+it("explains the highest-tier first-UP target independently of character weights", () => {
+  const rule = makeRule();
+  rule.document.big_pity.enabled = true;
+  const pool = makePoolDocument();
+  const highest = [...rule.document.rarities].sort((a, b) => b.rank - a.rank)[0];
+  const roster = pool.rarity_pools.find((item) => item.rarity_id === highest.id)!;
+  roster.characters = [
+    { id: "ordinary", rarity_id: highest.id, name: "普通角色", weight: 1, is_up: false, is_limited: false },
+    { id: "first-up", rarity_id: highest.id, name: "排序第一UP", weight: 2, is_up: true, is_limited: true },
+    { id: "heavier-up", rarity_id: highest.id, name: "权重更高UP", weight: 99, is_up: true, is_limited: true },
+  ];
+  renderEditor(pool, [rule]);
+  expect(screen.getByText(/大保底目标：排序第一UP（规则使用最高稀有度中排序第一的UP）/)).toBeInTheDocument();
+  expect(screen.getByText("按这一档角色名单从上到下选择第一个标记UP的角色，与权重大小无关。")).toBeInTheDocument();
+  expect(screen.getByText(/最高稀有度名单中排序第一的UP/)).toBeInTheDocument();
+});
+
+it("falls back to a lower-tier first UP for periodic gifts when big pity is disabled", () => {
+  const rule = makeRule();
+  rule.document.big_pity.enabled = false;
+  rule.document.grant.enabled = true;
+  rule.document.grant.target = "first_up";
+  const pool = makePoolDocument();
+  const sorted = [...rule.document.rarities].sort((a, b) => b.rank - a.rank);
+  pool.rarity_pools.find((item) => item.rarity_id === sorted[0].id)!.characters = [
+    { id: "ordinary", rarity_id: sorted[0].id, name: "最高档普通角色", weight: 1, is_up: false, is_limited: false },
+  ];
+  pool.rarity_pools.find((item) => item.rarity_id === sorted[1].id)!.characters = [
+    { id: "lower-up", rarity_id: sorted[1].id, name: "低档UP目标", weight: 1, is_up: true, is_limited: true },
+  ];
+  renderEditor(pool, [rule]);
+  expect(screen.getByText("周期赠送目标：低档UP目标")).toBeInTheDocument();
+  expect(screen.queryByText(/大保底目标：/)).toBeNull();
+});
+
 it("renders a fourth rarity from the rule and retains invalid weight text until corrected", async () => {
   const rule = makeRule();
   const pool = makePoolDocument();

@@ -7,6 +7,7 @@ from django.views.decorators.csrf import csrf_protect
 from dashboard.api.errors import APIError, error_response
 from dashboard.api.pools import _actor_or_error, _error_response, _json_body, _page
 from dashboard.models import AppMeta, ExperimentConfig, Pool, Rule, SimulationRun, User
+from dashboard.jobs import JobStateUnavailable
 from dashboard.services.accounts import (
     AccountError, DeleteIncomplete, _admin_actor, create_account, delete_account,
     reset_password, unlock_login, update_account,
@@ -43,9 +44,8 @@ def _deletion_scope(target):
     from dashboard.services.runs import get_manager
 
     manager = get_manager()
-    jobs = [state for path in manager.root.glob("*/state.json")
-            if (state := manager.get(path.parent.name)) is not None
-            and state.owner_id == str(target.pk)]
+    jobs = [state for state in manager.states()
+            if state.owner_id == str(target.pk)]
     manifest = AppMeta.objects.filter(key=f"account_deletion:{target.pk}").first()
     known_job_ids = {state.job_id for state in jobs}
     if manifest is not None:
@@ -74,6 +74,8 @@ def _deletion_scope(target):
 
 
 def _error(error):
+    if isinstance(error, JobStateUnavailable):
+        return error_response("storage_busy", "任务状态暂不可用，请稍后重试", 503)
     if isinstance(error, User.DoesNotExist):
         return error_response("not_found", "账号不存在", 404)
     if isinstance(error, DeleteIncomplete):
@@ -108,7 +110,7 @@ def users(request):
             user = create_account(actor, data["username"], data["password"], admin=role == "admin")
             return _response(_summary(user), 201)
         return HttpResponse(status=405)
-    except (APIError, AccountError, OperationalError, User.DoesNotExist) as error:
+    except (APIError, AccountError, OperationalError, User.DoesNotExist, JobStateUnavailable) as error:
         return _error(error)
 
 
@@ -132,7 +134,7 @@ def user_resource(request, target_id):
             delete_account(actor, target.pk)
             return HttpResponse(status=204)
         return HttpResponse(status=405)
-    except (APIError, AccountError, OperationalError, User.DoesNotExist) as error:
+    except (APIError, AccountError, OperationalError, User.DoesNotExist, JobStateUnavailable) as error:
         return _error(error)
 
 
@@ -147,7 +149,7 @@ def password_reset(request, target_id):
         data = _json_body(request)
         _fields(data, {"password"}, {"password"})
         return _response(_summary(reset_password(actor, target.pk, data["password"])))
-    except (APIError, AccountError, OperationalError, User.DoesNotExist) as error:
+    except (APIError, AccountError, OperationalError, User.DoesNotExist, JobStateUnavailable) as error:
         return _error(error)
 
 
@@ -162,7 +164,7 @@ def login_unlock(request, target_id):
         _fields(_json_body(request), set())
         unlock_login(actor, target.username)
         return _response({"message": "账号登录限制已解除，启用状态未改变"})
-    except (APIError, AccountError, OperationalError, User.DoesNotExist) as error:
+    except (APIError, AccountError, OperationalError, User.DoesNotExist, JobStateUnavailable) as error:
         return _error(error)
 
 
@@ -179,8 +181,7 @@ def jobs(request):
         from dashboard.services.runs import get_manager, job_summary
 
         manager = get_manager()
-        states = [state for path in manager.root.glob("*/state.json")
-                  if (state := manager.get(path.parent.name)) is not None]
+        states = manager.states()
         states.sort(key=lambda state: (datetime.fromisoformat(state.accepted_at), state.job_id),
                     reverse=True)
         owners = {str(user.pk): user.username
@@ -190,5 +191,5 @@ def jobs(request):
                  for state in states[(page - 1) * size:page * size]]
         return _response({"items": items, "total": len(states), "page": page,
                           "page_size": size})
-    except (APIError, AccountError, OperationalError) as error:
+    except (APIError, AccountError, OperationalError, JobStateUnavailable) as error:
         return _error(error)

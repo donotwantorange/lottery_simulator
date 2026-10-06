@@ -195,11 +195,13 @@ def _authorize_job(actor, state):
 
 
 def get_job_for_actor(actor, job_id):
+    _actor(actor)
     manager = get_manager()
     return _authorize_job(actor, manager.get(str(_uuid(job_id))))
 
 
 def cancel_job(actor, job_id):
+    _actor(actor)
     return get_manager().cancel(str(_uuid(job_id)), authorize=lambda state: _authorize_job(actor, state))
 
 
@@ -252,8 +254,7 @@ def list_my_jobs(actor, page=1, page_size=50):
     start = pagination(page, page_size)
     manager = get_manager()
     manager.reconcile_after_restart()
-    states = [state for path in manager.root.glob("*/state.json")
-              if (state := manager.get(path.parent.name)) is not None and state.owner_id == str(fresh.pk)]
+    states = [state for state in manager.states() if state.owner_id == str(fresh.pk)]
     states.sort(key=lambda state: (datetime.fromisoformat(state.accepted_at), state.job_id), reverse=True)
     return {"items": [job_summary(state) for state in states[start:start+page_size]],
             "total": len(states), "page": page, "page_size": page_size}
@@ -367,6 +368,7 @@ def delete_run_for_actor(actor, run_id):
 
 
 def resave_job_for_actor(actor, job_id):
+    _actor(actor)
     manager = get_manager()
     with manager._locked():
         state = _authorize_job(actor, manager.get(str(_uuid(job_id))))

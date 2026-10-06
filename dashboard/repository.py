@@ -103,7 +103,7 @@ class HistoryRepository:
             require_version(cursor.fetchone()[0], DATABASE_SCHEMA_VERSION, "数据库")
 
     def save_run(self, run_id, payload, *, trace_path=None, cancel_check=None,
-                 progress_callback=None, commit_guard=None, authorize=None):
+                 progress_callback=None, commit_guard=None, authorize=None, before_commit=None):
         if type(run_id) is not str or str(UUID(run_id)) != run_id:
             raise ValueError("运行ID必须是标准UUID")
         self.initialize()
@@ -145,17 +145,23 @@ class HistoryRepository:
                     if existing is not None:
                         if any(getattr(existing, key) != value for key, value in values.items()) or existing.events.count() != counts.trace_events:
                             raise ValueError("运行ID已有不同快照")
+                        check_cancelled(cancel_check)
+                        if before_commit:
+                            before_commit()
+                        check_cancelled(cancel_check)
                         return run_id
                     run = SimulationRun.objects.create(id=run_id, **values)
                     imported = 0
                     if trace is not None:
+                        if progress_callback:
+                            progress_callback(0, counts.trace_events)
                         rows = trace.execute("SELECT * FROM events ORDER BY trial_index,event_index")
                         def stored_events():
                             for row in rows:
                                 yield validate_event_row(row)
                         iterator = iter_validated_events(compiled, parameters, counts,
                             stored_events(), batch_size=IMPORT_BATCH_SIZE,
-                            cancel_check=cancel_check, progress_callback=progress_callback)
+                            cancel_check=cancel_check)
                         batch = []
                         for event in iterator:
                             trial = event["trial_index"]
@@ -175,10 +181,17 @@ class HistoryRepository:
                             if len(batch) == IMPORT_BATCH_SIZE:
                                 SimulationEvent.objects.bulk_create(batch)
                                 batch.clear()
+                                if progress_callback and imported < counts.trace_events:
+                                    progress_callback(imported, counts.trace_events)
                         if batch:
                             SimulationEvent.objects.bulk_create(batch)
                         if imported != counts.trace_events:
                             raise ValueError("Trace事件数量不一致")
+                        if progress_callback:
+                            progress_callback(imported, counts.trace_events)
+                    check_cancelled(cancel_check)
+                    if before_commit:
+                        before_commit()
                     check_cancelled(cancel_check)
             return run_id
         finally:

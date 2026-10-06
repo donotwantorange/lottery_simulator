@@ -11,13 +11,19 @@ services:
       LOTTERY_DB_PATH: /app/data/history_v6.sqlite3
       LOTTERY_JOBS_DIR: /app/data/jobs_v6
       LOTTERY_EXPORTS_DIR: /app/data/exports_v6
+      LOTTERY_TRUSTED_PROXIES: "${LOTTERY_CADDY_IP:-172.30.96.2}"
     volumes: ["lottery_data:/app/data", "lottery_backups:/app/backups"]
+    networks: ["backend"]
   caddy:
     image: caddy:2.11.4-alpine
     restart: unless-stopped
     environment:
       DOMAIN: "${DOMAIN:?Set DOMAIN in .env}"
     ports: ["80:80", "443:443"]
+    networks:
+      default: {}
+      backend:
+        ipv4_address: "${LOTTERY_CADDY_IP:-172.30.96.2}"
     volumes: ["./Caddyfile:/etc/caddy/Caddyfile:ro", "./frontend/dist:/srv:ro", "caddy_data:/data", "caddy_config:/config"]
     depends_on:
       app:
@@ -27,3 +33,8 @@ volumes:
   lottery_backups: {}
   caddy_data: {}
   caddy_config: {}
+networks:
+  backend:
+    internal: true
+    ipam:
+      config: [{"subnet": "${LOTTERY_PROXY_SUBNET:-172.30.96.0/24}", "ip_range": "${LOTTERY_PROXY_DYNAMIC_RANGE:-172.30.96.128/25}", "gateway": "${LOTTERY_PROXY_GATEWAY:-172.30.96.1}"}]

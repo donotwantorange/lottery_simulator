@@ -200,6 +200,31 @@ class ExperimentAPITests(TestCase):
         self.assertEqual(admin_config.status_code, 201)
         self.assertTrue(admin_config.json()["owner_is_admin"])
 
+    def test_query_integer_limits_apply_to_experiment_pagination_and_export(self):
+        self.login_as(self.user)
+        created = self.client.post("/api/v1/experiment-configs/",
+                                   data=json.dumps(self.payload()), content_type="application/json")
+        self.assertEqual(created.status_code, 201, created.content)
+        config_id = created.json()["id"]
+        for value in ("9" * 5000, "0" * 1024 + "1"):
+            self.assertEqual(self.client.get(f"/api/v1/experiment-configs/?page={value}").status_code, 400)
+            self.assertEqual(self.client.get(
+                f"/api/v1/experiment-configs/{config_id}/export/?expected_revision={value}").status_code, 400)
+        accepted = "0" * 1023 + "1"
+        self.assertEqual(self.client.get(f"/api/v1/experiment-configs/?page={accepted}").status_code, 200)
+        self.assertEqual(self.client.get(
+            f"/api/v1/experiment-configs/{config_id}/export/?expected_revision={accepted}").status_code, 200)
+        self.assertEqual(self.client.get(
+            f"/api/v1/experiment-configs/{config_id}/export/?expected_revision=2").status_code, 409)
+        self.assertEqual(self.client.get(
+            f"/api/v1/experiment-configs/?page=1&page_size=201").status_code, 400)
+        self.assertEqual(self.client.get(
+            "/api/v1/experiment-configs/00000000-0000-0000-0000-000000000000/export/?expected_revision=1").status_code, 404)
+        other = create_account(self.admin, "other-user", "123456", must_change_password=False)
+        self.login_as(other)
+        self.assertEqual(self.client.get(
+            f"/api/v1/experiment-configs/{config_id}/export/?expected_revision=1").status_code, 404)
+
     def test_unavailable_pool_keeps_saved_hint_without_leaking_hidden_name(self):
         visible_private = save_pool(self.admin, {
             **read_config_json(DEFAULT_POOL_PATH), "name": "原公开名称",

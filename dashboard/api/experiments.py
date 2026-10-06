@@ -10,6 +10,7 @@ from rest_framework import serializers
 from rest_framework.exceptions import ValidationError
 
 from dashboard.api.errors import APIError, error_response
+from dashboard.api.query import query_integer
 from dashboard.api.pools import _actor_or_error, _json_body, _page, _validated
 from dashboard.api.serializers import (
     ExperimentConfigSerializer, ExperimentImportConfirmSerializer,
@@ -202,9 +203,8 @@ def export_experiment_view(request, config_id):
     try:
         actor = _actor_or_error(request)
         value = request.GET.get("expected_revision")
-        if value is None or not value.isdecimal():
-            raise APIError("validation_error", "缺少有效expected_revision", 400)
-        document = export_experiment(actor, config_id, expected_revision=int(value))
+        revision = query_integer(value, "expected_revision")
+        document = export_experiment(actor, config_id, expected_revision=revision)
         response = HttpResponse(json.dumps(document, ensure_ascii=False, indent=2) + "\n",
                                 content_type="application/json; charset=utf-8")
         response["Content-Disposition"] = 'attachment; filename="experiment.json"'

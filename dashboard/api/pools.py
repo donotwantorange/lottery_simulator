@@ -11,6 +11,7 @@ from rest_framework import serializers
 
 from dashboard.api.auth import require_actor
 from dashboard.api.errors import APIError, error_response
+from dashboard.api.query import query_integer
 from dashboard.api.serializers import (PoolControlsSerializer, PoolCopySerializer,
                                        PoolSerializer, StrictSerializer)
 from dashboard.models import Pool
@@ -91,9 +92,7 @@ def _pool_or_404(actor, pool_id):
 def _page(value, label, default, maximum):
     if value is None:
         return default
-    if not value.isdecimal():
-        raise APIError("validation_error", f"{label}必须是正整数", 400)
-    number = int(value)
+    number = query_integer(value, label)
     if number < 1 or number > maximum:
         raise APIError("validation_error", f"{label}必须在1至{maximum}之间", 400)
     return number
@@ -239,7 +238,7 @@ def export_pool_view(request, pool_id):
         raw_revision = request.GET.get("expected_revision")
         from dashboard.api.serializers import StrictRevisionField
         revision = _validated(ExportRevisionSerializer, {
-            "expected_revision": int(raw_revision) if raw_revision and raw_revision.isdecimal() else raw_revision
+            "expected_revision": query_integer(raw_revision, "expected_revision")
         })
         document = export_pool(actor, pool_id, expected_revision=revision["expected_revision"])
         response = HttpResponse(json.dumps(document, ensure_ascii=False, indent=2) + "\n",

@@ -55,6 +55,34 @@ it("requests each scope and page from the server", async () => {
   await waitFor(() => expect(apiRequest).toHaveBeenLastCalledWith("rules/?scope=mine&page=2&page_size=50", {}, expect.any(AbortSignal)));
 });
 
+it("places one basic-information heading before its fields in read-only view", async () => {
+  apiRequest.mockResolvedValue(page);
+  render(<MemoryRouter><Rules /></MemoryRouter>);
+  fireEvent.click(await screen.findByRole("button", { name: "查看" }));
+  const heading = screen.getByRole("heading", { name: "基本信息与权限" });
+  const name = screen.getByLabelText("规则名称");
+  expect(heading.compareDocumentPosition(name) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  expect(screen.getAllByRole("heading", { name: "基本信息与权限" })).toHaveLength(1);
+  expect(screen.getByText(/公开后，其他用户可查看、绑定和复制，但不能编辑/)).toBeInTheDocument();
+});
+
+it("shows private rule creation to users and public creation to admins", async () => {
+  apiRequest.mockResolvedValue({ ...page, items: [] });
+  const userView = render(<MemoryRouter><Rules /></MemoryRouter>);
+  fireEvent.click(await screen.findByRole("button", { name: "新建规则" }));
+  const heading = screen.getByRole("heading", { name: "基本信息与权限" });
+  expect(heading.compareDocumentPosition(screen.getByLabelText("规则名称")) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  expect(screen.getByLabelText("规则类型").querySelector('option[value="public"]')).toBeNull();
+  userView.unmount();
+  cleanup();
+  Object.assign(authUser, { id: "admin", role: "admin" });
+  apiRequest.mockReset();
+  apiRequest.mockResolvedValue({ ...page, items: [] });
+  render(<MemoryRouter><Rules /></MemoryRouter>);
+  fireEvent.click(await screen.findByRole("button", { name: "新建规则" }));
+  expect(screen.getByLabelText("规则类型").querySelector('option[value="public"]')).toBeInTheDocument();
+});
+
 it("keeps the local draft after a revision conflict", async () => {
   Object.assign(authUser, { id: "user-b", role: "user" });
   apiRequest.mockImplementation((path: string, options?: RequestInit) => {
@@ -67,6 +95,7 @@ it("keeps the local draft after a revision conflict", async () => {
   });
   render(<MemoryRouter><Rules /></MemoryRouter>);
   fireEvent.click(await screen.findByRole("button", { name: "编辑" }));
+  expect(screen.getByRole("heading", { name: "基本信息与权限" }).compareDocumentPosition(screen.getByLabelText("规则名称")) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   fireEvent.change(screen.getByLabelText("规则名称"), { target: { value: "保留的本地草稿" } });
   fireEvent.click(screen.getByRole("button", { name: "保存修改" }));
   expect(await screen.findByRole("alert")).toHaveTextContent("草稿仍保留");

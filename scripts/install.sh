@@ -2,7 +2,6 @@
 # 中文交互式首次安装；从完整项目目录运行，不用于线上更新。
 set -Eeuo pipefail
 stage='检查安装环境'
-trap 'printf "\n安装停止：%s失败（第 %s 行）。处理错误后可重新运行；已有数据不会自动清除。\n" "$stage" "$LINENO" >&2' ERR
 
 if [[ ${1:-} == --help ]]; then
   printf '用法：bash scripts/install.sh\n适用：Ubuntu 24.04，从完整项目目录交互执行首次部署。\n先完成域名解析及80/443端口配置，再获取完整项目。\n已有运行服务时退出；日常更新按 docs/deployment.md 的版本更新章节执行。\n启动后按上线验收清单验证；定时备份另行设置。\n'
@@ -17,9 +16,19 @@ done
 [[ -t 0 ]] || { printf '请在交互式终端执行，不要使用 curl | bash。\n' >&2; exit 1; }
 if (( EUID == 0 )); then admin=(); else admin=(sudo); sudo -v; fi
 docker_cmd() { "${admin[@]}" docker "$@"; }
+has_runtime_material() {
+  [[ -e data/history_v6.sqlite3 || -e data/history_v5.sqlite3 ]] && return 0
+  command -v docker >/dev/null || return 2
+  local containers volumes
+  containers=$(docker_cmd ps -aq --filter "label=com.docker.compose.project.working_dir=${project_dir:-$PWD}") || return 2
+  [[ -z $containers ]] || return 0
+  volumes=$(docker_cmd volume ls -q --filter 'label=com.docker.compose.volume=lottery_data') || return 2
+  [[ -z $volumes ]] && return 1 || return 0
+}
+trap 'status=$?; if has_runtime_material; then found=0; else found=$?; fi; if [[ $found == 0 ]]; then printf "\n安装停止：%s失败（第 %s 行）。已存在运行材料；先核对状态并备份，再按 docs/deployment.md 手动恢复或升级。脚本不会自动续跑或清理数据。\n" "$stage" "$LINENO" >&2; elif [[ $found == 1 ]]; then printf "\n安装停止：%s失败（第 %s 行）。未发现数据库、容器或数据卷；处理错误后可重新运行，现有 .env 会保留。\n" "$stage" "$LINENO" >&2; else printf "\n安装停止：%s失败（第 %s 行）。无法读取Docker状态，现有数据状态未知；请核对状态与备份后按 docs/deployment.md 手动恢复或升级。\n" "$stage" "$LINENO" >&2; fi; exit "$status"' ERR
 
 stop_existing_install() {
-  printf '检测到已有安装或数据库数据，首次安装已停止。请按“备份 → 空v6 migrate → 导入账号 → 初始化默认业务 → 配置v6路径 → 最终切换”操作；不会创建新账号或改动现有数据。\n' >&2
+  printf '检测到已有安装或数据库数据，首次安装已停止。请先核对状态并备份，再按 docs/deployment.md 手动恢复或升级；不会自动续跑、创建账号或改动现有数据。\n' >&2
   exit 1
 }
 
@@ -157,6 +166,9 @@ PY
 fi
 docker_cmd compose config --quiet
 
+stage='检查代理网络配置'
+docker_cmd compose config --format json | "${admin[@]}" python3 scripts/check_proxy_network.py --project "$(docker_cmd compose config --format json | python3 -c 'import json,sys; print(json.load(sys.stdin)["name"])')" --docker "$(command -v docker)"
+
 stage='构建前端'
 docker_cmd run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp \
   -v "$project_dir/frontend:/work/frontend" -v "$project_dir/configs:/work/configs:ro" \
@@ -173,7 +185,7 @@ root = Path("/app/data")
 allowed = {"jobs_v6", "exports_v6"}
 bad = [p for p in root.iterdir() if p.name not in allowed or not p.is_dir() or next(p.iterdir(), None) is not None]
 if bad:
-    raise SystemExit("检测到已有数据库或文件数据，首次安装已停止；请先完成账号保留迁移。")
+    raise SystemExit("检测到已有数据库或文件数据，首次安装已停止；请核对数据库与备份，再按 docs/deployment.md 手动恢复或升级。")
 '
 stage='迁移数据库'
 docker_cmd compose run --rm app python manage.py migrate
@@ -181,7 +193,7 @@ stage='检查管理员初始化状态'
 initialized=$(docker_cmd compose run --rm -T app python manage.py shell -c \
   'from dashboard.models import AppMeta, User, Pool, Rule; print("READY" if AppMeta.objects.filter(key="initialized").exists() else "PARTIAL" if User.objects.exists() or Pool.objects.exists() or Rule.objects.exists() else "EMPTY")' | tail -n 1)
 case "$initialized" in
-  READY) printf '发现已有初始化数据，首次安装已停止；请使用账号保留迁移流程。\n' >&2; exit 1 ;;
+  READY) printf '发现已有初始化数据，首次安装已停止；请核对数据库与备份，再按 docs/deployment.md 手动恢复或升级。\n' >&2; exit 1 ;;
   EMPTY)
     read -r -p '请输入首个管理员用户名：' username
     [[ -n $username ]] || { printf '用户名不能为空。\n' >&2; exit 1; }

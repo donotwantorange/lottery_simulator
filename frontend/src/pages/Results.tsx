@@ -48,10 +48,12 @@ export function Results() {
   const [job, setJob] = useState<JobDetail | null>(null);
   const [result, setResult] = useState<RunResult | null>(null);
   const [error, setError] = useState("");
+  const [pollError, setPollError] = useState("");
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {
     const controller = new AbortController();
+    setError(""); setPollError("");
     setJobs(null); setJob(null); setResult(null);
     void apiRequest<Page<JobSummary>>("jobs/mine/?page=1&page_size=50", {}, controller.signal)
       .then((value) => { if (!controller.signal.aborted) setJobs(value); })
@@ -60,21 +62,22 @@ export function Results() {
   }, [user?.id, sessionGeneration]);
 
   useEffect(() => {
+    setJob(null); setResult(null); setError(""); setPollError("");
     if (!jobId) return;
     const controller = new AbortController();
     let timer: ReturnType<typeof setTimeout> | undefined;
     let stopped = false;
-    setJob(null); setResult(null); setError("");
     const schedule = (delay: number) => { timer = setTimeout(() => { timer = undefined; void refresh(); }, delay); };
     async function refresh() {
       try {
         const value = await apiRequest<JobDetail>(`jobs/${jobId}/`, {}, controller.signal);
         if (stopped) return;
+        setPollError("");
         setJob(value);
         if (value.status === "queued" || value.status === "running") schedule(document.hidden ? 10_000 : 2_000);
       } catch (cause) {
         if (stopped) return;
-        setError(errorMessage(cause));
+        setPollError(errorMessage(cause));
         if (cause instanceof TypeError || (cause instanceof ApiError && cause.status >= 500)) schedule(document.hidden ? 10_000 : 2_000);
       }
     }
@@ -104,6 +107,6 @@ export function Results() {
   return <div className="page-stack"><section className="panel"><div className="section-heading"><div><h2>当前任务</h2><p className="muted">活动任务定期更新；页面隐藏时降低查询频率。</p></div></div>
     <label className="compact-field">本人最近任务<select value={jobId} onChange={(event) => setParams(event.target.value ? { job: event.target.value } : {})}><option value="">选择任务</option>{jobId && jobs && !jobs.items.some((item) => item.job_id === jobId) && <option value={jobId}>{job?.pool_name_snapshot ?? jobId} · 当前查看</option>}{jobs?.items.map((item) => <option key={item.job_id} value={item.job_id}>{new Date(item.accepted_at).toLocaleString()} · {item.pool_name_snapshot} · {item.job_id === job?.job_id ? job.status : item.status}</option>)}</select></label>
     {job && <><p>状态：{job.status}{job.phase ? ` · ${job.phase}` : ""}{job.cancel_requested ? " · 已请求停止" : ""}</p><p className="muted">总进度：{job.completed_units} / {job.total_units}{job.phase_total ? `；当前阶段 ${job.phase_completed ?? "0"} / ${job.phase_total}` : ""}</p>{(job.status === "queued" || job.status === "running") && <button disabled={busy || job.cancel_requested} onClick={() => void cancel()}>停止任务</button>}{job.error && <p className="form-error">{job.error}</p>}{job.cleanup_error && <p className="form-error">临时任务文件清理待处理：{job.cleanup_error}</p>}{job.persistence_error && <p className="form-error">结果未保存到历史：{job.persistence_error}</p>}{job.run_id && <p><Link to={`/history/?run=${job.run_id}`}>查看已保存历史</Link></p>}</>}
-    {!jobId && <p className="muted">请选择本人任务，或从新建实验提交后进入本页。</p>}{error && <p className="form-error" role="alert">{error}</p>}
+    {!jobId && <p className="muted">请选择本人任务，或从新建实验提交后进入本页。</p>}{pollError && <p className="form-error" role="alert">{pollError}</p>}{error && <p className="form-error" role="alert">{error}</p>}
   </section>{result && job && <ResultView base={`jobs/${job.job_id}`} result={result} runId={job.run_id} />}</div>;
 }

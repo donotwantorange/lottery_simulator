@@ -10,6 +10,7 @@ from rest_framework import serializers
 from rest_framework.exceptions import ValidationError
 
 from dashboard.api.errors import APIError, error_response
+from dashboard.api.query import query_integer
 from dashboard.api.pools import _actor_or_error, _json_body, _page, _validated
 from dashboard.api.serializers import RuleSerializer, StrictRevisionField
 from dashboard.api.serializers import StrictSerializer
@@ -149,7 +150,9 @@ def export_rule_view(request, rule_id):
     try:
         actor = _actor_or_error(request)
         raw = request.GET.get("expected_revision")
-        values = _validated(RevisionSerializer, {"expected_revision": int(raw) if raw and raw.isdecimal() else raw})
+        values = _validated(RevisionSerializer, {
+            "expected_revision": query_integer(raw, "expected_revision")
+        })
         document = export_rule(actor, rule_id, expected_revision=values["expected_revision"])
         response = HttpResponse(json.dumps(document, ensure_ascii=False, indent=2) + "\n",
                                 content_type="application/json; charset=utf-8")
