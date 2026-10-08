@@ -10,6 +10,7 @@
 | [网页页面指南](docs/dashboard-guide.md) | 规则、角色池、实验和结果页操作 |
 | [部署指南与运维说明](docs/deployment.md) | 安装、v5账号导入、v6升级、备份与恢复 |
 | [Windows/WSL临时说明](docs/windows-wsl-temporary.md) | 本机v6工作树、验收环境和切换顺序 |
+| [长期开发规范](docs/standards/README.md) | 开发验证、变更记录、架构数据、权限、界面及部署约定 |
 | [修改记录](docs/changes/README.md) | 设计、实施和验证记录 |
 
 原本地使用手册按用户要求保留原文；本轮v6操作以网页指南、部署指南和Windows/WSL临时说明为准。
