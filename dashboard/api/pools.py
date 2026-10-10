@@ -69,7 +69,7 @@ def _error_response(error):
     if isinstance(error, APIError):
         return error_response(error.code, error.message, error.status, error.fields)
     if isinstance(error, PoolError):
-        return error_response(error.code, str(error), error.status)
+        return error_response(error.code, str(error), error.status, error.fields)
     if isinstance(error, AccountError):
         code, status = ("unauthenticated", 401) if str(error) == "请重新登录" else ("validation_error", 400)
         return error_response(code, str(error), status)

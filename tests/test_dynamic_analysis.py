@@ -4,8 +4,11 @@ from unittest.mock import patch
 
 from lottery_simulator.analysis import expected_simulation_results
 from lottery_simulator.control import SimulationCancelled
+from lottery_simulator.engine import bonus_pool, simulate_draws
 from lottery_simulator.rules.definitions import BonusPolicy, GrantPolicy
-from lottery_simulator.rules.runtime import compile_pool, initial_state, transition_branches
+from lottery_simulator.rules.runtime import (
+    DrawState, compile_pool, initial_state, rarity_probabilities, transition_branches,
+)
 from tests.fixtures_rules import (
     default_parameters, default_pool, default_rule, deterministic_target_compiled,
 )
@@ -24,6 +27,50 @@ def _no_pity_compiled(*, bonus=None, grant=None):
 
 
 class DynamicAnalysisTests(unittest.TestCase):
+    def test_tolerated_base_probability_tail_preserves_300_draw_state_mass(self):
+        compiled = _no_pity_compiled()
+        low, _, high = sorted(compiled.rule.rarities, key=lambda item: item.rank)
+        rule = replace(compiled.rule, rarities=(
+            replace(low, base_probability=0.5),
+            replace(high, base_probability=0.4999999999995),
+        ))
+        pool = replace(compiled.pool, rarity_pools=tuple(
+            replace(roster, characters=(), up_enabled=False, up_share=0)
+            for roster in compiled.pool.rarity_pools if roster.rarity_id in {low.id, high.id}
+        ), rewards=tuple(replace(reward, amounts={key: value for key, value in reward.amounts.items()
+                                                  if key in {low.id, high.id}})
+                         for reward in compiled.pool.rewards))
+        compiled = compile_pool(rule, pool)
+        result = expected_simulation_results(
+            compiled, default_parameters(draws=300, trials=1, initial_small_pity={}))
+        main = result["draws"]["main"]
+        self.assertEqual(main["draw_count"], 300)
+        self.assertAlmostEqual(sum(main["rarity_counts"].values()), 300)
+
+    def test_bonus_theory_and_trace_share_corrected_bonus_vector(self):
+        compiled = _no_pity_compiled()
+        low, middle, high = sorted(compiled.rule.rarities, key=lambda item: item.rank)
+        bonus_rarities = (
+            replace(low, base_probability=0.5),
+            replace(middle, base_probability=0.0),
+            replace(high, base_probability=0.4999999999995),
+        )
+        rule = replace(compiled.rule, bonus=replace(
+            compiled.rule.bonus, enabled=True, at_main_draw=1, draws=2,
+            rarities=bonus_rarities))
+        compiled = compile_pool(rule, compiled.pool)
+        parameters = default_parameters(draws=1, trials=1, seed=42,
+                                        trace=True, initial_small_pity={})
+        expected = expected_simulation_results(compiled, parameters)
+        simulated = simulate_draws(compiled, parameters)
+        vector = rarity_probabilities(bonus_pool(compiled), DrawState())
+        bonus_events = [event for event in simulated.records if event.source == "bonus"]
+        self.assertEqual(len(bonus_events), 2)
+        self.assertEqual(vector[middle.id], 0.0)
+        self.assertEqual(sum(vector.values()), 1.0)
+        self.assertTrue(all(event.draw_result.probabilities == vector for event in bonus_events))
+        self.assertAlmostEqual(sum(expected["draws"]["bonus"]["rarity_counts"].values()), 2.0)
+
     def test_theory_reports_main_and_bonus_progress(self):
         compiled = _no_pity_compiled()
         params = default_parameters(draws=6, trials=1, seed=42, trace=False,

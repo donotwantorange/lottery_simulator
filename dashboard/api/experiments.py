@@ -12,6 +12,7 @@ from rest_framework.exceptions import ValidationError
 from dashboard.api.errors import APIError, error_response
 from dashboard.api.query import query_integer
 from dashboard.api.pools import _actor_or_error, _json_body, _page, _validated
+from dashboard.seed_validation import legacy_seed_limit_message
 from dashboard.api.serializers import (
     ExperimentConfigSerializer, ExperimentImportConfirmSerializer,
     ExperimentImportPreviewSerializer, ExperimentSaveSerializer, StrictRevisionField,
@@ -83,8 +84,14 @@ def experiment_configs(request):
         query = visible_experiments(actor)
         total = query.count()
         start = (page - 1) * page_size
-        items = ExperimentConfigSerializer(query[start:start + page_size], many=True,
-                                           context={"actor": actor}).data
+        try:
+            items = ExperimentConfigSerializer(query[start:start + page_size], many=True,
+                                               context={"actor": actor}).data
+        except ValueError as error:
+            message = legacy_seed_limit_message(error)
+            if message is None:
+                raise
+            raise APIError("validation_error", message, 400) from error
         return _data_response({"items": items, "total": total,
                                "page": page, "page_size": page_size})
     except (APIError, ExperimentError, AccountError, ValidationError, OperationalError) as error:
@@ -115,9 +122,14 @@ def _experiment_config_detail(request, config_id):
         actor = _actor_or_error(request)
         try:
             config = visible_experiments(actor).get(pk=config_id)
-        except (ExperimentConfig.DoesNotExist, ValueError):
+        except ExperimentConfig.DoesNotExist:
             raise ExperimentError("实验配置不存在或无权管理", status=404,
                                   code="not_found") from None
+        except ValueError as error:
+            message = legacy_seed_limit_message(error)
+            if message is None:
+                raise
+            raise APIError("validation_error", message, 400) from error
         return _data_response(ExperimentConfigSerializer(config, context={"actor": actor}).data)
     except (APIError, ExperimentError, AccountError, ValidationError, OperationalError) as error:
         return _error(error)

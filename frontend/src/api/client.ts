@@ -11,9 +11,9 @@ const authExpiryListeners = new Set<() => void>();
 export class ApiError extends Error {
   readonly status: number;
   readonly code: string;
-  readonly fields?: Record<string, string[]>;
+  readonly fields?: Record<string, unknown>;
 
-  constructor(status: number, code: string, message: string, fields?: Record<string, string[]>) {
+  constructor(status: number, code: string, message: string, fields?: Record<string, unknown>) {
     super(message);
     this.name = "ApiError";
     this.status = status;

@@ -3,6 +3,7 @@
 import json
 
 from django.http import HttpResponse
+from dashboard.limits import TraceLimits
 from django.views.decorators.csrf import csrf_protect
 from django.views.decorators.http import require_GET
 
@@ -87,9 +88,11 @@ def trace(request, run_id):
             raise RunError("逐抽分页大小必须是50、100或200")
         reader = get_trace_reader_for_actor(actor, run_id)
         filters = _trace_filter(request)
+        download_limit = TraceLimits.for_actor(actor).max_download_records
         return _data_response({"items": safe_json(reader.query_events(filters, limit=page_size,
                 offset=(page - 1) * page_size)), "total": str(reader.count_events(filters)),
-                "page": page, "page_size": page_size})
+                "page": page, "page_size": page_size,
+                "download_limit": None if download_limit is None else str(download_limit)})
     except ERRORS as error:
         return _error(error)
 

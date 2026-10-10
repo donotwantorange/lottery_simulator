@@ -1,5 +1,5 @@
 import { useState, type FormEvent, type MouseEvent } from "react";
-import { Link, Navigate, Outlet, Route, Routes, useLocation } from "react-router-dom";
+import { createBrowserRouter, createRoutesFromElements, NavLink, Navigate, Outlet, Route, RouterProvider, useLocation } from "react-router-dom";
 import { ApiError, recordUserActivity } from "./api/client";
 import { useAuth } from "./auth/AuthProvider";
 import { Login } from "./pages/Login";
@@ -67,7 +67,7 @@ function AppShell() {
   const { user, logout } = useAuth();
   const location = useLocation();
   const [passwordOpen, setPasswordOpen] = useState(false);
-  const activePage = pageInfo[location.pathname as keyof typeof pageInfo];
+  const activePage = pageInfo[location.pathname as keyof typeof pageInfo] ?? (location.pathname.startsWith("/rules/") ? pageInfo["/rules/"] : undefined);
   function noteClick(event: MouseEvent<HTMLDivElement>) {
     if ((event.target as HTMLElement).closest("button[aria-label='退出登录']")) return;
     recordUserActivity();
@@ -77,10 +77,10 @@ function AppShell() {
       <aside className="sidebar">
         <div className="brand"><span className="brand-mark">L</span><span>抽卡模拟器</span></div>
         <nav aria-label="主导航">
-          <Link to="/experiments/new/">新建实验</Link><Link to="/pools/">角色池</Link>
-          <Link to="/rules/">规则</Link>
-          <Link to="/results/">实验结果</Link><Link to="/history/">历史记录</Link>
-          {user?.role === "admin" && <Link to="/management/">管理员</Link>}
+          <NavLink to="/experiments/new/" aria-current={location.pathname === "/experiments/new/" ? "page" : undefined}>新建实验</NavLink><NavLink to="/pools/">角色池</NavLink>
+          <NavLink to="/rules/" aria-current={location.pathname.startsWith("/rules/") ? "page" : undefined}>规则</NavLink>
+          <NavLink to="/results/">实验结果</NavLink><NavLink to="/history/">历史记录</NavLink>
+          {user?.role === "admin" && <NavLink to="/management/">管理员</NavLink>}
         </nav>
         <div className="account-card">
           <span className="avatar">{user?.username.slice(0, 1).toUpperCase()}</span>
@@ -110,9 +110,8 @@ function ManagementRoute() {
   return user?.role === "admin" ? <Management /> : <Navigate to="/" replace />;
 }
 
-export function App() {
-  return (
-    <Routes>
+const router = createBrowserRouter(createRoutesFromElements(
+    <Route>
       <Route path="/accounts/login/" element={<LoginRoute />} />
       <Route element={<ProtectedLayout />}>
         <Route element={<AppShell />}>
@@ -120,12 +119,16 @@ export function App() {
           <Route path="/experiments/new/" element={<NewExperiment />} />
           <Route path="/pools/" element={<Pools />} />
           <Route path="/rules/" element={<Rules />} />
+          <Route path="/rules/:ruleId/" element={<Rules />} />
           <Route path="/results/" element={<Results />} />
           <Route path="/history/" element={<History />} />
           <Route path="/management/" element={<ManagementRoute />} />
         </Route>
       </Route>
       <Route path="*" element={<Navigate to="/" replace />} />
-    </Routes>
-  );
+    </Route>
+));
+
+export function App() {
+  return <RouterProvider router={router} />;
 }

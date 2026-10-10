@@ -5,6 +5,7 @@ import type { ExperimentConfig, JobSummary, Page } from "../api/types";
 import { useAuth } from "../auth/AuthProvider";
 import { AccountEditor, type AccountValues, type ManagedAccount } from "../components/AccountEditor";
 import { DeleteAccountDialog } from "../components/DeleteAccountDialog";
+import { formatCount, jobStageLabel, jobStatusLabel } from "../formatters";
 
 interface ManagedJob extends JobSummary { owner_id: string; owner_name: string }
 interface JobPage<T> { items: T[]; total: number; page: number; page_size: number }
@@ -32,11 +33,17 @@ export function Management() {
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const [reload, setReload] = useState(0);
+  const [readError, setReadError] = useState("");
 
   useEffect(() => {
-    if (user?.role !== "admin") return;
+    setEditing(undefined); setDeleting(null); setResetting(""); setPassword("");
+    setConfirmConfig(null); setNotice(""); setError("");
+  }, [user?.id, sessionGeneration]);
+
+  useEffect(() => {
+    if (user?.role !== "admin") { setUsers(null); setConfigs(null); setJobs(null); return; }
     const controller = new AbortController();
-    setUsers(null); setConfigs(null); setJobs(null); setError("");
+    setUsers(null); setConfigs(null); setJobs(null); setReadError("");
     const query = (page: number) => `page=${page}&page_size=50`;
     void Promise.all([
       apiRequest<Page<ManagedAccount>>(`management/users/?${query(userPage)}`, {}, controller.signal),
@@ -45,7 +52,7 @@ export function Management() {
     ]).then(([nextUsers, nextConfigs, nextJobs]) => {
       if (controller.signal.aborted) return;
       setUsers(nextUsers); setConfigs(nextConfigs); setJobs(nextJobs);
-    }).catch((cause) => { if (!controller.signal.aborted) setError(errorMessage(cause)); });
+    }).catch((cause) => { if (!controller.signal.aborted) setReadError(errorMessage(cause)); });
     return () => controller.abort();
   }, [user?.role, user?.id, sessionGeneration, userPage, configPage, jobPage, reload]);
 
@@ -113,18 +120,19 @@ export function Management() {
       {users ? <><div className="table-wrap"><table><thead><tr><th>用户名</th><th>角色</th><th>启用</th><th>状态</th><th>操作</th></tr></thead><tbody>{users.items.map((account) => <tr key={account.id}>
         <td>{account.username}</td><td>{account.role === "admin" ? "管理员" : "普通用户"}</td><td>{account.enabled ? "是" : "否"}</td><td>{account.deleting ? "删除待重试" : account.must_change_password ? "首次登录需改密" : "正常"}</td>
         <td className="management-actions"><button disabled={busy || account.deleting} onClick={() => setEditing(account)}>编辑</button><button disabled={busy} onClick={() => { setResetting(resetting === account.id ? "" : account.id); setPassword(""); }}>重置密码</button><button disabled={busy} onClick={() => void unlock(account)}>解锁登录</button><button className="danger-button" disabled={busy || account.id === user.id} onClick={() => setDeleting(account)}>删除</button></td>
-      </tr>)}</tbody></table></div><PageButtons data={users} onPage={setUserPage} /></> : <p className="muted">正在加载账号…</p>}
+      </tr>)}</tbody></table></div><PageButtons data={users} onPage={setUserPage} /></> : !readError && <p className="muted">正在加载账号…</p>}
       {resetting && users?.items.find((item) => item.id === resetting) && <form className="management-editor" onSubmit={(event) => { event.preventDefault(); const target = users.items.find((item) => item.id === resetting); if (target) void resetPassword(target); }}>
         <h3>重置密码：{users.items.find((item) => item.id === resetting)?.username}</h3><div className="field-grid"><label>新密码（至少6字符）<input type="password" autoComplete="new-password" minLength={6} value={password} onChange={(event) => setPassword(event.target.value)} required /></label></div><div className="button-row"><button className="primary-button" disabled={busy}>确认重置</button><button type="button" onClick={() => setResetting("")}>取消</button></div>
       </form>}
+      {readError && <p className="form-error" role="alert">管理数据读取失败：{readError} <button type="button" onClick={() => setReload((value) => value + 1)}>重试读取</button></p>}
     </section>
 
     <section className="panel"><h2>实验配置管理</h2><p className="muted">展示所有用户的配置。删除需再次确认并按当前revision提交。</p>
-      {configs ? <><div className="table-wrap"><table><thead><tr><th>名称</th><th>所有者</th><th>角色池</th><th>主抽 / 轮数</th><th>操作</th></tr></thead><tbody>{configs.items.map((config) => <tr key={config.id}><td>{config.name}</td><td>{config.owner_name}</td><td>{config.pool_ref.name}</td><td>{config.parameters.draws} / {config.parameters.trials}</td><td className="management-actions">{confirmConfig?.id === config.id ? <><span>确定删除？ </span><button className="danger-button" disabled={busy} onClick={() => void deleteConfig(config)}>确认删除</button><button disabled={busy} onClick={() => setConfirmConfig(null)}>取消</button></> : <><Link className="secondary-button" to={`/experiments/new/?config=${encodeURIComponent(config.id)}`}>编辑配置</Link><button className="danger-button" disabled={busy} onClick={() => setConfirmConfig(config)}>删除</button></>}</td></tr>)}</tbody></table></div><PageButtons data={configs} onPage={setConfigPage} /></> : <p className="muted">正在加载实验配置…</p>}
+      {configs ? <><div className="table-wrap"><table><thead><tr><th>名称</th><th>所有者</th><th>角色池</th><th>每轮主抽 / 轮数</th><th>操作</th></tr></thead><tbody>{configs.items.map((config) => <tr key={config.id}><td>{config.name}</td><td>{config.owner_name}</td><td>{config.pool_ref.name}</td><td>{formatCount(config.parameters.draws)} / {formatCount(config.parameters.trials)}</td><td className="management-actions">{confirmConfig?.id === config.id ? <><span>确定删除？ </span><button className="danger-button" disabled={busy} onClick={() => void deleteConfig(config)}>确认删除</button><button disabled={busy} onClick={() => setConfirmConfig(null)}>取消</button></> : <><Link className="secondary-button" to={`/experiments/new/?config=${encodeURIComponent(config.id)}`}>编辑配置</Link><button className="danger-button" disabled={busy} onClick={() => setConfirmConfig(config)}>删除</button></>}</td></tr>)}</tbody></table></div><PageButtons data={configs} onPage={setConfigPage} /></> : !readError && <p className="muted">正在加载实验配置…</p>}
     </section>
 
     <section className="panel"><h2>任务管理</h2><p className="muted">任务列表由管理员专用接口分页返回；管理员可向活动任务发送停止请求。没有显示文件路径或跨用户任务数据给普通用户。</p>
-      {jobs ? <><div className="table-wrap"><table><thead><tr><th>接受时间</th><th>用户</th><th>角色池</th><th>抽数 / 轮数</th><th>状态</th><th>操作</th></tr></thead><tbody>{jobs.items.map((job) => <tr key={job.job_id}><td>{new Date(job.accepted_at).toLocaleString()}</td><td>{job.owner_name}</td><td>{job.pool_name_snapshot}</td><td>{job.draws} / {job.trials}</td><td>{job.status} · {job.phase}</td><td>{["queued", "running"].includes(job.status) ? <button disabled={busy} onClick={() => void cancelJob(job)}>停止任务</button> : "—"}</td></tr>)}</tbody></table></div><PageButtons data={jobs} onPage={setJobPage} /></> : <p className="muted">正在加载任务…</p>}
+      {jobs ? <><div className="table-wrap"><table><thead><tr><th>接受时间</th><th>用户</th><th>角色池</th><th>每轮主抽 / 轮数</th><th>状态</th><th>操作</th></tr></thead><tbody>{jobs.items.map((job) => <tr key={job.job_id}><td>{new Date(job.accepted_at).toLocaleString()}</td><td>{job.owner_name}</td><td>{job.pool_name_snapshot}</td><td>{formatCount(job.draws)} / {formatCount(job.trials)}</td><td>{jobStatusLabel(job.status)}{job.phase ? ` · ${jobStageLabel(job.phase)}` : ""}</td><td>{["queued", "running"].includes(job.status) ? <button disabled={busy} onClick={() => void cancelJob(job)}>停止任务</button> : "—"}</td></tr>)}</tbody></table></div><PageButtons data={jobs} onPage={setJobPage} /></> : !readError && <p className="muted">正在加载任务…</p>}
     </section>
     {notice && <p className="success-note" role="status">{notice}</p>}{error && <p className="form-error" role="alert">{error}</p>}
     {deleting && <div className="dialog-backdrop"><DeleteAccountDialog key={deleting.id} account={deleting} onClose={() => setDeleting(null)} onDeleted={() => { setDeleting(null); setNotice("账号及其个人数据已删除。"); setReload((value) => value + 1); }} /></div>}

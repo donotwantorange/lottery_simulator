@@ -14,7 +14,7 @@ from dashboard.models import SimulationEvent, SimulationRun, User
 from dashboard.trace_store import TraceReader, iter_validated_events, validate_event_row
 from lottery_simulator.control import check_cancelled
 from lottery_simulator.events import event_counts
-from lottery_simulator.formats import DATABASE_SCHEMA_VERSION, EVENT_FORMAT_VERSION, RESULT_FORMAT_VERSION, RULE_VERSION, SAMPLING_VERSION, require_version
+from lottery_simulator.formats import DATABASE_SCHEMA_VERSION, EVENT_FORMAT_VERSION, RESULT_FORMAT_VERSION, RULE_VERSION, SAMPLING_VERSION, require_readable_sampling_version, require_version
 from lottery_simulator.rules.definitions import PoolDefinition, RuleDefinition, ExperimentParameters
 from lottery_simulator.rules.runtime import compile_pool, normalize_parameters, initial_context
 
@@ -29,12 +29,15 @@ def _trace_connection(path):
     return db
 
 
-def _validate_payload(payload):
+def _validate_payload(payload, *, historical_read=False):
     if not isinstance(payload, dict):
         raise ValueError("结果必须是对象")
     require_version(payload.get("result_format_version"), RESULT_FORMAT_VERSION, "结果")
     require_version(payload.get("event_format_version"), EVENT_FORMAT_VERSION, "事件")
-    require_version(payload.get("sampling_version"), SAMPLING_VERSION, "抽样")
+    if historical_read:
+        require_readable_sampling_version(payload.get("sampling_version"))
+    else:
+        require_version(payload.get("sampling_version"), SAMPLING_VERSION, "抽样")
     if payload.get("rule_version") != RULE_VERSION:
         raise ValueError("规则版本不受支持")
     if "events" in payload or "records" in payload or not isinstance(payload.get("simulation"), dict) or not isinstance(payload.get("theoretical"), dict):
@@ -201,7 +204,7 @@ class HistoryRepository:
     @staticmethod
     def summary(run):
         result = dict(run.result_json)
-        _validate_payload(result)
+        _validate_payload(result, historical_read=True)
         require_version(run.schema_version, DATABASE_SCHEMA_VERSION, "数据库记录")
         source, rule = result["pool_source"], result["rule_source"]
         stored = {"owner_id": str(run.owner_id), "pool_id_snapshot": str(run.pool_id_snapshot),
@@ -237,7 +240,8 @@ class HistoryRepository:
         return self.summary(run) if run else None
 
     def get_trace_reader(self, run_id):
-        self.initialize()
+        if self.get_run(run_id) is None:
+            raise ValueError("Trace历史不存在")
         return TraceReader.for_history(self.path, str(run_id))
 
     def list_runs(self, filters=None, limit=50, offset=0):

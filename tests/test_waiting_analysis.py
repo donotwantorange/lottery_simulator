@@ -10,12 +10,12 @@ from lottery_simulator.waiting_analysis import waiting_time_stats
 from tests.fixtures_rules import default_parameters, default_pool, default_rule
 
 
-def _two_tier(*, high_probability=0.0, high_soft=False, high_start=1,
+def _two_tier(*, high_probability=0.0, low_probability=None, high_soft=False, high_start=1,
               high_step=0.0, low_soft=False, low_hard=False,
               big=True, threshold=3, after_obtain="disable_after_obtain"):
     rule, pool = default_rule(), default_pool()
     low, _, high = sorted(rule.rarities, key=lambda item: item.rank)
-    low = replace(low, base_probability=1.0 - high_probability,
+    low = replace(low, base_probability=1.0 - high_probability if low_probability is None else low_probability,
                   soft_enabled=low_soft, hard_enabled=low_hard)
     high = replace(high, base_probability=high_probability,
                    soft_enabled=high_soft, soft_start=high_start, soft_step=high_step,
@@ -39,6 +39,21 @@ class WaitingAnalysisTests(unittest.TestCase):
     def params(self, **kwargs):
         defaults = {"draws": 1, "trials": 1, "initial_small_pity": {}, **kwargs}
         return default_parameters(**defaults)
+
+    def test_single_near_certain_tier_hits_on_next_draw(self):
+        compiled, low, _ = _two_tier(high_probability=0.0,
+                                     low_probability=0.9999999999995, big=False)
+        compiled = compile_pool(
+            replace(compiled.rule, rarities=tuple(r for r in compiled.rule.rarities if r.id == low)),
+            replace(compiled.pool,
+                    rarity_pools=tuple(r for r in compiled.pool.rarity_pools if r.rarity_id == low),
+                    rewards=tuple(replace(reward, amounts={low: reward.amounts[low]})
+                                  for reward in compiled.pool.rewards)),
+        )
+        result = waiting_time_stats(compiled, self.params(), low)
+        self.assertEqual(result["distribution"]["kind"], "finite")
+        self.assertEqual(result["distribution"]["support"]["maximum"], 1)
+        self.assertEqual(result["mean"], {"status": "finite", "value": 1.0})
 
     def test_big_pity_at_history_two_means_one_future_draw(self):
         compiled, _, high = _two_tier()

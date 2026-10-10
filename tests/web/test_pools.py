@@ -118,7 +118,8 @@ class PoolServiceTests(TestCase):
         clear_target["rule_ref"] = {"id": str(new_rule.pk), "name": new_rule.name}
         cleared = save_pool(self.user, clear_target, pool_id=empty_source.pk,
                             expected_revision=empty_source.revision,
-                            expected_rule_revision=new_rule.revision, clear_unmapped=True)
+                            expected_rule_revision=new_rule.revision,
+                            rarity_mapping={old: None for old in ids}, clear_unmapped=True)
         self.assertTrue(all(not item.characters for item in
                             load_pool_document(cleared.config_json).rarity_pools))
         with self.assertRaises(PoolError):
@@ -251,3 +252,40 @@ class PoolAPITests(TestCase):
         conflict = self.client.post(f"/api/v1/pools/{source.pk}/copy/", data=json.dumps(stale),
                                     content_type="application/json")
         self.assertEqual(conflict.status_code, 409)
+
+    def test_invalid_rarity_mapping_returns_field_error_without_mutating_pool(self):
+        self.login_as(self.user)
+        self.client.raise_request_exception = False
+        old_id = read_config_json(DEFAULT_RULE_PATH)["rarities"][0]["id"]
+        invalid_mappings = [
+            {old_id: []}, {old_id: {}}, {old_id: True}, {old_id: 7},
+            {old_id: "not-a-rarity-uuid"}, [], False,
+        ]
+        for index, mapping in enumerate(invalid_mappings):
+            with self.subTest(mapping=mapping):
+                pool = save_pool(self.user, self.pool_doc(f"映射类型校验{index}"),
+                                 expected_rule_revision=self.rule.revision)
+                edit = self.pool_doc(f"非法映射编辑{index}")
+                edit_response = self.client.patch(
+                    f"/api/v1/pools/{pool.pk}/", data=json.dumps({
+                        **edit, "expected_revision": pool.revision,
+                        "expected_rule_revision": self.rule.revision,
+                        "rarity_mapping": mapping,
+                    }), content_type="application/json")
+                self.assertEqual(edit_response.status_code, 400, edit_response.content)
+                self.assertIn("rarity_mapping", edit_response.json()["error"]["fields"])
+
+                copy_response = self.client.post(
+                    f"/api/v1/pools/{pool.pk}/copy/", data=json.dumps({
+                        "name": f"非法映射副本{index}", "kind": Pool.PRIVATE,
+                        "expected_revision": pool.revision,
+                        "expected_source_rule_revision": self.rule.revision,
+                        "expected_rule_revision": self.rule.revision,
+                        "rarity_mapping": mapping,
+                    }), content_type="application/json")
+                self.assertEqual(copy_response.status_code, 400, copy_response.content)
+                self.assertIn("rarity_mapping", copy_response.json()["error"]["fields"])
+                pool.refresh_from_db()
+                self.assertEqual(pool.revision, 1)
+                self.assertEqual(pool.name, f"映射类型校验{index}")
+                self.assertFalse(Pool.objects.filter(name=f"非法映射副本{index}").exists())

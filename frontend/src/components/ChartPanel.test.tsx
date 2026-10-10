@@ -68,8 +68,8 @@ it("shows precise zero values and denominator in a paged table without another r
   fireEvent.click(await screen.findByText("查看数值表（51个抽次）"));
   const table = screen.getByRole("table");
   expect(within(table).getAllByRole("row")).toHaveLength(51);
-  expect(within(table).getAllByText("0 / 0.00%")).toHaveLength(50);
-  expect(within(table).getAllByText("8 / 80.00%")).toHaveLength(50);
+  expect(within(table).getAllByText("0 / 0%")).toHaveLength(50);
+  expect(within(table).getAllByText("8 / 80%")).toHaveLength(50);
   const calls = apiRequest.mock.calls.length;
   fireEvent.click(screen.getByRole("button", { name: "下一页" }));
   expect(within(table).getAllByRole("row")).toHaveLength(2);
@@ -108,4 +108,16 @@ it("keeps position and observation counts exact above the safe integer limit", a
   const table = screen.getByRole("table");
   expect(within(table).getByText("9,007,199,254,740,993")).toBeInTheDocument();
   expect(within(table).getByText("9,007,199,254,740,994")).toBeInTheDocument();
+});
+
+it("shows only applicable summary categories for direct grants", async () => {
+  const empty = { rarity: [], categories: [], characters: [], rewards: [], pity: [] };
+  apiRequest.mockResolvedValue({ specs: { rarity: null, categories: null, characters: null, rewards: null, pity: null }, rows: empty });
+  render(<ChartPanel base="runs/run-1" result={result} mode="summary" />);
+  fireEvent.change(screen.getByRole("combobox", { name: "分类" }), { target: { value: "rewards" } });
+  fireEvent.change(screen.getByRole("combobox", { name: "数据来源" }), { target: { value: "grants" } });
+  expect((screen.getByRole("combobox", { name: "分类" }) as HTMLSelectElement).value).toBe("rarity");
+  expect(screen.queryByRole("option", { name: "奖励" })).toBeNull();
+  expect(screen.queryByRole("option", { name: "保底" })).toBeNull();
+  await waitFor(() => expect(latestQuery().source).toBe("grants"));
 });

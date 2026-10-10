@@ -53,21 +53,49 @@ it("uses dynamic rarity and character IDs in Trace filters", async () => {
   ));
 });
 
-it("renders grants without draw-only data and disables source position filters", async () => {
+it("renders grants without draw-only data and hides source position filters", async () => {
   apiRequest.mockResolvedValue({ items: [grantEvent], total: "1", page: 1, page_size: 100 });
   render(<TraceTable base="runs/run-1" runId="run-1" result={result} />);
   fireEvent.change(screen.getByRole("combobox", { name: "稀有度" }), { target: { value: r6 } });
   fireEvent.change(screen.getByRole("combobox", { name: "来源" }), { target: { value: "bonus" } });
   fireEvent.change(screen.getByRole("textbox", { name: "来源抽次起" }), { target: { value: "5" } });
   fireEvent.change(screen.getByRole("combobox", { name: "事件类型" }), { target: { value: "character_grant" } });
-  expect(await screen.findByText("直接赠送角色")).toBeInTheDocument();
+  expect(await screen.findByText("角色赠送")).toBeInTheDocument();
   expect(screen.getAllByText("2")[0]).toBeInTheDocument();
   expect(screen.getAllByText("不适用").length).toBeGreaterThan(0);
-  expect(screen.getByRole("textbox", { name: "来源抽次起" })).toBeDisabled();
-  expect(screen.getByRole("combobox", { name: "来源" })).toBeDisabled();
+  expect(screen.queryByRole("textbox", { name: "来源抽次起" })).toBeNull();
+  expect(screen.queryByRole("combobox", { name: "来源" })).toBeNull();
+  expect(screen.getByText(/已清除不适用的来源及来源抽次筛选/)).toBeInTheDocument();
   await waitFor(() => expect(apiRequest).toHaveBeenLastCalledWith(
     expect.stringContaining(`event_type=character_grant&rarity_id=${r6}`), expect.anything(), expect.anything(),
   ));
   expect(apiRequest.mock.calls.at(-1)?.[0]).not.toContain("source=bonus");
   expect(apiRequest.mock.calls.at(-1)?.[0]).not.toContain("source_from=5");
+});
+
+it("keeps the main table at eight columns and opens precise draw details", async () => {
+  const tiny = { ...drawEvent, draw_result: { ...drawEvent.draw_result,
+    probabilities: { [r4]: 0.9999999999, [r6]: 0.0000000001 }, character_probability: 0.0000000001 } };
+  apiRequest.mockResolvedValue({ items: [tiny], total: "1", page: 1, page_size: 100, download_limit: "10000" });
+  render(<TraceTable base="runs/run-1" runId="run-1" result={result} />);
+  const table = await screen.findByRole("table");
+  expect(table.querySelectorAll("thead th")).toHaveLength(8);
+  fireEvent.click(screen.getByText("查看详情", { selector: "summary" }));
+  expect(screen.getAllByText(/原值 1e-10/).length).toBeGreaterThan(0);
+  expect(screen.getByText("首次赠送抽取")).toBeInTheDocument();
+  expect(screen.getByText("主池抽前状态")).toBeInTheDocument();
+});
+
+it("ignores the previous filter response after the source changes", async () => {
+  let finishOld!: (value: unknown) => void;
+  apiRequest.mockImplementation((path: string) => path.includes("source=main")
+    ? Promise.resolve({ items: [{ ...drawEvent, source: "main", draw_result: { ...drawEvent.draw_result,
+      outcome: { ...drawEvent.draw_result.outcome, character_name: "新角色" } } }], total: "1", page: 1, page_size: 100 })
+    : new Promise((resolve) => { finishOld = resolve; }));
+  render(<TraceTable base="runs/run-1" result={result} />);
+  fireEvent.change(screen.getByRole("combobox", { name: "来源" }), { target: { value: "main" } });
+  expect(await screen.findByText(/新角色/)).toBeInTheDocument();
+  finishOld({ items: [{ ...drawEvent, draw_result: { ...drawEvent.draw_result,
+    outcome: { ...drawEvent.draw_result.outcome, character_name: "旧角色" } } }], total: "1", page: 1, page_size: 100 });
+  await waitFor(() => expect(screen.queryByText(/旧角色/)).toBeNull());
 });

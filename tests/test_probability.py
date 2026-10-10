@@ -1,10 +1,28 @@
 import math
 import unittest
 
-from lottery_simulator.probability import sample_distribution
+from lottery_simulator.probability import normalize_probabilities, sample_distribution
 
 
 class SampleDistributionTest(unittest.TestCase):
+    def test_normalizes_both_tolerated_tail_directions_without_promoting_zero(self):
+        self.assertEqual(normalize_probabilities((0.5, 0.4999999999995, 0.0)),
+                         (0.5, 0.5, 0.0))
+        self.assertEqual(normalize_probabilities((0.5, 0.5000000000005, 0.0)),
+                         (0.5, 0.5, 0.0))
+        self.assertEqual(normalize_probabilities((0.25, 0.75)), (0.25, 0.75))
+        self.assertEqual(normalize_probabilities((0.5, 0.5000000000005, 1e-300)),
+                         (0.5, 0.5, 1e-300))
+
+    def test_normalizer_rejects_both_sides_outside_tolerance(self):
+        for probabilities in ((0.5, 0.499999999998), (0.5, 0.500000000002)):
+            with self.subTest(probabilities=probabilities), self.assertRaises(ValueError):
+                normalize_probabilities(probabilities)
+
+    def test_excess_tail_keeps_a_selectable_small_final_interval(self):
+        values = (("first", 0.5), ("second", 0.5000000000005), ("tiny", 1e-13))
+        self.assertEqual(sample_distribution(values, 0.99999999999995), "tiny")
+
     def test_order_and_threshold(self):
         values = ((6, 0.008), (5, 0.08), (4, 0.912))
 

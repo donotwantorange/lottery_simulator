@@ -12,7 +12,8 @@ from uuid import UUID
 from dashboard.trace_store import TraceFilter, TraceReader
 from lottery_simulator.formats import (
     DATABASE_SCHEMA_VERSION, EVENT_FORMAT_VERSION, RESULT_FORMAT_VERSION,
-    RULE_VERSION, SAMPLING_VERSION, TRACE_EXPORT_FORMAT_VERSION, require_version,
+    RULE_VERSION, TRACE_EXPORT_FORMAT_VERSION, require_readable_sampling_version,
+    require_version,
 )
 
 
@@ -21,7 +22,7 @@ def iter_jsonl(metadata, reader, filters, batch_size=1000):
         raise ValueError("metadata must be an event-free object")
     require_version(metadata.get("result_format_version"), RESULT_FORMAT_VERSION, "结果")
     require_version(metadata.get("event_format_version"), EVENT_FORMAT_VERSION, "事件")
-    require_version(metadata.get("sampling_version"), SAMPLING_VERSION, "抽样")
+    require_readable_sampling_version(metadata.get("sampling_version"))
     if metadata.get("rule_version") != RULE_VERSION:
         raise ValueError("rule version is unsupported")
     if type(batch_size) is not int or batch_size < 1:

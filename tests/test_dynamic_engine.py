@@ -201,7 +201,7 @@ class DynamicEngineTests(unittest.TestCase):
         large = simulate_draws(compiled, default_parameters(draws=1, trials=1, seed=large_seed,
                                                               trace=False, initial_small_pity={}))
         self.assertEqual(large.seed, large_seed)
-        self.assertEqual(SAMPLING_VERSION, 2)
+        self.assertEqual(SAMPLING_VERSION, 3)
         for trial in (1, 2):
             events = [event for event in result.records if event.trial_index == trial]
             self.assertEqual([event.event_index for event in events], list(range(1, len(events) + 1)))

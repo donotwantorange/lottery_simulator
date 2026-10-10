@@ -37,6 +37,7 @@ class OwnedJobTests(SimpleTestCase):
         with TemporaryDirectory(prefix="lottery-owned-jobs-") as directory:
             environment = {**os.environ, "PYTHONDONTWRITEBYTECODE": "1",
                 "LOTTERY_ALLOWED_HOSTS": "testserver,localhost,127.0.0.1",
+                "LOTTERY_ENV": "development",
                 "LOTTERY_DATA_DIR": directory, "LOTTERY_DB_PATH": directory + "/history_v6.sqlite3",
                 "LOTTERY_JOBS_DIR": directory + "/jobs", "LOTTERY_EXPORTS_DIR": directory + "/exports"}
             for arguments, stdin in ((["migrate", "--noinput", "--verbosity", "0"], None),
@@ -44,6 +45,21 @@ class OwnedJobTests(SimpleTestCase):
                 result = subprocess.run([sys.executable, str(ROOT / "manage.py"), *arguments],
                     input=stdin, text=True, cwd=ROOT, env=environment, capture_output=True)
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_oversized_seed_is_rejected_by_preview_and_submission_services(self):
+        self.scenario("""
+from dashboard.services.runs import RunError, preview_submission, submit_job, get_manager
+payload['parameters']['seed'] = '9' * 5000
+manager = get_manager()
+for operation in (lambda: preview_submission(alice, payload),
+                  lambda: submit_job(alice, payload)):
+    try: operation()
+    except RunError as error:
+        assert '随机种子最多允许4300位' in str(error), str(error)
+    else: raise AssertionError('oversized seed was accepted')
+assert not manager.states()
+assert not [path for path in manager.root.iterdir() if len(path.name) == 36]
+""")
 
     def test_unknown_state_blocks_admission_command_and_worker_cleanup(self):
         self.scenario("""

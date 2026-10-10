@@ -19,6 +19,7 @@ from dashboard.services.accounts import AccountError
 from dashboard.services.pools import _actor, load_rule_definition, pool_document, visible_pools
 from dashboard.services.rules import RuleError, validate_rule_pool_reference
 from dashboard.services.initial_conditions import require_initial_context
+from dashboard.seed_validation import parse_seed_text, validate_web_seed
 from lottery_simulator.rules.definitions import ExperimentParameters
 from lottery_simulator.config_documents import load_pool_document
 from lottery_simulator.rules.runtime import compile_pool, initial_context
@@ -116,7 +117,20 @@ def _prepare_submission(actor, payload, *, expected_auth_version=None):
     values = dict(raw)
     for key in ("draws", "trials", "initial_main_draws"):
         values[key] = decimal_integer(values[key], key, minimum=1 if key != "initial_main_draws" else 0)
-    values["seed"] = None if raw["seed"] is None else decimal_integer(raw["seed"], "seed", maximum=None)
+    if raw["seed"] is None:
+        values["seed"] = None
+    elif isinstance(raw["seed"], str):
+        try:
+            values["seed"] = parse_seed_text(raw["seed"])
+        except ValueError as error:
+            raise RunError(str(error)) from error
+    elif type(raw["seed"]) is int and abs(raw["seed"]) <= 9007199254740991:
+        try:
+            values["seed"] = validate_web_seed(raw["seed"])
+        except ValueError as error:
+            raise RunError(str(error)) from error
+    else:
+        raise RunError("随机种子必须是十进制整数字符串或安全范围内整数")
     if type(raw["trace"]) is not bool:
         raise RunError("trace必须是布尔值")
     if not isinstance(raw["initial_small_pity"], dict):

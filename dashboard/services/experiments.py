@@ -9,6 +9,9 @@ from django.db.models import Q
 from django.utils import timezone
 
 from dashboard.models import ExperimentConfig, Pool, User
+from dashboard.seed_validation import (
+    legacy_seed_limit_message, parse_seed_text, validate_web_seed,
+)
 from dashboard.services.accounts import AccountError
 from dashboard.services.pools import _actor, _pool_document, _pool_name, load_rule_definition
 from dashboard.services.rules import RuleError, validate_rule_pool_reference
@@ -147,7 +150,9 @@ def _validated_document(payload):
     }:
         raise ExperimentError("实验配置必须包含name、pool_ref、parameters和initial_context")
     try:
-        return load_experiment_document({"format_version": EXPERIMENT_FORMAT_VERSION, **payload})
+        document = load_experiment_document({"format_version": EXPERIMENT_FORMAT_VERSION, **payload})
+        validate_web_seed(document.parameters.seed)
+        return document
     except (TypeError, ValueError) as error:
         raise ExperimentError(str(error)) from error
 
@@ -197,7 +202,13 @@ def _save(actor, payload, *, config_id=None, expected_revision=None, owner_id=No
                 configs = ExperimentConfig.objects.select_related("owner").filter(pk=config_id)
                 if not actor.is_superuser:
                     configs = configs.filter(owner_id=actor.pk)
-                config = configs.first()
+                try:
+                    config = configs.first()
+                except ValueError as error:
+                    message = legacy_seed_limit_message(error)
+                    if message is None:
+                        raise
+                    raise ExperimentError(message) from error
                 if config is None:
                     raise ExperimentError("实验配置不存在或无权管理", status=404, code="not_found")
                 owner = config.owner
@@ -260,7 +271,7 @@ def delete_experiment(actor, config_id, *, expected_revision):
     try:
         with transaction.atomic():
             actor = _actor(actor, expected_auth_version=expected_actor_version)
-            configs = ExperimentConfig.objects.filter(pk=config_id)
+            configs = ExperimentConfig.objects.defer("parameters_json").filter(pk=config_id)
             if not actor.is_superuser:
                 configs = configs.filter(owner_id=actor.pk)
             config = configs.first()
@@ -295,7 +306,13 @@ def export_experiment(actor, config_id, *, expected_revision):
     configs = ExperimentConfig.objects.select_related("owner", "pool").filter(pk=config_id)
     if not actor.is_superuser:
         configs = configs.filter(owner_id=actor.pk)
-    config = configs.first()
+    try:
+        config = configs.first()
+    except ValueError as error:
+        message = legacy_seed_limit_message(error)
+        if message is None:
+            raise
+        raise ExperimentError(message) from error
     if config is None:
         raise ExperimentError("实验配置不存在或无权管理", status=404, code="not_found")
     if config.revision != expected_revision:
@@ -305,8 +322,14 @@ def export_experiment(actor, config_id, *, expected_revision):
     _actor(actor, expected_auth_version=expected_actor_version)
     document = experiment_document(config)
     seed = document["parameters"].get("seed")
-    if seed is not None:
-        document["parameters"]["seed"] = int(seed)
+    try:
+        if isinstance(seed, str):
+            seed = parse_seed_text(seed)
+        else:
+            seed = validate_web_seed(seed)
+    except ValueError as error:
+        raise ExperimentError(str(error)) from error
+    document["parameters"]["seed"] = seed
     return document
 
 
@@ -321,6 +344,10 @@ def import_preview(actor, raw_document, *, owner_id=None):
     try:
         document = load_experiment_document(raw_document)
     except (TypeError, ValueError) as error:
+        raise ExperimentError(str(error)) from error
+    try:
+        validate_web_seed(document.parameters.seed)
+    except ValueError as error:
         raise ExperimentError(str(error)) from error
     actor, expected_actor_version = _experiment_actor(actor)
     owner = _target_owner(actor, owner_id=owner_id)
@@ -388,7 +415,10 @@ def confirm_experiment_import(actor, raw_document, *, pool_id, pool_revision,
             big["misses"] = _decimal_integer(big["misses"])
         seed = parameters.get("seed")
         if isinstance(seed, str):
-            parameters["seed"] = _decimal_integer(seed, signed=True)
+            try:
+                parameters["seed"] = parse_seed_text(seed)
+            except ValueError as seed_error:
+                raise ExperimentError(str(seed_error)) from seed_error
         try:
             document = load_experiment_document(imported)
         except (TypeError, ValueError) as nested_error:

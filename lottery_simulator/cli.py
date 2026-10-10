@@ -3,6 +3,7 @@
 import argparse
 from dataclasses import replace
 import json
+from pathlib import Path
 import sqlite3
 import sys
 from time import perf_counter
@@ -11,7 +12,7 @@ from lottery_simulator.analysis import expected_simulation_results
 from lottery_simulator.config_documents import (
     DEFAULT_POOL_PATH, DEFAULT_POOL_DIRECTORY,
     DEFAULT_RULE_DIRECTORY, load_experiment_document, load_pool_document,
-    load_rule_document, parse_config_json, read_config_json,
+    RuleReferenceNotFound, load_rule_document, parse_config_json, read_config_json,
     resolve_pool_reference, resolve_rule_reference,
 )
 from lottery_simulator.events import event_counts
@@ -83,7 +84,7 @@ def _common_files(parser):
     parser.add_argument("--experiment-config", help="新版实验文件路径")
     parser.add_argument("--pool-directory", default=str(DEFAULT_POOL_DIRECTORY), help="按ID查找引用池的目录")
     parser.add_argument("--rule-directory", default=str(DEFAULT_RULE_DIRECTORY), help="按ID查找绑定规则的目录")
-    parser.add_argument("--rule-config", help="显式规则文件；必须匹配池的ID或经确认的名称")
+    parser.add_argument("--rule-config", help="显式规则文件；ID匹配直接使用，ID缺失时可确认同名文件")
     parser.add_argument("--draws", type=_integer, help="每轮主抽数")
     parser.add_argument("--trials", type=_integer, help="实验轮数")
     parser.add_argument("--seed", type=_integer, help="任意精度整数随机种子")
@@ -124,10 +125,13 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _confirm_resource(kind, resource, stdin, stderr):
+def _confirm_resource(kind, resource, stdin, stderr, path=None):
     if not stdin.isatty():
         return False
-    print(f"ID未匹配。候选{kind}：{resource.name}（ID：{resource.id}）", file=stderr)
+    description = f"候选{kind}：{resource.name}（ID：{resource.id}）"
+    if path is not None:
+        description += f"\n文件：{path}"
+    print(f"ID未匹配。{description}", file=stderr)
     try:
         print("确认使用此名称候选？输入y确认：", end="", file=stderr, flush=True)
         answer = stdin.readline().strip().lower()
@@ -169,8 +173,16 @@ def _load_rule(pool, args, stdin, stderr):
     if args.rule_config:
         rule = load_rule_document(read_config_json(args.rule_config))
         if rule.id != reference["id"]:
-            candidate = resolve_rule_reference(reference, args.rule_directory,
-                confirm=lambda found: _confirm_resource("规则", found, stdin, stderr))
+            try:
+                candidate = resolve_rule_reference(reference, args.rule_directory,
+                                                   name_fallback=False)
+            except RuleReferenceNotFound:
+                if rule.name != reference["name"]:
+                    raise ValueError("规则ID不存在且显式规则名称与池引用不符") from None
+                if not _confirm_resource("规则", rule, stdin, stderr,
+                                         str(Path(args.rule_config).resolve())):
+                    raise ValueError("规则ID不存在；显式同名规则未获交互确认") from None
+                candidate = rule
             if candidate.id != rule.id:
                 raise ValueError("显式规则文件与池引用不匹配，拒绝静默替换")
         return rule, replace(pool, rule_ref={"id": rule.id, "name": rule.name})

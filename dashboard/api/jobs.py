@@ -6,6 +6,7 @@ from django.views.decorators.http import require_GET, require_POST
 
 from dashboard.api.errors import APIError, error_response
 from dashboard.api.experiments import _data_response
+from dashboard.limits import TraceLimits
 from dashboard.api.pools import _actor_or_error, _error_response, _json_body, _page
 from dashboard.services.accounts import AccountError
 from dashboard.jobs import JobStateUnavailable
@@ -122,8 +123,10 @@ def trace(request, job_id):
         filters = _trace_filter(request)
         items = reader.query_events(filters, limit=page_size, offset=start)
         total = reader.count_events(filters)
+        download_limit = TraceLimits.for_actor(actor).max_download_records
         return _data_response({"items": safe_json(items), "total": str(total),
-                               "page": page, "page_size": page_size})
+                               "page": page, "page_size": page_size,
+                               "download_limit": None if download_limit is None else str(download_limit)})
     except ERRORS as error:
         return _error(error)
 

@@ -41,7 +41,7 @@ it.each([
   expect(retry).toBeDefined();
   await act(async () => { retry!(); await Promise.resolve(); await Promise.resolve(); });
   expect(screen.queryByRole("alert")).toBeNull();
-  expect(screen.getByText(/状态：running/)).toBeInTheDocument();
+  expect(screen.getByText(/状态：运行中/)).toBeInTheDocument();
 });
 
 it("preserves a cancellation POST error when status polling later succeeds", async () => {
@@ -73,7 +73,7 @@ it("keeps the last valid task visible during a 503 and clears the polling error 
     ? Promise.resolve({ items: [], total: 0, page: 1, page_size: 50 })
     : ++polls === 2 ? Promise.reject(new MockApiError(503, "状态暂不可用")) : Promise.resolve(state));
   render(<MemoryRouter initialEntries={["/results/?job=job-1"]}><Results /></MemoryRouter>);
-  await screen.findByText("总进度：4 / 10");
+  await screen.findByText(/模拟事件进度：4 \/ 10 个事件/);
   const retryPoll = async () => {
     const index = timers.mock.calls.reduce((last, [, delay], current) => delay === 2_000 ? current : last, -1);
     expect(index).toBeGreaterThanOrEqual(0);
@@ -83,10 +83,10 @@ it("keeps the last valid task visible during a 503 and clears the polling error 
   };
   await retryPoll();
   expect(screen.getByRole("alert")).toHaveTextContent("状态暂不可用");
-  expect(screen.getByText("总进度：4 / 10")).toBeInTheDocument();
+  expect(screen.getByText(/模拟事件进度：4 \/ 10 个事件/)).toBeInTheDocument();
   await retryPoll();
   expect(screen.queryByRole("alert")).toBeNull();
-  expect(screen.getByText("总进度：4 / 10")).toBeInTheDocument();
+  expect(screen.getByText(/模拟事件进度：4 \/ 10 个事件/)).toBeInTheDocument();
 });
 
 it("ignores an old task response after switching the selected job", async () => {
@@ -99,10 +99,10 @@ it("ignores an old task response after switching the selected job", async () => 
   render(<MemoryRouter initialEntries={["/results/?job=old-job"]}><Results /></MemoryRouter>);
   await screen.findByRole("option", { name: /new-job/ });
   fireEvent.change(screen.getByLabelText("本人最近任务"), { target: { value: "new-job" } });
-  expect(await screen.findByText("状态：cancelled")).toBeInTheDocument();
+  expect(await screen.findByText("状态：已取消")).toBeInTheDocument();
   await act(async () => { finishOld(oldJob); await Promise.resolve(); });
-  expect(screen.getByText("状态：cancelled")).toBeInTheDocument();
-  expect(screen.queryByText("状态：running")).toBeNull();
+  expect(screen.getByText("状态：已取消")).toBeInTheDocument();
+  expect(screen.queryByText("状态：运行中")).toBeNull();
 });
 
 it("clears the selected task and result when the job selection is emptied", async () => {
@@ -121,7 +121,7 @@ it("clears the selected task and result when the job selection is emptied", asyn
   expect(await screen.findByText(/规则：旧结果规则/)).toBeInTheDocument();
   fireEvent.change(screen.getByLabelText("本人最近任务"), { target: { value: "" } });
   expect(await screen.findByText(/请选择本人任务/)).toBeInTheDocument();
-  expect(screen.queryByText(/状态：completed/)).toBeNull();
+  expect(screen.queryByText(/状态：已完成/)).toBeNull();
   expect(screen.queryByText(/规则：旧结果规则/)).toBeNull();
 });
 
@@ -177,12 +177,12 @@ it("refreshes the selected task status in the recent-task list", async () => {
       pool_name_snapshot: "测试池", rule_name_snapshot: "规则", run_id: null }], total: 1, page: 1, page_size: 50 })
     : path === "jobs/job-1/" ? Promise.resolve(job) : path === "jobs/job-1/result/" ? Promise.reject(new Error("结果读取失败")) : Promise.resolve(result));
   render(<MemoryRouter initialEntries={["/results/?job=job-1"]}><Results /></MemoryRouter>);
-  await waitFor(() => expect((screen.getByLabelText("本人最近任务") as HTMLSelectElement).selectedOptions[0]).toHaveTextContent("completed"));
-  expect(screen.getByText(/状态：completed/)).toBeInTheDocument();
+  await waitFor(() => expect((screen.getByLabelText("本人最近任务") as HTMLSelectElement).selectedOptions[0]).toHaveTextContent("已完成"));
+  expect(screen.getByText(/状态：已完成/)).toBeInTheDocument();
   expect(await screen.findByRole("alert")).toHaveTextContent("结果读取失败");
 });
 
-it("keeps a huge seed exact and labels zero-theory relative error unavailable", () => {
+it("keeps a huge seed exact and labels zero-theory relative error not applicable", () => {
   const result = {
     parameters: { draws: "9007199254740993", trials: "1", seed: "12345678901234567890", trace: false,
       initial_main_draws: "0", initial_small_pity: {}, initial_big_pity: { target_obtained: false, misses: "0" } },
@@ -196,6 +196,53 @@ it("keeps a huge seed exact and labels zero-theory relative error unavailable", 
   render(<ResultView base="jobs/job-1" result={result} />);
   expect(screen.getByText(/随机种子 12345678901234567890/)).toBeInTheDocument();
   expect(screen.getAllByText("9,007,199,254,740,993")[0]).toBeInTheDocument();
-  expect(screen.getByText("不可用")).toBeInTheDocument();
+  expect(screen.getByText("不适用")).toBeInTheDocument();
   expect(screen.getByText(/未启用过程明细/)).toBeInTheDocument();
+});
+
+it("keeps a running job active after its simulation event count reaches the total", async () => {
+  const job = { job_id: "job-1", accepted_at: "2026-09-01T00:00:00Z", status: "running", phase: "theory",
+    completed_units: "12", total_units: "12", phase_completed: "2", phase_total: "10",
+    draws: "10", trials: "1", trace: false, pool_name_snapshot: "测试池", rule_name_snapshot: "规则", run_id: null,
+    cancel_requested: false, error: null, cleanup_error: null, persistence_error: null };
+  apiRequest.mockImplementation((path: string) => path.startsWith("jobs/mine/")
+    ? Promise.resolve({ items: [job], total: 1, page: 1, page_size: 50 }) : Promise.resolve(job));
+  render(<MemoryRouter initialEntries={["/results/?job=job-1"]}><Results /></MemoryRouter>);
+  expect(await screen.findByText(/状态：运行中 · 正在计算理论结果/)).toBeInTheDocument();
+  expect(screen.getByText(/当前阶段 2 \/ 10 个计算步/)).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "停止任务" })).toBeEnabled();
+  expect(screen.queryByText(/状态：已完成/)).toBeNull();
+});
+
+it("does not show Trace filters when the run did not save detail", () => {
+  const result = { parameters: { draws: "1", trials: "1", initial_main_draws: "0" },
+    counts: { main_draws: "1", bonus_draws: "0", total_draws: "1", grant_triggers: "0", granted_characters: "0" },
+    rule_snapshot: { name: "规则", rarities: [] }, pool_snapshot: { name: "池", rarity_labels: {} },
+    simulation: { acquisitions: { character_count: 0, character_counts: {} } }, theoretical: { acquisitions: { character_count: 0 } },
+    trace_enabled: false, event_count: "0", seed: "1", duration_seconds: 0 } as unknown as RunResult;
+  render(<ResultView base="jobs/job-1" result={result} />);
+  fireEvent.click(screen.getByRole("tab", { name: "过程明细" }));
+  expect(screen.getByText(/本次运行未保存过程明细/)).toBeInTheDocument();
+  expect(screen.queryByRole("combobox", { name: "事件类型" })).toBeNull();
+});
+
+it("distinguishes missing acquisition statistics from real zero values", () => {
+  const result = (actual: number | null, expected: number | null, kinds: Record<string, number> | null) => ({
+    parameters: { draws: "1", trials: "1", initial_main_draws: "0" },
+    counts: { main_draws: "1", bonus_draws: "0", total_draws: "1", grant_triggers: "0", granted_characters: "0" },
+    rule_snapshot: { name: "规则", rarities: [] }, pool_snapshot: { name: "池", rarity_labels: {} },
+    simulation: { acquisitions: { character_count: actual, character_counts: kinds } },
+    theoretical: { acquisitions: { character_count: expected } },
+    trace_enabled: false, event_count: "0", seed: "1", duration_seconds: 0,
+  }) as unknown as RunResult;
+  const { rerender } = render(<ResultView base="jobs/job-1" result={result(null, 0, null)} />);
+
+  expect(screen.getByText("每轮角色获得数量均值").parentElement).toHaveTextContent("数据缺失");
+  expect(screen.getByText("获得的不同角色种类数").parentElement).toHaveTextContent("数据缺失");
+  expect(screen.getByText("理论每轮角色获得数量期望").parentElement).toHaveTextContent("0");
+  expect(screen.getByText("角色获得均值相对误差").parentElement).toHaveTextContent("不适用");
+
+  rerender(<ResultView base="jobs/job-1" result={result(0, 0, {})} />);
+  expect(screen.getByText("每轮角色获得数量均值").parentElement).toHaveTextContent("0");
+  expect(screen.getByText("获得的不同角色种类数").parentElement).toHaveTextContent("0");
 });

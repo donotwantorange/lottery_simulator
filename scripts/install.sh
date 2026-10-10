@@ -8,10 +8,10 @@ upgrade_paused=0
 upgrade_helper_cid=''
 
 if [[ ${1:-} == --help ]]; then
-  printf '用法：bash scripts/install.sh [--install|--upgrade|--restore]\n无参数：选择安装、卸载、运维（启停/状态/日志/备份/定时备份）或更新。\n--install：直接首次安装，拒绝已有数据。\n--upgrade：直接升级已下载版本，不自动git pull。菜单更新可先拉取Git新版。\n--restore：重装保留的标准v6数据卷，不初始化账号；拒绝v5与活动/损坏数据。\nv5仅迁账号及登录限制；旧业务保留在旧库。卸载可保留数据或二次确认永久删除。\n失败不自动续跑/回滚，备份timer在业务及HTTPS验收后恢复。\n详见 docs/deployment.md；不要使用 curl | bash。\n'
+  printf '用法：bash scripts/install.sh [--install|--upgrade|--restore|--legacy-reinstall]\n无参数：选择安装、卸载、运维或更新。\n--install：首次安装，拒绝已有数据。\n--upgrade：仅更新标准v6源库并保留数据。\n--restore：重装保留的标准v6卷。\n--legacy-reinstall：核对旧Compose资源，双确认永久删除后全新安装；不能恢复原账号。\n菜单更新可选择Git快进或已下载完整版本。失败不自动重试、清理或恢复。\n详见 docs/deployment.md；不要使用 curl | bash。\n'
   exit 0
 fi
-case ${1:-} in --upgrade) mode=upgrade; shift;; --install) mode=install; shift;; --restore) mode=restore; shift;; esac
+case ${1:-} in --upgrade) mode=upgrade; shift;; --install) mode=install; shift;; --restore) mode=restore; shift;; --legacy-reinstall) mode=legacy-reinstall; shift;; esac
 if (( $# )); then printf '不支持的参数；使用 --help 查看说明。\n' >&2; exit 1; fi
 project_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
 cd "$project_dir"
@@ -22,7 +22,7 @@ if [[ $mode == menu ]]; then
   management_menu
   exit
 fi
-for file in docker-compose.yml Dockerfile Caddyfile configs/pools/default.json configs/rules/zmd.json frontend/package-lock.json; do
+for file in docker-compose.yml Dockerfile Caddyfile manage.py configs/pools/default.json configs/rules/zmd.json frontend/package.json frontend/package-lock.json scripts/backup_db.py deploy/lottery-backup.service deploy/lottery-backup.timer; do
   [[ -f $file ]] || { printf '缺少项目文件：%s；请下载完整 master 项目。\n' "$file" >&2; exit 1; }
 done
 if (( EUID == 0 )); then admin=(); else admin=(sudo); sudo -v; fi
@@ -49,6 +49,8 @@ report_failure() {
     fi
     printf '\n升级停止：%s失败（第%s行）。备份：%s。\n' "$stage" "$line" "$backup_dir" >&2
     printf '保留原卷、旧库及错误现场；入口/服务可能已停止。不会自动恢复已暂停的timer或服务；核对状态后按docs/deployment.md手动恢复，不自动覆盖或重试。\n' >&2
+  elif [[ $mode == legacy-reinstall ]]; then
+    printf '\n永久重装停止：%s失败（第%s行）。已删除：%s。不会再次清理、自动回滚或恢复旧业务。\n' "$stage" "$line" "${legacy_deleted:-无}" >&2
   elif [[ $mode == restore ]]; then
     printf '\n重装停止：%s失败（第%s行）；原卷与.env保留，不自动初始化或重试。\n' "$stage" "$line" >&2
   else
@@ -72,14 +74,21 @@ stop_existing_install() {
   exit 1
 }
 
-if [[ $mode == upgrade ]]; then
-  for file in scripts/upgrade.sh scripts/upgrade_probe.py; do
+if [[ $mode == legacy-reinstall ]]; then
+  for file in scripts/manage.sh scripts/deployment_checks.sh scripts/deployment_resources.py; do
+    [[ -f $file ]] || { printf '缺少重装文件：%s。\n' "$file" >&2; exit 1; }
+  done
+  source scripts/manage.sh
+  management_legacy_run reinstall
+  exit
+elif [[ $mode == upgrade ]]; then
+  for file in scripts/upgrade.sh scripts/upgrade_probe.py scripts/deployment_checks.sh; do
     [[ -f $file ]] || { printf '缺少升级文件：%s；请获取完整新版。\n' "$file" >&2; exit 1; }
   done
   source scripts/upgrade.sh
   prepare_upgrade
 elif [[ $mode == restore ]]; then
-  for file in scripts/manage.sh scripts/upgrade_probe.py; do
+  for file in scripts/manage.sh scripts/upgrade_probe.py scripts/deployment_checks.sh; do
     [[ -f $file ]] || { printf '缺少重装文件：%s。\n' "$file" >&2; exit 1; }
   done
   source scripts/manage.sh
@@ -214,7 +223,17 @@ if len(domain) > 253 or '.' not in domain or not all(re.fullmatch(r'[A-Za-z0-9](
     raise SystemExit('域名格式无效；国际化域名请使用 ASCII/Punycode 格式')
 PY
   app_secret=$(openssl rand -hex 48)
-  (umask 077; set -o noclobber; printf 'DOMAIN=%s\nSECRET_KEY=%s\n' "$domain" "$app_secret" > .env)
+  if [[ -n ${COMPOSE_PROJECT_NAME:-} ]]; then
+    [[ $COMPOSE_PROJECT_NAME =~ ^[a-z0-9][a-z0-9_-]*$ ]] || { printf 'Compose项目名异常，停止安装。\n' >&2; exit 1; }
+  fi
+  (umask 077; set -o noclobber; {
+    printf 'DOMAIN=%s\nSECRET_KEY=%s\n' "$domain" "$app_secret"
+    [[ -z ${COMPOSE_PROJECT_NAME:-} ]] || printf 'COMPOSE_PROJECT_NAME=%s\n' "$COMPOSE_PROJECT_NAME"
+    for key in LOTTERY_PROXY_SUBNET LOTTERY_PROXY_DYNAMIC_RANGE LOTTERY_PROXY_GATEWAY LOTTERY_CADDY_IP; do
+      value=${!key-}
+      [[ -z $value ]] || printf '%s=%s\n' "$key" "$value"
+    done
+  } > .env)
   unset app_secret
 fi
 fi
@@ -231,8 +250,10 @@ docker_cmd run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp \
 [[ -f frontend/dist/index.html ]]
 
 stage='构建后端'
-docker_cmd compose build app
-docker_cmd compose pull caddy
+if [[ $mode != upgrade ]]; then
+  docker_cmd compose build app
+  docker_cmd compose pull caddy
+fi
 if [[ $mode == upgrade ]]; then
   upgrade_database
 elif [[ $mode == restore ]]; then

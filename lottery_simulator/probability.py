@@ -19,6 +19,33 @@ def _finite_number(value: object, label: str) -> float:
     return converted
 
 
+def normalize_probabilities(probabilities: Sequence[float]) -> tuple[float, ...]:
+    """Validate and close a tolerated rounding tail on an existing positive entry."""
+    values = [_finite_number(value, "概率") for value in probabilities]
+    if not values:
+        raise ValueError("分布不能为空")
+    if any(not 0.0 <= value <= 1.0 for value in values):
+        raise ValueError("概率必须在[0, 1]内")
+    total = math.fsum(values)
+    if abs(total - 1.0) > 1e-12:
+        raise ValueError("概率总和必须为1")
+    if total == 1.0:
+        return tuple(values)
+
+    # Prefer the last positive option, matching the old sampling tail. If it
+    # cannot absorb an excess, move left without making a tiny option negative.
+    for index in range(len(values) - 1, -1, -1):
+        if values[index] <= 0.0:
+            continue
+        adjusted = 1.0 - math.fsum(value for offset, value in enumerate(values)
+                                   if offset != index)
+        if adjusted > 0.0 and adjusted <= 1.0:
+            values[index] = adjusted
+            if math.fsum(values) == 1.0:
+                return tuple(values)
+    raise ValueError("概率尾差无法归一化")
+
+
 def sample_distribution(
     distribution: Sequence[tuple[T, float]], roll: float,
 ) -> T:
@@ -46,9 +73,8 @@ def sample_distribution(
             raise ValueError("概率必须在[0, 1]内")
         validated.append((item, probability))
 
-    probability_sum = math.fsum(probability for _, probability in validated)
-    if abs(probability_sum - 1.0) > 1e-12:
-        raise ValueError("概率总和必须为1")
+    normalized = normalize_probabilities([probability for _, probability in validated])
+    validated = [(item, probability) for (item, _), probability in zip(validated, normalized)]
 
     converted_roll = _finite_number(roll, "roll")
     if not 0.0 <= converted_roll < 1.0:
