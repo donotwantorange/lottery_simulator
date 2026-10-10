@@ -3,7 +3,7 @@
 > 执行者：逐任务实施时使用 `superpowers:executing-plans`；若用户选择子代理执行，则使用 `superpowers:subagent-driven-development`。本计划不默认启动子代理，不授权提交、推送或操作真实服务器。按项目规范以连贯功能拆任务，不逐函数安排测试和提交。
 
 - 编写日期：2026-10-08。
-- 状态：任务1—11代码与本地交付收尾完成；真实Compose/systemd/完整恢复和原生200%缩放等未验范围保留，尚未提交、合并、推送或部署。证据见[实施记录](2026-10-07-current-update-legacy-reinstall.md)。
+- 状态：任务1—11代码与本地交付收尾完成，已合并到本地master（合并提交`afbc891`）；真实Compose/systemd/完整恢复和原生200%缩放等未验范围保留，尚未推送或部署。证据见[实施记录](2026-10-07-current-update-legacy-reinstall.md)。
 - 依据：[设计](2026-10-07-current-update-legacy-reinstall-design.md)，当前本地基线为 `9e6e21a`；实施前只核对工作区是否发生相关变化，不反复进行SHA检查。
 - 目标：完成安全更新/永久重装、R1—R7修复及U1—U8网页改进，分别交付本地功能、隔离部署演练和经授权的服务器验收结果。
 - 架构与技术：沿用Python计算核心、Django服务与SQLite v6、React/TypeScript、现有Bash/Compose部署；不新增业务数据库格式、UI框架或通用表单引擎，不升级依赖。

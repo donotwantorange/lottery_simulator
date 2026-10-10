@@ -16,7 +16,7 @@
 
 | 日期／主题 | 当前状态 | 设计 | 计划 | 实施／修改记录 | Git状态 |
 |---|---|---|---|---|---|
-| 2026-10-07 部署安全、系统修复与网页易用性改进 | 2026-10-09任务1—11代码与本地交付完成；真实Compose/systemd/完整恢复/公网HTTPS及原生200%缩放未验 | [设计](2026-10-07-current-update-legacy-reinstall-design.md) | [计划](2026-10-07-current-update-legacy-reinstall-plan.md) | [实施记录](2026-10-07-current-update-legacy-reinstall.md) | 基于本地master `9e6e21a`，实现位于`feature/reliability-ui-improvements`工作树，尚未提交、合并、推送或部署；未查询远端状态 |
+| 2026-10-07 部署安全、系统修复与网页易用性改进 | 2026-10-10任务1—11已合并并完成最小本地验收；真实Compose/systemd/完整恢复/公网HTTPS及原生200%缩放未验 | [设计](2026-10-07-current-update-legacy-reinstall-design.md) | [计划](2026-10-07-current-update-legacy-reinstall-plan.md) | [实施记录](2026-10-07-current-update-legacy-reinstall.md) | 本地master合并提交 `afbc891`；未推送或部署，真实环境待验 |
 | 2026-10-06 统一服务器管理菜单 | 已实现，隔离63项通过；服务器整机流程未验 | [设计](2026-10-06-server-management-design.md) | [计划](2026-10-06-server-management-plan.md) | [实施记录](2026-10-06-server-management.md) | 基于master `2612b08`，实现、测试及菜单优先文档随本提交纳入；未实际部署 |
 | 2026-10-06 升级旧镜像可用性预检 | 隔离46项通过；服务器镜像恢复及升级未验 | — | — | [修改记录](2026-10-06-upgrade-image-preflight.md) | 随统一管理菜单提交纳入；未实际部署 |
 | 2026-10-06 Compose交互式升级 | 已实现，提交前45项复核通过；整机服务器升级与正式HTTPS未实测 | [设计](2026-10-06-compose-upgrade-design.md) | [计划](2026-10-06-compose-upgrade-plan.md) | [实施记录](2026-10-06-compose-upgrade.md) | 基于master `7ea72c9`，实现与文档随本提交纳入；未推送或实际部署 |
