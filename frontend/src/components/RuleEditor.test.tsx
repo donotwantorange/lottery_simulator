@@ -18,9 +18,9 @@ describe("RuleEditor", () => {
     renderRuleEditor({ value: rule, onChange: vi.fn(), structureLocked: true });
 
     expect(screen.getByText(/复制为新规则/)).toBeTruthy();
-    expect(screen.getByRole("button", { name: "添加稀有度" })).toBeDisabled();
-    expect(screen.getByRole("button", { name: "四星下移" })).toBeDisabled();
-    expect(screen.getAllByRole("button", { name: "删除稀有度" }).every((button) => (button as HTMLButtonElement).disabled)).toBe(true);
+    expect(screen.queryByRole("button", { name: "添加稀有度" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "四星下移" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "删除稀有度" })).toBeNull();
     expect(screen.getAllByText(/百分点/).length).toBeGreaterThan(0);
     expect(screen.getByText(new RegExp(`当前${example.name}基础概率${(example.base_probability * 100).toFixed(3)}%，每抽增加${(example.soft_step * 100).toFixed(3)}个百分点`))).toBeInTheDocument();
     expect(screen.getByText(new RegExp(`起点为第${example.soft_start}抽`))).toBeInTheDocument();
@@ -44,7 +44,7 @@ describe("RuleEditor", () => {
 
     fireEvent.change(screen.getByRole("textbox", { name: "六星基础概率（百分比）" }), { target: { value: "0x10" } });
     fireEvent.blur(screen.getByRole("textbox", { name: "六星基础概率（百分比）" }));
-    expect(screen.getByRole("alert")).toHaveTextContent("请输入");
+    expect(screen.getAllByRole("alert").some((item) => item.textContent?.includes("请输入"))).toBe(true);
     expect(onValidityChange).toHaveBeenLastCalledWith(false);
   });
 
@@ -72,14 +72,16 @@ describe("RuleEditor", () => {
     editor.current = renderRuleEditor({ value: current, onChange, structureLocked: false });
     const firstId = current.rarities[0].id;
     fireEvent.click(screen.getByRole("button", { name: "四星下移" }));
-    expect(screen.getByRole("textbox", { name: /稀有度名称 最低稀有度/ })).toHaveValue("五星");
-    expect(screen.getByRole("textbox", { name: /稀有度名称 最高稀有度/ })).toHaveValue("六星");
+    expect(screen.getAllByRole("textbox", { name: "稀有度名称" })[0]).toHaveValue("五星");
+    expect(screen.getAllByRole("textbox", { name: "稀有度名称" })[2]).toHaveValue("六星");
     fireEvent.click(screen.getByRole("button", { name: "四星下移" }));
-    expect(screen.getByRole("textbox", { name: /稀有度名称 最高稀有度/ })).toHaveValue("四星");
+    expect(screen.getAllByRole("textbox", { name: "稀有度名称" })[2]).toHaveValue("四星");
     expect(current.bonus.rarities).toHaveLength(0);
+    vi.spyOn(window, "confirm").mockReturnValueOnce(true);
     fireEvent.click(screen.getByRole("checkbox", { name: "启用首次赠送" }));
     expect(current.rarities.findIndex((item) => item.id === firstId)).toBe(2);
     expect(current.bonus.rarities.map((item) => [item.id, item.rank])).toEqual(current.rarities.map((item) => [item.id, item.rank]));
+    vi.restoreAllMocks();
   });
 
   it("updates the big-pity threshold example and both obtain modes", () => {
@@ -102,8 +104,8 @@ describe("RuleEditor", () => {
     rule.bonus.enabled = false;
     rule.grant.enabled = false;
     renderRuleEditor({ value: rule, onChange: vi.fn(), structureLocked: false });
-    expect(screen.getByRole("textbox", { name: "四星软保底起点" })).toBeDisabled();
-    expect(screen.getByRole("textbox", { name: "触发主抽位置" })).toBeDisabled();
+    expect(screen.queryByRole("textbox", { name: "四星软保底起点" })).toBeNull();
+    expect(screen.queryByRole("textbox", { name: "触发主抽位置" })).toBeNull();
     expect(screen.getByText(/周期直接赠送已关闭/)).toBeTruthy();
 
     cleanup();
@@ -111,7 +113,7 @@ describe("RuleEditor", () => {
     rule.bonus.rarities.find((item) => item.name === "六星")!.hard_enabled = true;
     renderRuleEditor({ value: rule, onChange: vi.fn(), structureLocked: false });
     expect(screen.getByRole("textbox", { name: "六星赠送池硬保底抽数" })).toBeEnabled();
-    expect(screen.getByRole("textbox", { name: "六星赠送池每抽增幅（百分点）" })).toBeDisabled();
+    expect(screen.queryByRole("textbox", { name: "六星赠送池每抽增幅（百分点）" })).toBeNull();
   });
 
   it("blocks saving counts that cannot be represented as safe integers", () => {
@@ -121,5 +123,47 @@ describe("RuleEditor", () => {
     renderRuleEditor({ value: rule, onChange: vi.fn(), structureLocked: false, onValidityChange });
     expect(screen.getByText(/超出安全整数范围/)).toBeTruthy();
     expect(onValidityChange).toHaveBeenLastCalledWith(false);
+  });
+
+  it("keeps invalid soft-pity text available after closing and reopening its section", () => {
+    const rule = makeRuleDocument();
+    let current = rule;
+    const editor = { current: null as ReturnType<typeof renderRuleEditor> | null };
+    const onChange = (next: RuleDocument) => {
+      current = next;
+      editor.current?.rerender(<RuleEditor value={current} onChange={onChange} structureLocked={false} />);
+    };
+    editor.current = renderRuleEditor({ value: current, onChange, structureLocked: false });
+    const label = `${rule.rarities[2].name}软保底起点`;
+    fireEvent.change(screen.getByRole("textbox", { name: label }), { target: { value: "oops" } });
+    fireEvent.blur(screen.getByRole("textbox", { name: label }));
+    fireEvent.click(screen.getAllByRole("checkbox", { name: "启用软保底" })[2]);
+    expect(screen.queryByRole("textbox", { name: label })).toBeNull();
+    expect(screen.getByText(/有未完成的参数修改/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /展开修正/ }));
+    expect(screen.getByRole("textbox", { name: label })).toHaveValue("oops");
+  });
+
+  it("lets users correct or explicitly discard invalid text after closing a parent mechanism", () => {
+    const rule = makeRuleDocument();
+    let current = rule;
+    const editor = { current: null as ReturnType<typeof renderRuleEditor> | null };
+    const onChange = (next: RuleDocument) => {
+      current = next;
+      editor.current?.rerender(<RuleEditor value={current} onChange={onChange} structureLocked={false} />);
+    };
+    editor.current = renderRuleEditor({ value: current, onChange, structureLocked: false });
+    fireEvent.change(screen.getByRole("textbox", { name: "触发主抽位置" }), { target: { value: "bad" } });
+    fireEvent.blur(screen.getByRole("textbox", { name: "触发主抽位置" }));
+    fireEvent.click(screen.getByRole("checkbox", { name: "启用首次赠送" }));
+    expect(screen.queryByRole("textbox", { name: "触发主抽位置" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "展开修正" }));
+    const pending = screen.getByRole("textbox", { name: "触发主抽位置" });
+    expect(pending).toBeEnabled();
+    expect(pending).toHaveValue("bad");
+    fireEvent.change(pending, { target: { value: "35" } });
+    fireEvent.blur(pending);
+    expect(current.bonus.enabled).toBe(false);
+    expect(current.bonus.at_main_draw).toBe(35);
   });
 });

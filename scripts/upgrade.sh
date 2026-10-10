@@ -1,4 +1,5 @@
 # Sourced by install.sh --upgrade; no package installation or automatic Git pull.
+source scripts/deployment_checks.sh
 prepare_upgrade() {
   stage='核对已有部署'
   for tool in docker python3 ip tar systemctl timeout; do
@@ -62,6 +63,7 @@ assert re.fullmatch(r"sha256:[a-f0-9]{64}",app["Image"]), "无法确定旧镜像
 print(version, app["Image"])
 ' "$project_name" "$project_dir")
   read -r source_version old_image <<< "$metadata"
+  [[ $source_version == 6 ]] || { printf '普通更新仅支持标准v6源库；v5请使用明确的旧版永久卸载重装路径，原数据保持不变。\n' >&2; exit 1; }
   # Never down an unexpected service or an orphan from the same project.
   services=$(docker_cmd ps -a --filter "label=com.docker.compose.project=$project_name" --format '{{.ID}}')
   for container in $services; do
@@ -75,25 +77,43 @@ print(version, app["Image"])
   fi
   printf '升级目录：%s\nCompose项目：%s\n当前数据：v%s\n' "$project_dir" "$project_name" "$source_version"
   printf '请安排维护窗口，停止用户提交并等待任务结束。脚本会备份、停止服务、重建本项目网络，保留原卷/.env/证书。\n'
-  if [[ $source_version == 5 ]]; then
-    printf 'v5升级仅导入账号和登录限制；旧池、配置、历史、Trace和会话不迁入，原v5材料继续保留。\n'
-    read -r -p '接受上述迁移范围请输入 ACCOUNTS：' answer
-    [[ $answer == ACCOUNTS ]] || { printf '已取消升级。\n'; exit 1; }
-  fi
+  stage='预检目标镜像与依赖'
+  docker_cmd pull node:22-bookworm-slim
+  docker_cmd compose pull caddy
+  docker_cmd compose build app
+  target_versions=$(python3 -c '
+import ast, pathlib, sys
+tree = ast.parse(pathlib.Path(sys.argv[1]).read_text())
+names = {"JOB_FORMAT_VERSION", "SAMPLING_VERSION"}
+found = {}
+for node in tree.body:
+    if isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
+        name = node.targets[0].id
+        if name in names:
+            if name in found or not isinstance(node.value, ast.Constant) or type(node.value.value) is not int or node.value.value < 1:
+                raise ValueError("目标源码任务版本无效")
+            found[name] = node.value.value
+if set(found) != names:
+    raise ValueError("目标源码任务版本缺失")
+print(found["JOB_FORMAT_VERSION"], found["SAMPLING_VERSION"])
+' lottery_simulator/formats.py) || { printf '无法从目标源码读取任务版本；尚未进入维护。\n' >&2; exit 1; }
+  read -r target_job_format target_sampling <<< "$target_versions"
+  stage='维护前核对原任务与目标版本'
+  docker_cmd exec -i "$app" python - probe "$source_version" "$target_job_format" "$target_sampling" < scripts/upgrade_probe.py
+  deployment_check_timer || exit 1
   read -r -p '确认维护及升级请输入 UPGRADE：' answer
   [[ $answer == UPGRADE ]] || { printf '已取消升级。\n'; exit 1; }
   stage='暂停备份调度'
-  timer_state=$("${admin[@]}" systemctl show lottery-backup.timer --property=LoadState --value)
-  if [[ $timer_state != not-found ]]; then
-    [[ $timer_state == loaded ]] || { printf '备份timer状态未知，已停止升级。\n' >&2; exit 1; }
+  deployment_check_timer || exit 1
+  if [[ $timer_state == loaded ]]; then
     "${admin[@]}" systemctl stop lottery-backup.timer
     [[ $("${admin[@]}" systemctl show lottery-backup.timer --property=ActiveState --value) == inactive ]] || { printf '备份timer尚未停止。\n' >&2; exit 1; }
+    backup_state=$(deployment_unit_property lottery-backup.service ActiveState) || exit 1
+    [[ $backup_state == inactive || $backup_state == failed ]] || { printf '备份服务仍活动或状态未知，请等待并核对。\n' >&2; exit 1; }
   fi
-  backup_state=$("${admin[@]}" systemctl show lottery-backup.service --property=ActiveState --value)
-  [[ $backup_state == inactive || $backup_state == failed ]] || { printf '备份服务仍活动或状态未知，请等待并核对。\n' >&2; exit 1; }
   stage='阻止新请求并检查旧任务'
   docker_cmd compose stop caddy
-  docker_cmd exec -i "$app" python - probe "$source_version" < scripts/upgrade_probe.py
+  docker_cmd exec -i "$app" python - probe "$source_version" "$target_job_format" "$target_sampling" < scripts/upgrade_probe.py
   stage='备份旧数据库与运行材料'
   "${admin[@]}" install -d -m 700 "/var/backups/lottery/$project_name"
   backup_dir=$("${admin[@]}" mktemp -d "/var/backups/lottery/$project_name/upgrade-$(date +%Y%m%d-%H%M%S)-XXXXXX")
@@ -107,15 +127,22 @@ print(version, app["Image"])
     --cidfile "$upgrade_helper_cid" --network none --workdir /app --entrypoint python \
     -v "${project_name}_lottery_data:/app/data:ro" \
     -v "${project_name}_lottery_backups:/app/backups" \
-    "$old_image" - backup "$source_version" "$container_backup" < scripts/upgrade_probe.py
+    "$old_image" - backup "$source_version" "$container_backup" "$target_job_format" "$target_sampling" < scripts/upgrade_probe.py
   upgrade_helper_cid=''
   docker_cmd cp "$app:$container_backup/source.sqlite3" "$backup_dir/source.sqlite3"
   "${admin[@]}" python3 -c 'import pathlib,sqlite3,sys; p=pathlib.Path(sys.argv[1]); db=sqlite3.connect(p.as_uri()+"?mode=ro",uri=True); assert db.execute("PRAGMA integrity_check").fetchall()==[("ok",)]; db.close()' "$backup_dir/source.sqlite3"
   "${admin[@]}" cp -- .env "$backup_dir/env.snapshot"
   docker_cmd inspect "$app" "$caddy" | "${admin[@]}" tee "$backup_dir/containers.json" >/dev/null
+  docker_cmd volume inspect "${project_name}_lottery_data" "${project_name}_lottery_backups" "${project_name}_caddy_data" "${project_name}_caddy_config" | "${admin[@]}" tee "$backup_dir/volumes.json" >/dev/null
   docker_cmd compose config --format json | "${admin[@]}" tee "$backup_dir/new-compose.json" >/dev/null
   "${admin[@]}" tar -C "$project_dir" -czf "$backup_dir/frontend-dist.tar.gz" frontend/dist
+  "${admin[@]}" tar -tzf "$backup_dir/frontend-dist.tar.gz" >/dev/null
+  "${admin[@]}" cp -- Caddyfile "$backup_dir/Caddyfile.snapshot"
   docker_cmd cp "$app:/app/data/." "$backup_dir/data"
+  for material in source.sqlite3 env.snapshot containers.json volumes.json new-compose.json frontend-dist.tar.gz Caddyfile.snapshot; do
+    "${admin[@]}" test -s "$backup_dir/$material" || { printf '备份材料缺失：%s；旧服务保持原状。\n' "$material" >&2; exit 1; }
+  done
+  "${admin[@]}" test -d "$backup_dir/data" || { printf '完整data副本缺失；旧服务保持原状。\n' >&2; exit 1; }
   "${admin[@]}" chmod -R go-rwx "$backup_dir"
   printf '私有备份：%s（包含凭据，不公开或提交Git）\n' "$backup_dir"
   stage='重建本项目服务网络'
@@ -127,20 +154,13 @@ print(version, app["Image"])
 upgrade_database() {
   stage='迁移v6数据库'
   docker_cmd compose run --rm app python manage.py migrate
-  if [[ $source_version == 5 ]]; then
-    stage='只读导入v5账号'
-    docker_cmd compose run --rm app python manage.py import_v5_accounts --source "$container_backup/source.sqlite3"
-    stage='初始化v6默认业务'
-    docker_cmd compose run --rm app python manage.py init_business_defaults
-  fi
 }
 
 finish_upgrade() {
   printf '\n升级服务已启动，尚需原账号登录、连续实验、Trace、取消和可信公网HTTPS验收。\n'
   printf '原卷/.env/证书与备份保留；失败时不要删除卷或覆盖数据库来重跑。\n'
   if [[ $timer_state == loaded ]]; then
-    printf '备份timer保持暂停。标准部署再次运行脚本，选择运维→配置/更新每日备份；自定义unit需人工核对。\n'
-    printf '业务与HTTPS验收通过后，选择运维→恢复每日备份；脚本先实际备份，再启用timer。\n'
+    printf '本项目备份timer保持暂停，原启用状态请人工核对。业务与可信HTTPS验收通过后，选择运维→恢复每日备份；脚本先实际备份，再按原归属启用timer。\n'
   fi
   printf '备份与手动恢复边界见docs/deployment.md。脚本没有git pull或自动回滚。\n'
 }

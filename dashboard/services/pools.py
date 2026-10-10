@@ -18,10 +18,31 @@ from lottery_simulator.rules.runtime import compile_pool
 
 
 class PoolError(ValueError):
-    def __init__(self, message, *, status=400, code="validation_error"):
+    def __init__(self, message, *, status=400, code="validation_error", fields=None):
         super().__init__(message)
         self.status = status
         self.code = code
+        self.fields = fields or {}
+
+
+def _mapping_error(message="稀有度ID映射无效"):
+    raise PoolError(message, fields={"rarity_mapping": [message]})
+
+
+def _normalize_rarity_mapping(rarity_mapping, old_ids, new_ids):
+    if rarity_mapping is None:
+        return {}
+    if not isinstance(rarity_mapping, dict):
+        _mapping_error()
+    if any(value is not None and not isinstance(value, str)
+           for value in rarity_mapping.values()):
+        _mapping_error("每个稀有度映射目标必须是UUID字符串或null")
+    if set(rarity_mapping) - old_ids:
+        _mapping_error()
+    if any(value is not None and value not in new_ids
+           for value in rarity_mapping.values()):
+        _mapping_error("稀有度ID映射目标无效")
+    return rarity_mapping
 
 
 def _actor(actor, *, expected_auth_version=None):
@@ -123,20 +144,19 @@ def _rule_for_pool(actor, owner, kind, visibility, ref, expected_revision):
 
 def _validate_mapping(previous, current, old_rule, new_rule, rarity_mapping, clear_unmapped):
     if type(clear_unmapped) is not bool:
-        raise PoolError("清空旧稀有度数据确认必须是布尔值")
+        raise PoolError("清空旧稀有度数据确认必须是布尔值",
+                        fields={"clear_unmapped": ["必须是布尔值"]})
     old_ids = {item.id for item in old_rule.rarities}
     new_ids = {item.id for item in new_rule.rarities}
-    mapping = rarity_mapping or {}
-    if not isinstance(mapping, dict) or set(mapping) - old_ids:
-        raise PoolError("稀有度ID映射无效")
-    if any(value is not None and value not in new_ids for value in mapping.values()):
-        raise PoolError("稀有度ID映射目标无效")
+    mapping = _normalize_rarity_mapping(rarity_mapping, old_ids, new_ids)
     removed = old_ids - new_ids
     unresolved = removed - set(mapping)
     if unresolved and not clear_unmapped:
-        raise PoolError("稀有度结构已变化；请逐项映射或明确确认清空旧档数据")
+        message = "稀有度结构已变化；请逐项映射或明确确认清空旧档数据"
+        raise PoolError(message, fields={"rarity_mapping": [message]})
     if any(mapping.get(rarity_id) is None for rarity_id in removed) and not clear_unmapped:
-        raise PoolError("清空未映射稀有度数据需要明确确认")
+        message = "清空未映射稀有度数据需要明确确认"
+        raise PoolError(message, fields={"rarity_mapping": [message]})
     old_pools = {item.rarity_id: item for item in previous.rarity_pools}
     new_pools = {item.rarity_id: item for item in current.rarity_pools}
     old_labels = previous.rarity_labels
@@ -173,17 +193,14 @@ def _remap_pool_data(raw, old_rule, new_rule, rarity_mapping, clear_unmapped):
     data = deepcopy(raw)
     old_ids = {r.id for r in old_rule.rarities}
     new_ids = {r.id for r in new_rule.rarities}
-    mapping = rarity_mapping or {}
-    if not isinstance(mapping, dict):
-        raise PoolError("稀有度ID映射无效")
     if type(clear_unmapped) is not bool:
-        raise PoolError("清空旧稀有度数据确认必须是布尔值")
+        raise PoolError("清空旧稀有度数据确认必须是布尔值",
+                        fields={"clear_unmapped": ["必须是布尔值"]})
+    mapping = _normalize_rarity_mapping(rarity_mapping, old_ids, new_ids)
     removed = old_ids - new_ids
     if removed - set(mapping) and not clear_unmapped:
-        raise PoolError("稀有度结构已变化；请逐项映射或明确确认清空旧档数据")
-    for key, value in mapping.items():
-        if key not in old_ids or (value is not None and value not in new_ids):
-            raise PoolError("稀有度ID映射无效")
+        message = "稀有度结构已变化；请逐项映射或明确确认清空旧档数据"
+        raise PoolError(message, fields={"rarity_mapping": [message]})
     mapping = {key: mapping.get(key, key if key in new_ids else None) for key in old_ids}
     rosters = []
     for item in data["rarity_pools"]:
@@ -352,6 +369,8 @@ def copy_pool(actor, pool_id, *, name: str, kind: str, expected_revision,
                 _validate_mapping(load_pool_document(source_document), copied,
                                   source_rule, target_rule,
                                   rarity_mapping, clear_unmapped)
+            except PoolError:
+                raise
             except (TypeError, ValueError) as error:
                 raise PoolError(str(error)) from error
             clone = Pool(id=copied.id, name=name, name_key=name_key, kind=kind,

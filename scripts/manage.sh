@@ -1,6 +1,7 @@
 # Sourced by install.sh; one action per invocation, reuse install/upgrade unchanged.
+source scripts/deployment_checks.sh
 management_menu() {
-  trap 'printf "管理操作失败；保留现场，不自动重试或删除数据。\n" >&2' ERR
+  trap 'if [[ $mode == legacy-reinstall ]]; then printf "永久卸载停止：%s；已删除：%s。不自动重试或恢复。\n" "$stage" "${legacy_deleted:-无}" >&2; else printf "管理操作失败；保留现场，不自动重试或删除数据。\n" >&2; fi' ERR
   printf '\n抽奖模拟器服务器管理\n目录：%s\n1) 安装\n2) 卸载\n3) 运维（启停、状态、日志、备份、定时备份）\n4) 更新\n0) 退出\n' "$project_dir"
   read -r -p '请选择：' choice
   case $choice in
@@ -12,7 +13,14 @@ management_menu() {
         2) exec bash "$project_dir/scripts/install.sh" --restore;;
         *) printf '已取消。\n'; return;;
       esac;;
-    2) action=uninstall;;
+    2)
+      printf '1) 卸载服务并保留数据\n2) 永久卸载本项目受管资源\n'
+      read -r -p '请选择卸载方式：' operation
+      case $operation in
+        1) action=uninstall;;
+        2) mode=legacy-reinstall; management_legacy_run uninstall; return;;
+        *) printf '已取消。\n'; return;;
+      esac;;
     3)
       printf '1) 启动原容器\n2) 停止\n3) 重启原容器\n4) 状态\n5) 日志\n6) 备份数据库\n7) 配置/更新每日备份\n8) 恢复每日备份\n'
       read -r -p '请选择运维操作：' operation
@@ -144,17 +152,15 @@ management_start() {
 }
 
 management_pause_timer() {
-  local load active
-  load=$("${admin[@]}" systemctl show lottery-backup.timer --property=LoadState --value)
-  timer_load=$load
-  if [[ $load != not-found ]]; then
-    [[ $load == loaded ]] || { printf 'timer状态未知，停止操作。\n' >&2; exit 1; }
-    management_check_units
+  local active
+  deployment_check_timer || exit 1
+  timer_load=$timer_state
+  if [[ $timer_state == loaded ]]; then
     "${admin[@]}" systemctl stop lottery-backup.timer
     [[ $("${admin[@]}" systemctl show lottery-backup.timer --property=ActiveState --value) == inactive ]] || exit 1
+    active=$(deployment_unit_property lottery-backup.service ActiveState) || exit 1
+    [[ $active == inactive || $active == failed ]] || { printf '正在备份或service状态未知；请等待后再操作。\n' >&2; exit 1; }
   fi
-  active=$("${admin[@]}" systemctl show lottery-backup.service --property=ActiveState --value)
-  [[ $active == inactive || $active == failed ]] || { printf '正在备份或service状态未知；请等待后再操作。\n' >&2; exit 1; }
 }
 
 management_stop() {
@@ -188,16 +194,16 @@ management_backup() {
 management_check_units() {
   # Only manage the supplied standard unit; never overwrite another project's scheduler.
   [[ $project_dir == /opt/lottery-simulator && $project_name == lottery-simulator ]] || { printf '定时备份示例仅支持/opt/lottery-simulator及默认项目名；自定义调度需人工处理。\n' >&2; exit 1; }
-  local unit path drops
-  for unit in lottery-backup.service lottery-backup.timer; do
-    path=$("${admin[@]}" systemctl show "$unit" --property=FragmentPath --value)
-    drops=$("${admin[@]}" systemctl show "$unit" --property=DropInPaths --value)
-    [[ -z $drops && ( -z $path || $path == "/etc/systemd/system/$unit" ) ]] || { printf '发现自定义unit路径或附加配置，不自动更改。\n' >&2; exit 1; }
-  done
-  path=$("${admin[@]}" systemctl show lottery-backup.service --property=WorkingDirectory --value)
-  [[ -z $path || $path == "$project_dir" ]] || { printf '备份service属于其它目录，停止操作。\n' >&2; exit 1; }
-  path=$("${admin[@]}" systemctl show lottery-backup.timer --property=Unit --value)
-  [[ -z $path || $path == lottery-backup.service ]] || { printf 'timer指向其它service，停止操作。\n' >&2; exit 1; }
+  deployment_check_timer || exit 1
+  if [[ $timer_state == not-found ]]; then
+    local service_load
+    service_load=$(deployment_unit_property lottery-backup.service LoadState) || exit 1
+    case $service_load in
+      not-found) ;;
+      loaded) deployment_check_service || exit 1;;
+      *) printf '备份service状态未知，停止操作。\n' >&2; exit 1;;
+    esac
+  fi
 }
 
 management_schedule() {
@@ -220,10 +226,7 @@ management_schedule() {
 
 management_resume() {
   management_check_units
-  [[ $("${admin[@]}" systemctl show lottery-backup.timer --property=LoadState --value) == loaded ]] || { printf '未安装timer，请先选择配置每日备份。\n' >&2; exit 1; }
-  local command
-  command=$("${admin[@]}" systemctl show lottery-backup.service --property=ExecStart --value)
-  [[ $command == *"/app/data/history_v$source_version.sqlite3"* ]] || { printf '备份service数据库版本不符，先更新配置。\n' >&2; exit 1; }
+  [[ $timer_state == loaded && $source_version == 6 ]] || { printf '未安装本项目标准v6 timer；请先配置每日备份。\n' >&2; exit 1; }
   management_confirm VERIFIED '确认业务和HTTPS已验收；将实际执行一次备份，成功后启用每日timer。'
   "${admin[@]}" systemctl start lottery-backup.service
   [[ $("${admin[@]}" systemctl show lottery-backup.service --property=Result --value) == success ]] || exit 1
@@ -233,10 +236,8 @@ management_resume() {
 }
 
 management_uninstall() {
-  printf '1) 卸载服务，保留数据/备份/证书/.env\n2) 永久删除本项目数据/备份/证书/.env（代码和Docker保留）\n'
   local removal name volume private container containers networks network
-  read -r -p '请选择卸载方式：' removal
-  [[ $removal == 1 || $removal == 2 ]] || { printf '已取消。\n'; return; }
+  removal=1
   networks=$(docker_cmd network ls -q --filter "label=com.docker.compose.project=$project_name")
   for network in $networks; do
     docker_cmd network inspect "$network" | python3 -c '
@@ -259,30 +260,10 @@ assert all(cid.startswith((app,caddy)) for cid in n.get("Containers",{})), "网�
     "${admin[@]}" cp -- .env "$private/env.snapshot"
     printf '原容器身份与环境副本：%s；含凭据，不公开。数据仍留在原卷。\n' "$private"
   fi
-  if [[ $removal == 2 ]]; then
-    printf '永久删除范围：\n'
-    for name in lottery_data lottery_backups caddy_data caddy_config; do
-      volume="${project_name}_$name"
-      docker_cmd volume inspect "$volume" | python3 -c 'import json,sys; v,=json.load(sys.stdin); p,n=sys.argv[1:]; assert v["Labels"]["com.docker.compose.project"]==p and v["Labels"]["com.docker.compose.volume"]==n' "$project_name" "$name"
-      containers=$(docker_cmd ps -aq --filter "volume=$volume")
-      for container in $containers; do
-        [[ $container == "$app" || $container == "$caddy" ]] || { printf '卷被其它容器使用，拒绝删除。\n' >&2; exit 1; }
-      done
-      printf '  %s\n' "$volume"
-    done
-    private="/var/backups/lottery/$project_name"
-    printf '  %s\n  %s/.env\n外部或异机备份不自动删除。\n' "$private" "$project_dir"
-    management_private check "$private" "$project_dir/.env"
-    management_confirm "DELETE-$project_name" '上述账号、历史、备份和证书将不可恢复；请先自行保存必要备份。'
-  fi
   management_stop
   if [[ $timer_load == loaded ]]; then "${admin[@]}" systemctl disable lottery-backup.timer; fi
   docker_cmd rm "$app" "$caddy"
   for network in $networks; do docker_cmd network rm "$network"; done
-  if [[ $removal == 2 ]]; then
-    for name in lottery_data lottery_backups caddy_data caddy_config; do docker_cmd volume rm "${project_name}_$name"; done
-    management_private delete "$private" "$project_dir/.env"
-  fi
   printf '卸载完成；代码、Docker、其他项目及外部备份未删除。\n'
 }
 
@@ -291,21 +272,210 @@ management_private() {
   "${admin[@]}" python3 - "$@" <<'PY'
 from pathlib import Path
 import shutil, sys
+from scripts.deployment_resources import check_private_tree
 action, raw_private, raw_env = sys.argv[1:]
 private, env = Path(raw_private), Path(raw_env)
-assert action in {'check','delete'} and private.parent == Path('/var/backups/lottery') and private.resolve() == private, '备份路径被重定向，拒绝删除'
+assert action in {'check','delete'} and private.parent == Path('/var/backups/lottery') and env == Path.cwd()/'.env', '删除路径超出固定边界'
+for path in (private.parent.parent, private.parent, private, env):
+    if path.is_symlink(): raise SystemExit('私有路径被重定向，拒绝删除')
+assert env.is_file() and not env.is_symlink(), '.env缺失或被重定向'
+check_private_tree(private)
 if action == 'delete':
     if private.exists(): shutil.rmtree(private)
     env.unlink(missing_ok=True)
 PY
 }
 
+management_legacy_snapshot() {
+  local args=(--project-dir "$project_dir" --docker "$(command -v docker)")
+  "${admin[@]}" python3 scripts/deployment_resources.py "${args[@]}"
+}
+
+management_legacy_preflight() {
+  stage='预检目标版本和运行环境'
+  for file in docker-compose.yml Dockerfile Caddyfile manage.py requirements.txt \
+    configs/pools/default.json configs/rules/zmd.json frontend/package.json \
+    frontend/package-lock.json scripts/install.sh scripts/manage.sh \
+    scripts/deployment_checks.sh scripts/deployment_resources.py \
+    scripts/check_proxy_network.py scripts/backup_db.py; do
+    [[ -f $file ]] || { printf '缺少目标版本文件：%s。\n' "$file" >&2; return 1; }
+  done
+  for tool in git openssl; do command -v "$tool" >/dev/null || return 1; done
+  management_legacy_context || return 1
+  docker_cmd compose version >/dev/null || return 1
+  docker_cmd buildx version >/dev/null || return 1
+  local target_config
+  target_config=$("${admin[@]}" env DOMAIN=preflight.invalid SECRET_KEY=preflight-only docker compose config --format json) || return 1
+  legacy_target_project=$(python3 -c 'import json,re,sys; name=json.load(sys.stdin)["name"]; assert isinstance(name,str) and re.fullmatch(r"[a-z0-9][a-z0-9_-]*",name); print(name)' <<< "$target_config") || return 1
+  local proxy_settings
+  proxy_settings=$(printf '%s' "$target_config" | python3 -c '
+import json, sys
+config=json.load(sys.stdin)
+backend=config["networks"]["backend"]["ipam"]["config"][0]
+values=(backend["subnet"],backend["ip_range"],backend["gateway"],
+        config["services"]["caddy"]["networks"]["backend"]["ipv4_address"])
+assert all(isinstance(x,str) and x and not any(ch.isspace() for ch in x) for x in values)
+print("\t".join(values))
+') || return 1
+  IFS=$'\t' read -r legacy_proxy_subnet legacy_proxy_range legacy_proxy_gateway legacy_proxy_ip <<< "$proxy_settings"
+  printf '%s' "$target_config" | "${admin[@]}" python3 scripts/check_proxy_network.py \
+    --project "$legacy_target_project" --docker "$(command -v docker)" || return 1
+  docker_cmd pull node:22-bookworm-slim || return 1
+  "${admin[@]}" env DOMAIN=preflight.invalid SECRET_KEY=preflight-only docker compose pull caddy || return 1
+  "${admin[@]}" env DOMAIN=preflight.invalid SECRET_KEY=preflight-only docker compose build app || return 1
+  docker_cmd run --rm --user "$(id -u):$(id -g)" \
+    -v "$project_dir/frontend:/src:ro" -v "$project_dir/configs:/tmp/configs:ro" \
+    -w /tmp/frontend node:22-bookworm-slim sh -c \
+    'mkdir -p /tmp/frontend && tar --exclude=node_modules --exclude=dist -C /src -cf - . | tar -C /tmp/frontend -xf - && npm ci && npm run build' || return 1
+}
+
+management_legacy_context() {
+  for tool in docker python3 systemctl; do command -v "$tool" >/dev/null || return 1; done
+  local endpoint
+  if [[ -n ${DOCKER_CONTEXT:-} ]]; then
+    endpoint=$(docker_cmd context inspect "$DOCKER_CONTEXT" --format '{{.Endpoints.docker.Host}}') || return 1
+  else
+    endpoint=${DOCKER_HOST:-$(docker_cmd context inspect --format '{{.Endpoints.docker.Host}}')} || return 1
+  fi
+  [[ $endpoint == unix:///var/run/docker.sock || $endpoint == unix:///run/docker.sock ]] || { printf '仅支持本机Docker。\n' >&2; return 1; }
+  docker_cmd info >/dev/null || return 1
+}
+
+management_legacy_run() {
+  local outcome=$1 snapshot current private cid name new_project active resources kind value
+  local -a containers volumes networks
+  legacy_deleted=''
+  management_admin || return 1
+  if [[ $outcome == reinstall ]]; then
+    management_legacy_preflight || return 1
+  else
+    management_legacy_context || return 1
+  fi
+  stage='核对旧项目资源和备份调度'
+  snapshot=$(management_legacy_snapshot) || return 1
+  project_name=$(python3 -c 'import json,sys; print(json.load(sys.stdin)["project"])' <<< "$snapshot") || return 1
+  if [[ $outcome == reinstall && $project_name != "$legacy_target_project" ]]; then
+    printf '目标Compose项目与原资源项目不一致，停止自动重装。\n' >&2
+    return 1
+  fi
+  private="/var/backups/lottery/$project_name"
+  management_private check "$private" "$project_dir/.env" || return 1
+  deployment_check_timer || return 1
+  resources=$(printf '%s' "$snapshot" | python3 -c '
+import json, re, sys
+document = json.load(sys.stdin)
+for kind, key, pattern in (("container", "containers", r"[0-9a-f]{12,64}"),
+                           ("volume", "volumes", r"[A-Za-z0-9][A-Za-z0-9_.-]*"),
+                           ("network", "networks", r"[A-Za-z0-9][A-Za-z0-9_.-]*")):
+    group = document[key]
+    if not isinstance(group, dict): raise ValueError(f"{key} must be a mapping")
+    for name in group:
+        if not isinstance(name, str) or not re.fullmatch(pattern, name):
+            raise ValueError(f"invalid {kind} target")
+        print(f"{kind}\t{name}")
+') || return 1
+  while IFS=$'\t' read -r kind value; do
+    [[ -n $kind ]] || continue
+    case $kind in
+      container) containers+=("$value");;
+      volume) volumes+=("$value");;
+      network) networks+=("$value");;
+      *) printf '资源清单类型异常，停止操作。\n' >&2; return 1;;
+    esac
+  done <<< "$resources"
+  printf '永久删除清单（项目 %s，目录 %s）：\n' "$project_name" "$project_dir"
+  printf '  容器：%s\n  网络：%s\n  命名卷：%s\n  文件：%s/.env；%s\n' \
+    "${containers[*]:-无}" "${networks[*]:-无}" "${volumes[*]:-无}" "$project_dir" "$private"
+  if [[ $outcome == reinstall ]]; then
+    new_project=$project_name
+    printf '删除后首次安装项目名：%s；将生成新密钥、空v6数据库和新管理员。\n' "$new_project"
+  fi
+  printf '原账号、业务、Trace、未完成任务、备份和证书将丢失；请先另存必要备份。代码、前端产物、unit定义、Docker及镜像保留。\n'
+  management_confirm UNINSTALL '确认永久卸载以上本项目资源。'
+  management_confirm "DELETE-$project_name" '再次确认实际项目名；取消不会停止服务。'
+  stage='临执行复查资源归属与共享使用者'
+  current=$(management_legacy_snapshot) || return 1
+  [[ $current == "$snapshot" ]] || { printf '确认后资源清单变化，停止操作；不会扩大删除范围。\n' >&2; return 1; }
+  management_private check "$private" "$project_dir/.env" || return 1
+  deployment_check_timer || return 1
+  stage='停止本项目备份调度'
+  if [[ $timer_state == loaded ]]; then
+    "${admin[@]}" systemctl stop lottery-backup.timer || return 1
+    active=$(deployment_unit_property lottery-backup.timer ActiveState) || return 1
+    [[ $active == inactive ]] || return 1
+    active=$(deployment_unit_property lottery-backup.service ActiveState) || return 1
+    [[ $active == inactive || $active == failed ]] || { printf '备份仍在执行，停止清理。\n' >&2; return 1; }
+    "${admin[@]}" systemctl disable lottery-backup.timer || return 1
+  fi
+  stage='停止和清理旧容器'
+  for cid in "${containers[@]}"; do docker_cmd stop --timeout 120 "$cid" || return 1; done
+  for cid in "${containers[@]}"; do
+    docker_cmd rm "$cid" || return 1
+    legacy_deleted="$legacy_deleted 容器:$cid"
+  done
+  stage='清理旧网络'
+  for name in "${networks[@]}"; do docker_cmd network rm "$name" || return 1; legacy_deleted="$legacy_deleted 网络:$name"; done
+  stage='清理受管命名卷'
+  for name in "${volumes[@]}"; do docker_cmd volume rm "$name" || return 1; legacy_deleted="$legacy_deleted 卷:$name"; done
+  stage='清理受管私有文件'
+  management_private delete "$private" "$project_dir/.env" || return 1
+  legacy_deleted="$legacy_deleted 文件:$project_dir/.env,$private"
+  stage='核对清理结果和端口'
+  management_legacy_cleared "$project_name" "$project_dir" "${volumes[@]}" "${networks[@]}" || return 1
+  printf '已清理：%s\n' "${legacy_deleted:-无}"
+  if [[ $outcome == reinstall ]]; then
+    stage='全新安装空v6与新管理员'
+    COMPOSE_PROJECT_NAME="$project_name" \
+      LOTTERY_PROXY_SUBNET="$legacy_proxy_subnet" \
+      LOTTERY_PROXY_DYNAMIC_RANGE="$legacy_proxy_range" \
+      LOTTERY_PROXY_GATEWAY="$legacy_proxy_gateway" \
+      LOTTERY_CADDY_IP="$legacy_proxy_ip" \
+      bash "$project_dir/scripts/install.sh" --install || return 1
+  fi
+}
+
+management_legacy_cleared() {
+  local project=$1 directory=$2 name; shift 2
+  local remaining found
+  remaining=$(docker_cmd ps -aq --filter "label=com.docker.compose.project=$project") || return 1
+  [[ -z $remaining ]] || { printf '仍有项目容器，停止安装。\n' >&2; return 1; }
+  remaining=$(docker_cmd volume ls -q --filter "label=com.docker.compose.project=$project") || return 1
+  [[ -z $remaining ]] || { printf '仍有项目命名卷，停止安装。\n' >&2; return 1; }
+  remaining=$(docker_cmd network ls -q --filter "label=com.docker.compose.project=$project") || return 1
+  [[ -z $remaining ]] || { printf '仍有项目网络，停止安装。\n' >&2; return 1; }
+  for name in "$@"; do
+    if [[ $name == "${project}_"* ]]; then
+      found=$(docker_cmd volume ls -q --filter "name=^${name}$") || return 1
+      [[ -z $found ]] || { printf '卷仍存在：%s\n' "$name" >&2; return 1; }
+      found=$(docker_cmd network ls -q --filter "name=^${name}$") || return 1
+      [[ -z $found ]] || { printf '网络仍存在：%s\n' "$name" >&2; return 1; }
+    fi
+  done
+  [[ ! -e $directory/.env && ! -L $directory/.env && ! -e /var/backups/lottery/$project && ! -L /var/backups/lottery/$project ]] || return 1
+  management_legacy_ports
+}
+
+management_legacy_ports() {
+  "${admin[@]}" python3 - <<'PY'
+import errno, socket
+for port in (80, 443):
+    for family, host in ((socket.AF_INET, '0.0.0.0'), (socket.AF_INET6, '::')):
+        try:
+            with socket.socket(family, socket.SOCK_STREAM) as sock:
+                sock.bind((host, port))
+        except OSError as exc:
+            if family == socket.AF_INET6 and exc.errno in (errno.EAFNOSUPPORT, errno.EPROTONOSUPPORT, errno.EADDRNOTAVAIL):
+                continue
+            raise SystemExit(f'端口{port}不可用：{exc}')
+PY
+}
+
 management_update() {
-  printf '1) 拉取Git新版后更新\n2) 更新已经下载的完整版本\n'
+  printf '1) 当前v6保留数据更新：拉取Git\n2) 当前v6保留数据更新：已下载版本\n3) 旧版永久卸载重装：拉取Git\n4) 旧版永久卸载重装：已下载版本\n'
   local selection top branch status
   read -r -p '请选择更新方式：' selection
   case $selection in
-    1)
+    1|3)
       top=$(git rev-parse --show-toplevel)
       branch=$(git branch --show-current)
       status=$(git status --porcelain)
@@ -314,11 +484,15 @@ management_update() {
         https://github.com/donotwantorange/lottery_simulator.git|git@github.com:donotwantorange/lottery_simulator.git) ;;
         *) printf 'origin不是预期仓库，停止自动更新。\n' >&2; exit 1;;
       esac
-      management_confirm UPDATE '将从origin/master快进更新代码，再运行新版升级脚本。失败保留现场；不会强制覆盖工作区。'
+      management_confirm UPDATE '将从origin/master快进更新代码，再运行新版目标流程。失败保留现场；不会强制覆盖工作区。'
       printf '旧提交：'; git rev-parse HEAD
       git pull --ff-only origin master;;
-    2) ;;
+    2|4) ;;
     *) printf '已取消。\n'; return;;
   esac
-  exec bash "$project_dir/scripts/install.sh" --upgrade
+  if [[ $selection == 3 || $selection == 4 ]]; then
+    exec bash "$project_dir/scripts/install.sh" --legacy-reinstall
+  else
+    exec bash "$project_dir/scripts/install.sh" --upgrade
+  fi
 }

@@ -64,7 +64,7 @@ it("compares both revisions and initial context before submitting a rerun", asyn
   });
   const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
   render(<MemoryRouter initialEntries={["/history/?run=run-1"]}><History /></MemoryRouter>);
-  fireEvent.click(await screen.findByRole("button", { name: "按当前角色池重跑" }));
+  fireEvent.click(await screen.findByRole("button", { name: "按当前配置重跑" }));
   await waitFor(() => expect(confirm).toHaveBeenCalledOnce());
   expect(await screen.findByRole("alert")).toHaveTextContent("确认期间角色池或规则已变化");
   expect(apiRequest.mock.calls.some(([path, options]) => path === "jobs/" && options?.method === "POST")).toBe(false);
@@ -86,7 +86,7 @@ it("requires explicit reset confirmation when the historical target context chan
   });
   const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
   render(<MemoryRouter initialEntries={["/history/?run=run-1"]}><History /></MemoryRouter>);
-  fireEvent.click(await screen.findByRole("button", { name: "按当前角色池重跑" }));
+  fireEvent.click(await screen.findByRole("button", { name: "按当前配置重跑" }));
   await waitFor(() => expect(apiRequest).toHaveBeenCalledWith("jobs/", expect.objectContaining({ method: "POST", body: expect.any(String) })));
   expect(confirm).toHaveBeenCalledTimes(2);
   expect(confirm.mock.calls[0][0]).toContain("重置为零");
@@ -103,4 +103,34 @@ it("does not delete history before separate confirmation", async () => {
   fireEvent.click(await screen.findByRole("button", { name: "删除历史" }));
   expect(await screen.findByText(/确认删除这条历史记录及其 Trace/)).toBeInTheDocument();
   expect(apiRequest.mock.calls.some(([path, options]) => path === "runs/run-1/" && options?.method === "DELETE")).toBe(false);
+});
+
+it("ignores a late snapshot for the previously selected run", async () => {
+  let finishOld!: (value: unknown) => void;
+  const items = [
+    { ...list.items[0], id: "run-a", pool_name_snapshot: "旧池" },
+    { ...list.items[0], id: "run-b", pool_name_snapshot: "新池" },
+  ];
+  apiRequest.mockImplementation((path: string) => path.startsWith("runs/?")
+    ? Promise.resolve({ ...list, items, total: 2 })
+    : path === "runs/run-a/" ? new Promise((resolve) => { finishOld = resolve; })
+    : path === "runs/run-b/" ? Promise.resolve({ ...savedResult, pool_name_snapshot: "新池", pool_snapshot: { ...savedResult.pool_snapshot, name: "新池" } })
+    : Promise.resolve({}));
+  render(<MemoryRouter initialEntries={["/history/?run=run-a"]}><History /></MemoryRouter>);
+  const buttons = await screen.findAllByRole("button", { name: "查看" });
+  fireEvent.click(buttons[1]);
+  expect(await screen.findByText(/角色池：新池/)).toBeInTheDocument();
+  finishOld({ ...savedResult, pool_name_snapshot: "旧池" });
+  await waitFor(() => expect(screen.queryByText(/角色池：旧池/)).toBeNull());
+});
+
+it("shows a snapshot read failure and retries without presenting it as an empty history", async () => {
+  let reads = 0;
+  apiRequest.mockImplementation((path: string) => path.startsWith("runs/?") ? Promise.resolve(list)
+    : path === "runs/run-1/" ? ++reads === 1 ? Promise.reject(new Error("暂时不可用")) : Promise.resolve(savedResult)
+    : Promise.resolve({}));
+  render(<MemoryRouter initialEntries={["/history/?run=run-1"]}><History /></MemoryRouter>);
+  expect(await screen.findByRole("alert")).toHaveTextContent("历史快照读取失败：暂时不可用");
+  fireEvent.click(screen.getByRole("button", { name: "重试读取快照" }));
+  expect(await screen.findByText("历史快照")).toBeInTheDocument();
 });

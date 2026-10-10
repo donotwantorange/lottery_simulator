@@ -1,10 +1,13 @@
 import json
+import sys
 from uuid import uuid4
 
+from django.db import connection
 from django.test import Client, TestCase
+from django.test.utils import CaptureQueriesContext
 from django.utils import timezone
 
-from dashboard.models import Pool, Rule, User
+from dashboard.models import ExperimentConfig, Pool, Rule, User
 from dashboard.services.accounts import create_account
 from dashboard.services.experiments import (
     ExperimentError, confirm_experiment_import, delete_experiment, experiment_validation,
@@ -96,6 +99,20 @@ class ExperimentServiceTests(TestCase):
         config = save_experiment(self.user, payload)
         self.assertEqual(config.parameters_json["seed"], seed)
 
+    def test_service_save_and_import_preview_enforce_seed_limit(self):
+        oversized = 10 ** 4300
+        payload = self.payload()
+        payload["parameters"]["seed"] = oversized
+        before = ExperimentConfig.objects.count()
+        with self.assertRaisesRegex(ExperimentError, "随机种子最多允许4300位"):
+            save_experiment(self.user, payload)
+        raw = {"format_version": 2, "name": "超限导入",
+               "pool_ref": {"id": str(uuid4()), "name": self.pool.name},
+               "parameters": payload["parameters"], "initial_context": None}
+        with self.assertRaisesRegex(ExperimentError, "随机种子最多允许4300位"):
+            import_preview(self.user, raw)
+        self.assertEqual(ExperimentConfig.objects.count(), before)
+
     def test_import_requires_current_pool_and_rule_revisions(self):
         raw = {"format_version": 2, "name": "导入实验",
                "pool_ref": {"id": "c19f9700-94c1-44ea-9b2b-1d50f2231000",
@@ -178,6 +195,15 @@ class ExperimentAPITests(TestCase):
         self.assertEqual(created.json()["initial_context"], self.context)
         self.assertFalse(created.json()["owner_is_admin"])
         config_id = created.json()["id"]
+        oversized_edit = self.payload("改成超限", seed="9" * 5000)
+        oversized_edit["expected_revision"] = 1
+        edited = self.client.patch(f"/api/v1/experiment-configs/{config_id}/",
+                                   data=json.dumps(oversized_edit),
+                                   content_type="application/json")
+        self.assertEqual(edited.status_code, 400)
+        self.assertEqual(ExperimentConfig.objects.get(pk=config_id).revision, 1)
+        self.assertEqual(ExperimentConfig.objects.get(pk=config_id).parameters_json["seed"],
+                         int("9" * 100))
         listed = self.client.get("/api/v1/experiment-configs/")
         self.assertEqual(listed.json()["total"], 1)
         exported = self.client.get(
@@ -194,11 +220,46 @@ class ExperimentAPITests(TestCase):
         self.assertEqual(too_long.status_code, 400)
 
         self.login_as(self.admin)
+        before_admin_rejection = ExperimentConfig.objects.count()
+        admin_too_long = self.client.post("/api/v1/experiment-configs/",
+            data=json.dumps(self.payload("管理员超限", seed="9" * 5000)),
+            content_type="application/json")
+        self.assertEqual(admin_too_long.status_code, 400)
+        self.assertEqual(ExperimentConfig.objects.count(), before_admin_rejection)
         admin_config = self.client.post("/api/v1/experiment-configs/",
                                         data=json.dumps(self.payload("管理员配置")),
                                         content_type="application/json")
         self.assertEqual(admin_config.status_code, 201)
         self.assertTrue(admin_config.json()["owner_is_admin"])
+
+    def test_positive_and_negative_project_limit_seeds_round_trip_exactly(self):
+        self.login_as(self.user)
+        for index, seed in enumerate(("9" * 4300, "-" + "9" * 4300)):
+            created = self.client.post("/api/v1/experiment-configs/",
+                data=json.dumps(self.payload(f"边界种子{index}", seed=seed)),
+                content_type="application/json")
+            self.assertEqual(created.status_code, 201, created.content)
+            config_id = created.json()["id"]
+            self.assertEqual(created.json()["parameters"]["seed"], seed)
+            exported = self.client.get(
+                f"/api/v1/experiment-configs/{config_id}/export/?expected_revision=1")
+            self.assertEqual(exported.status_code, 200, exported.content)
+            self.assertEqual(str(json.loads(exported.content)["parameters"]["seed"]), seed)
+
+    def test_experiment_list_loads_parameters_in_one_query_for_multiple_configs(self):
+        self.login_as(self.user)
+        for name in ("列表配置A", "列表配置B"):
+            payload = self.payload(name)
+            created = self.client.post("/api/v1/experiment-configs/",
+                data=json.dumps(payload), content_type="application/json")
+            self.assertEqual(created.status_code, 201, created.content)
+        with CaptureQueriesContext(connection) as queries:
+            response = self.client.get("/api/v1/experiment-configs/")
+        self.assertEqual(response.status_code, 200, response.content)
+        parameter_queries = [query["sql"] for query in queries.captured_queries
+                             if "experiment_configs" in query["sql"]
+                             and "parameters_json" in query["sql"]]
+        self.assertEqual(len(parameter_queries), 1, parameter_queries)
 
     def test_query_integer_limits_apply_to_experiment_pagination_and_export(self):
         self.login_as(self.user)
@@ -275,3 +336,65 @@ class ExperimentAPITests(TestCase):
         self.assertEqual(confirmed.status_code, 201, confirmed.content)
         self.assertEqual(confirmed.json()["pool_ref"]["id"], str(self.pool.pk))
         self.assertEqual(confirmed.json()["parameters"]["seed"], str(10**100))
+
+    def test_import_confirm_rejects_oversized_seed_before_saving(self):
+        document = {
+            "format_version": 2, "name": "过长种子",
+            "pool_ref": {"id": str(uuid4()), "name": self.pool.name},
+            "parameters": {"draws": 10, "trials": 2, "seed": "9" * 5000,
+                           "trace": False, "initial_main_draws": 0,
+                           "initial_small_pity": {},
+                           "initial_big_pity": {"target_obtained": False, "misses": 0}},
+            "initial_context": None,
+        }
+        self.login_as(self.user)
+        before = ExperimentConfig.objects.count()
+        response = self.client.post("/api/v1/experiment-configs/import/confirm/",
+            data=json.dumps({"document": document, "pool_id": str(self.pool.pk),
+                             "pool_revision": self.pool.revision,
+                             "rule_revision": self.rule.revision}),
+            content_type="application/json")
+        self.assertEqual(response.status_code, 400, response.content)
+        self.assertIn("随机种子最多允许", response.json()["error"]["message"])
+        self.assertEqual(ExperimentConfig.objects.count(), before)
+
+    def test_lowered_python_limit_rejects_old_seed_reads_and_exports_cleanly(self):
+        seed = int("9" * 700)
+        payload = self.payload(seed=str(seed))
+        self.login_as(self.user)
+        created = self.client.post("/api/v1/experiment-configs/",
+            data=json.dumps(payload), content_type="application/json")
+        self.assertEqual(created.status_code, 201, created.content)
+        config_id = created.json()["id"]
+        old_limit = sys.get_int_max_str_digits()
+        try:
+            sys.set_int_max_str_digits(640)
+            listed = self.client.get("/api/v1/experiment-configs/")
+            detail = self.client.get(f"/api/v1/experiment-configs/{config_id}/")
+            exported = self.client.get(
+                f"/api/v1/experiment-configs/{config_id}/export/?expected_revision=1")
+        finally:
+            sys.set_int_max_str_digits(old_limit)
+        for response in (listed, detail, exported):
+            self.assertEqual(response.status_code, 400, response.content)
+            self.assertIn("随机种子最多允许640位", response.json()["error"]["message"])
+        stored = ExperimentConfig.objects.get(pk=config_id)
+        self.assertEqual(stored.revision, 1)
+        self.assertEqual(stored.parameters_json["seed"], seed)
+
+    def test_lowered_python_limit_still_allows_deleting_old_seed_config(self):
+        payload = self.payload(seed="9" * 700)
+        self.login_as(self.user)
+        created = self.client.post("/api/v1/experiment-configs/",
+            data=json.dumps(payload), content_type="application/json")
+        self.assertEqual(created.status_code, 201, created.content)
+        config_id = created.json()["id"]
+        old_limit = sys.get_int_max_str_digits()
+        try:
+            sys.set_int_max_str_digits(640)
+            deleted = self.client.delete(f"/api/v1/experiment-configs/{config_id}/",
+                data=json.dumps({"expected_revision": 1}), content_type="application/json")
+        finally:
+            sys.set_int_max_str_digits(old_limit)
+        self.assertEqual(deleted.status_code, 204, deleted.content)
+        self.assertFalse(ExperimentConfig.objects.filter(pk=config_id).exists())

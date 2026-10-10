@@ -9,6 +9,7 @@ from uuid import UUID
 from lottery_simulator.rules.definitions import (
     BigInitial, CharacterDefinition, RarityDefinition, RarityPool,
 )
+from lottery_simulator.probability import sample_distribution
 from lottery_simulator.rules.runtime import (
     DrawState, advance_state, character_probabilities, compile_pool, initial_context,
     initial_state, normalize_parameters, pity_status, rarity_probabilities,
@@ -35,6 +36,46 @@ class DynamicRulesTests(unittest.TestCase):
                        big_pity=big or rule.big_pity, grant=grant or rule.grant,
                        bonus=replace(rule.bonus, enabled=False))
         return compile_pool(rule, pool or self.c.pool)
+
+    def test_tolerated_rarity_tail_is_shared_with_sampling_and_zero_stays_zero(self):
+        rarities = (
+            replace(self.r4, base_probability=0.5, soft_enabled=False, hard_enabled=False),
+            replace(self.r5, base_probability=0.0, soft_enabled=False, hard_enabled=False),
+            replace(self.r6, base_probability=0.4999999999995, soft_enabled=False, hard_enabled=False),
+        )
+        c = self.compile(rarities=rarities, big=replace(self.c.rule.big_pity, enabled=False))
+        probabilities = rarity_probabilities(c, DrawState())
+        self.assertEqual(probabilities[self.r5.id], 0.0)
+        self.assertEqual(probabilities[self.r4.id], 0.5000000000005)
+        self.assertEqual(math.fsum(probabilities.values()), 1.0)
+        self.assertEqual(sample_distribution(tuple(probabilities.items()), 0.4999999999994), self.r6.id)
+        self.assertEqual(sample_distribution(tuple(probabilities.items()), 0.5000000000001), self.r4.id)
+
+    def test_tolerated_excess_preserves_tiny_positive_rarity(self):
+        rarities = (
+            replace(self.r4, base_probability=1e-300, soft_enabled=False, hard_enabled=False),
+            replace(self.r5, base_probability=0.5000000000005, soft_enabled=False, hard_enabled=False),
+            replace(self.r6, base_probability=0.5, soft_enabled=False, hard_enabled=False),
+        )
+        c = self.compile(rarities=rarities, big=replace(self.c.rule.big_pity, enabled=False))
+        probabilities = rarity_probabilities(c, DrawState())
+        self.assertGreater(probabilities[self.r4.id], 0.0)
+        self.assertEqual(probabilities[self.r5.id], 0.5)
+        self.assertEqual(math.fsum(probabilities.values()), 1.0)
+
+    def test_character_weight_rounding_is_normalized_before_theory_branches(self):
+        roster = next(p for p in self.c.pool.rarity_pools if p.rarity_id == self.r4.id)
+        a = CharacterDefinition(uid(811), self.r4.id, "甲", 54, False, False)
+        b = CharacterDefinition(uid(812), self.r4.id, "乙", 6, False, False)
+        roster = replace(roster, characters=(a, b), up_enabled=False)
+        pool = replace(self.c.pool, rarity_pools=tuple(
+            roster if p.rarity_id == self.r4.id else p for p in self.c.pool.rarity_pools))
+        c = self.compile(pool=pool)
+        probabilities = character_probabilities(c, self.r4.id, DrawState())
+        self.assertEqual(math.fsum(probabilities.values()), 1.0)
+        branches = transition_branches(c, DrawState())
+        self.assertEqual(math.fsum(p for rarity, _, p, _ in branches if rarity == self.r4.id),
+                         rarity_probabilities(c, DrawState())[self.r4.id])
 
     def test_default_boundaries_and_simultaneous_pity(self):
         for misses, expected in [(64, .008), (65, .058), (78, .708), (79, 1.0)]:

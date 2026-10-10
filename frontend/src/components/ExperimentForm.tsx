@@ -23,7 +23,6 @@ export function validateParameters(value: ExperimentParameters): string | null {
     if (!/^(0|[1-9][0-9]*)$/.test(text) || (positive && text === "0")) return `${label}必须是${positive ? "正" : "非负"}十进制整数字符串`;
   }
   if (value.seed !== null && !/^-?(0|[1-9][0-9]*)$/.test(value.seed)) return "随机种子必须是十进制整数";
-  if (value.seed === "0") return "随机种子不能为0";
   return null;
 }
 
@@ -32,9 +31,10 @@ export function ExperimentForm({ value, onChange }: Props) {
     onChange({ ...value, [key]: next });
   }
   return <div className="field-grid">
-    <label>每轮主池抽数<input inputMode="numeric" value={value.draws} onChange={(event) => update("draws", event.target.value)} /></label>
-    <label>实验轮数<input inputMode="numeric" value={value.trials} onChange={(event) => update("trials", event.target.value)} /></label>
-    <label>随机种子（可留空，由系统生成）<input inputMode="numeric" value={value.seed ?? ""} onChange={(event) => update("seed", event.target.value === "" ? null : event.target.value)} /></label>
+    <label>每轮主池抽数<input id="experiment-draws" inputMode="numeric" value={value.draws} onChange={(event) => update("draws", event.target.value)} /></label>
+    <label>实验轮数<input id="experiment-trials" inputMode="numeric" value={value.trials} onChange={(event) => update("trials", event.target.value)} /></label>
+    <label>随机种子（可留空，由系统生成）<input id="experiment-seed" inputMode="numeric" value={value.seed ?? ""} onChange={(event) => update("seed", event.target.value === "" ? null : event.target.value)} /></label>
     <label className="inline-check"><input type="checkbox" checked={value.trace} onChange={(event) => update("trace", event.target.checked)} />保存全过程明细（Trace）</label>
+    <p className="muted">开启后保存每轮每次抽取及直接赠送结果；关闭后仍保存汇总，但不能事后查看逐抽或按抽次分析。</p>
   </div>;
 }

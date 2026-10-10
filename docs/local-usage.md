@@ -4,6 +4,10 @@
 
 项目目录为 `/home/qykj/202607/test/lottery_simulator`。本机已完成依赖、数据库和管理员初始化，日常使用从下一节开始；新机器才需要“首次安装”。本文命令均在项目根目录执行。
 
+本轮实现尚未合并，源码在`/home/qykj/202607/test/lottery_simulator/.worktrees/reliability-ui-improvements`。下文主目录启动步骤不会自动运行未合并工作树代码；本轮状态见[实施记录](changes/2026-10-07-current-update-legacy-reinstall.md)。隔离验收使用临时数据和主目录解释器，不将工作树测试默认连接真实库。
+
+实际切换源码前应核对原任务目录版本：旧抽样版本2的终态文件也不能由当前版本3任务扫描器读取，可能阻止新任务准入。先确认旧worker结束、保留原资料并制定明确的目录隔离方案，不修改版本号或删除整个任务目录绕过检查。本轮未执行真实任务资料切换；同格式网页历史的只读兼容不替代这一检查。
+
 ## 日常启动与停止
 
 两个终端先分别进入项目目录：
@@ -48,11 +52,11 @@ npm --prefix frontend ci
 
 ## 完成一次小型实验
 
-已有开启Trace的历史也可直接用于查看新版图表，无需重跑。按前节启动后端和前端、刷新页面即可加载修改；不用迁移数据库或重新初始化管理员。服务器静态资源的更新方式另见[版本更新](deployment.md#版本更新)。
+已有符合当前代码所支持格式的Trace历史可直接用于图表，无需重跑；同格式抽样版本2、3均支持历史只读，旧算法原样复现仍需原版本，详细范围见[抽样复现说明](dashboard-guide.md#结果赠送与-trace-口径)。按前节启动后端和前端、刷新页面即可加载修改；本轮概率与输入修复不要求迁移数据库或重新初始化管理员。服务器静态资源的更新方式另见[版本更新](deployment.md#版本更新)。
 
 登录后直接使用默认角色池，设置每轮30主抽、2轮、两种初始保底均为0、种子42、开启Trace。无需先保存实验配置。
 
-点击“开始模拟”，等待完成并确认已写入历史。默认赠送规则下，每轮30主抽加10赠送，两轮共60主抽、20赠送、80条Trace。在“历史记录”可再次查看、下载或删除。具体结果页解释见[网页指南](dashboard-guide.md)。
+点击“预览本次实验”核对计数，再点击“确认并开始模拟”，等待完成并确认已写入历史。参数改变后须重新预览；保存实验配置不会创建任务。默认赠送规则下，每轮30主抽加10赠送，两轮共60主抽、20赠送、80条Trace。在“历史记录”可再次查看、下载或删除。具体结果页解释见[网页指南](dashboard-guide.md)。
 
 在“按抽次分析”中缩放窗口检查图表联动，将鼠标移到某个抽次附近查看各星级次数/比例及有效轮数；也可展开“查看数值表”精确读取。这里展示模拟观察比例，不是理论条件概率。
 
@@ -106,17 +110,19 @@ CLI不需要网页登录，也不会自动写入网页历史；角色池来自�
 
 | 位置 | 用途 |
 |---|---|
-| `data/history_v5.sqlite3` | 账号、会话、角色池、实验配置、历史及Trace |
-| `data/jobs_v5/` | 任务状态及暂存文件 |
-| `data/exports_v5/` | 下载临时文件 |
+| `data/history_v6.sqlite3` | 当前账号、会话、角色池、实验配置、历史及Trace |
+| `data/jobs_v6/` | 当前任务状态及暂存文件 |
+| `data/exports_v6/` | 当前下载临时文件 |
+
+`history_v5.sqlite3`、`jobs_v5/`和`exports_v5/`是旧版路径，仅用于识别历史数据，不是当前代码的默认数据位置。v5库不能直接改名后供v6使用；部署迁移边界见[部署指南](deployment.md#v5账号保留与v6切换)。
 
 仅在确实需要独立试验环境时设置以下变量：
 
 ```bash
 export LOTTERY_DATA_DIR=/tmp/lottery-local
-export LOTTERY_DB_PATH=/tmp/lottery-local/history_v5.sqlite3
-export LOTTERY_JOBS_DIR=/tmp/lottery-local/jobs_v5
-export LOTTERY_EXPORTS_DIR=/tmp/lottery-local/exports_v5
+export LOTTERY_DB_PATH=/tmp/lottery-local/history_v6.sqlite3
+export LOTTERY_JOBS_DIR=/tmp/lottery-local/jobs_v6
+export LOTTERY_EXPORTS_DIR=/tmp/lottery-local/exports_v6
 ```
 
 **切换路径就是使用另一套数据，不会自动带入原账号或历史。** 空库需在相同环境变量下执行迁移和初始化，再启动后端；worker继承后端环境。`/tmp`不是长期存储。返回主项目时应恢复预期路径并重启后端，不要将新代码指向旧版数据库。
@@ -129,7 +135,7 @@ export LOTTERY_EXPORTS_DIR=/tmp/lottery-local/exports_v5
 
 ```bash
 install -d -m 700 backups
-.venv/bin/python scripts/backup_db.py data/history_v5.sqlite3 backups/lottery-v5-$(date +%F-%H%M%S).sqlite3
+.venv/bin/python scripts/backup_db.py data/history_v6.sqlite3 backups/lottery-v6-$(date +%F-%H%M%S).sqlite3
 ```
 
 成功输出 `Backup integrity_check: ok`，退出码0，文件权限0600。每次使用新的备份文件名。
@@ -137,13 +143,13 @@ install -d -m 700 backups
 恢复会覆盖目标库。先停止接收新任务，等待或取消worker并确认退出，停止Web及定时备份；核对源和目标，再保留当前库副本。建议先在独立目录验证选定备份，不能直接把恢复当作排障试探。
 
 ```bash
-.venv/bin/python scripts/backup_db.py data/history_v5.sqlite3 backups/pre-restore-v5-$(date +%F-%H%M%S).sqlite3
-.venv/bin/python scripts/backup_db.py backups/lottery-v5-YYYY-MM-DD-HHMMSS.sqlite3 data/history_v5.sqlite3
-.venv/bin/python -c "import sqlite3; c=sqlite3.connect('file:data/history_v5.sqlite3?mode=ro', uri=True); print(c.execute('PRAGMA integrity_check').fetchall()); c.close()"
+.venv/bin/python scripts/backup_db.py data/history_v6.sqlite3 backups/pre-restore-v6-$(date +%F-%H%M%S).sqlite3
+.venv/bin/python scripts/backup_db.py backups/lottery-v6-YYYY-MM-DD-HHMMSS.sqlite3 data/history_v6.sqlite3
+.venv/bin/python -c "import sqlite3; c=sqlite3.connect('file:data/history_v6.sqlite3?mode=ro', uri=True); print(c.execute('PRAGMA integrity_check').fetchall()); c.close()"
 ```
 
 将示例备份名替换为实际文件，每一步成功后才继续；完整性结果应为 `[('ok',)]`。恢复后启动服务，确认登录、历史读取和小型模拟写入。恢复不会同步任务目录；若状态不一致，保留现场调查，不要递归删除数据目录。服务器定时备份和容器路径见[运维说明](deployment.md)。
 
 ## 验证范围与历史记录
 
-本地功能和真实v5库切换已完成，证据见[实施记录](changes/2026-09-24-user-pool-experiment.md)及[浏览器验收](changes/2026-09-29-user-pool-browser-acceptance.md)。旧数据清理是已完成的历史操作，不是日常使用步骤。2026-09-30用户确认腾讯云服务器已使用手动指令部署；自动安装脚本尚未实机测试，已有隔离检查不能代替实机验收。服务器证据和未验事项统一见[部署验证状态](deployment.md#验证状态)。此前[v4恢复演练](changes/2026-09-23-backup-restore-drill.md)仅为历史参考。
+本地功能历史证据见[实施记录](changes/2026-09-24-user-pool-experiment.md)及[浏览器验收](changes/2026-09-29-user-pool-browser-acceptance.md)；其中真实v5库切换属于历史操作，不代表当前默认仍使用v5路径。新版部署实现尚未合并，真实Compose/systemd和由本流程新备份进行的恢复仍待验证；详见[部署验证状态](deployment.md#验证状态)。此前[v4恢复演练](changes/2026-09-23-backup-restore-drill.md)仅为历史参考。

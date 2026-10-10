@@ -4,7 +4,11 @@ import re
 
 from rest_framework import serializers
 
+from dashboard.api.errors import APIError
 from dashboard.models import Pool
+from dashboard.seed_validation import (
+    legacy_seed_limit_message, parse_seed_text, validate_web_seed,
+)
 
 
 class StrictBooleanField(serializers.BooleanField):
@@ -146,16 +150,23 @@ class DecimalSeedField(serializers.Field):
     def to_internal_value(self, data):
         if data is None:
             return None
-        if isinstance(data, str) and re.fullmatch(r"-?(0|[1-9][0-9]*)", data):
+        if isinstance(data, str):
             try:
-                return int(data)
-            except ValueError:
-                self.fail("invalid")
+                return parse_seed_text(data)
+            except ValueError as error:
+                raise serializers.ValidationError(str(error)) from error
         if type(data) is int and abs(data) <= 9007199254740991:
-            return data
+            try:
+                return validate_web_seed(data)
+            except ValueError as error:
+                raise serializers.ValidationError(str(error)) from error
         self.fail("invalid")
 
     def to_representation(self, value):
+        try:
+            value = parse_seed_text(value) if isinstance(value, str) else validate_web_seed(value)
+        except ValueError as error:
+            raise serializers.ValidationError(str(error)) from error
         return None if value is None else str(value)
 
 
@@ -227,8 +238,18 @@ class ExperimentConfigSerializer(StrictSerializer):
             (pool.kind == Pool.PRIVATE and pool.visibility == Pool.PUBLIC) or
             (pool.kind == Pool.PRIVATE and pool.owner_id == actor.pk)
         ))
-        params = instance.parameters_json
+        try:
+            params = instance.parameters_json
+        except ValueError as error:
+            message = legacy_seed_limit_message(error)
+            if message is None:
+                raise
+            raise APIError("validation_error", message, 400) from error
         api_parameters = dict(params)
+        try:
+            api_parameters["seed"] = validate_web_seed(api_parameters.get("seed"))
+        except ValueError as error:
+            raise APIError("validation_error", str(error), 400) from error
         for field in ("draws", "trials", "initial_main_draws", "seed"):
             if type(api_parameters.get(field)) is int:
                 api_parameters[field] = str(api_parameters[field])

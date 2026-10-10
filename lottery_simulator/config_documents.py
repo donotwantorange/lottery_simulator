@@ -20,6 +20,11 @@ DEFAULT_POOL_DIRECTORY = CONFIG_DIRECTORY / "pools"
 DEFAULT_POOL_PATH = DEFAULT_POOL_DIRECTORY / "default.json"
 DEFAULT_EXPERIMENT_PATH = CONFIG_DIRECTORY / "experiments/default.json"
 
+
+class RuleReferenceNotFound(ValueError):
+    """The configured rule ID and its confirmed name candidate are absent."""
+
+
 def parse_config_json(data: bytes, max_bytes: int = MAX_CONFIG_BYTES) -> dict:
     if type(max_bytes) is not int or max_bytes <= 0:
         raise ValueError("JSON大小上限必须是正整数")
@@ -147,18 +152,26 @@ def resolve_pool_reference(ref: dict, directory: str | Path = DEFAULT_POOL_DIREC
 
 
 def resolve_rule_reference(ref: dict, directory: str | Path = DEFAULT_RULE_DIRECTORY,
-                           confirm=None) -> RuleDefinition:
-    """Resolve an ID first; a name fallback is usable only after caller confirmation."""
+                           confirm=None, *, name_fallback: bool = True) -> RuleDefinition:
+    """Resolve an ID first; an optional name fallback requires caller confirmation."""
     if not isinstance(ref, Mapping) or set(ref) != {"id", "name"}:
         raise ValueError("规则引用格式无效")
     rule_id = uuid_text(ref["id"])
     rule_name = normalize_name(ref["name"], "规则引用名称")
     candidates = []
     bad_id_file = False
-    for path in sorted(Path(directory).glob("*.json")):
+    unidentified_bad_file = False
+    rule_directory = Path(directory)
+    try:
+        paths = sorted(path for path in rule_directory.iterdir()
+                       if path.is_file() and path.suffix.lower() == ".json")
+    except FileNotFoundError:
+        paths = []
+    for path in paths:
         try:
             raw = read_config_json(path)
         except ValueError:
+            unidentified_bad_file = True
             try:
                 bad_id_file |= uuid_text(path.stem) == rule_id
             except ValueError:
@@ -177,7 +190,7 @@ def resolve_rule_reference(ref: dict, directory: str | Path = DEFAULT_RULE_DIREC
         try:
             candidates.append(load_rule_document(raw))
         except ValueError:
-            continue
+            unidentified_bad_file = True
     if bad_id_file:
         raise ValueError("规则ID对应文件格式无效，不能按名称替换")
     matches = [rule for rule in candidates if rule.id == rule_id]
@@ -185,9 +198,13 @@ def resolve_rule_reference(ref: dict, directory: str | Path = DEFAULT_RULE_DIREC
         raise ValueError("规则ID对应多个文件")
     if matches:
         return matches[0]
+    if unidentified_bad_file:
+        raise ValueError("规则目录包含损坏或不可读文件，不能确认规则ID缺失")
+    if not name_fallback:
+        raise RuleReferenceNotFound("未找到规则ID")
     named = [rule for rule in candidates if rule.name == rule_name]
     if not named:
-        raise ValueError("未找到规则ID或名称候选")
+        raise RuleReferenceNotFound("未找到规则ID或名称候选")
     if len(named) != 1:
         raise ValueError("规则名称对应多个文件，无法自动选择")
     if not callable(confirm) or not confirm(named[0]):

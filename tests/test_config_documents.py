@@ -129,6 +129,7 @@ class ConfigDocumentsTest(unittest.TestCase):
             Path(directory, "broken.json").write_text("{", encoding="utf-8")
             ref = dict(self.pool["rule_ref"], name="旧名称")
             self.assertEqual(resolve_rule_reference(ref, directory).id, self.rule["id"])
+            Path(directory, "broken.json").unlink()
             missing = dict(ref, id="a33e8fb2-6ca9-4f89-9d7f-e4975c5c4aaa", name=self.rule["name"])
             with self.assertRaisesRegex(ValueError, "确认"):
                 resolve_rule_reference(missing, directory)
@@ -136,6 +137,11 @@ class ConfigDocumentsTest(unittest.TestCase):
                 confirm=lambda candidate: candidate.name == self.rule["name"]).id, self.rule["id"])
             self.assertNotEqual(resolve_rule_reference(dict(ref, id=self.rule["id"].upper()), directory).id,
                                 "")
+            Path(directory, "broken.json").write_text("{", encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "不能确认规则ID缺失"):
+                resolve_rule_reference(missing, directory,
+                    confirm=lambda candidate: candidate.name == self.rule["name"])
+            Path(directory, "broken.json").unlink()
             invalid = deepcopy(self.rule)
             invalid["future_field"] = True
             Path(directory, "invalid.json").write_text(json.dumps(invalid), encoding="utf-8")

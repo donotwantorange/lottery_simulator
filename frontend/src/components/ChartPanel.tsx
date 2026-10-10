@@ -3,6 +3,7 @@ import vegaEmbed from "vega-embed";
 import type { VisualizationSpec } from "vega-embed";
 import { apiRequest, errorMessage } from "../api/client";
 import type { RunResult } from "../api/types";
+import { formatCount, formatProbability } from "../formatters";
 
 const categories = { rarity: "稀有度", categories: "角色类别", characters: "角色", rewards: "奖励", pity: "保底" } as const;
 type Category = keyof typeof categories;
@@ -69,14 +70,14 @@ function PositionTable({ rows, labels, selected, ruleRarities }: {
   const [page, setPage] = useState(1);
   const pages = Math.max(1, Math.ceil(rows.length / 50));
   const indexes = Object.fromEntries(ruleRarities.map((rarity, index) => [rarity.id, `r${index}`]));
-  const format = (value: string) => BigInt(value).toLocaleString("zh-CN");
+  const format = formatCount;
   return <details className="position-values"><summary>查看数值表（{rows.length}个抽次）</summary>
     <p className="muted">比例为该位置出现次数 ÷ 有效轮数，不是理论条件概率。计数和位置以精确十进制文本展示。</p>
     <div className="table-wrap"><table><caption className="visually-hidden">按抽次模拟观察数值</caption>
       <thead><tr><th scope="col">来源内抽次</th><th scope="col">有效轮数</th>{selected.map((id) => <th scope="col" key={id}>{labels[id]}次数 / 比例</th>)}</tr></thead>
       <tbody>{rows.slice((page - 1) * 50, page * 50).map((row) => <tr key={row.position}>
         <th scope="row">{format(row.position)}</th><td>{format(row.observations)}</td>
-        {selected.map((id) => <td key={id}>{format(String(row[`${indexes[id]}_count`]))} / {(Number(row[`${indexes[id]}_rate`]) * 100).toFixed(2)}%</td>)}</tr>)}</tbody>
+        {selected.map((id) => <td key={id}>{format(String(row[`${indexes[id]}_count`]))} / {formatProbability(Number(row[`${indexes[id]}_rate`]))}</td>)}</tr>)}</tbody>
     </table></div>
     <div className="button-row"><button disabled={page === 1} onClick={() => setPage(page - 1)}>上一页</button>
       <span role="status">第 {page} / {pages} 页，每页50个抽次</span>
@@ -99,6 +100,10 @@ export function ChartPanel({ base, result, mode }: { base: string; result: RunRe
   const [summary, setSummary] = useState<SummaryCharts | null>(null);
   const [position, setPosition] = useState<PositionChart | null>(null);
   const [error, setError] = useState("");
+  const [retry, setRetry] = useState(0);
+  const availableCategories: Category[] = source === "grants" || source === "acquisitions"
+    ? ["rarity", "categories", "characters"] : ["rarity", "categories", "characters", "rewards", "pity"];
+  const visibleCategory = availableCategories.includes(category) ? category : "rarity";
 
   useEffect(() => {
     if (mode !== "summary") return;
@@ -107,7 +112,7 @@ export function ChartPanel({ base, result, mode }: { base: string; result: RunRe
       .then((value) => { if (!controller.signal.aborted) setSummary(value); })
       .catch((cause) => { if (!controller.signal.aborted) setError(errorMessage(cause)); });
     return () => controller.abort();
-  }, [base, mode, source]);
+  }, [base, mode, source, retry]);
 
   useEffect(() => {
     if (mode !== "position" || selected.length === 0 || !result.trace_enabled) return;
@@ -120,19 +125,20 @@ export function ChartPanel({ base, result, mode }: { base: string; result: RunRe
       .then((value) => { if (!controller.signal.aborted) setPosition(value); })
       .catch((cause) => { if (!controller.signal.aborted) setError(errorMessage(cause)); });
     return () => controller.abort();
-  }, [base, mode, positionSource, countMode, selected, trialFrom, trialTo, sourceFrom, sourceTo, result.trace_enabled]);
+  }, [base, mode, positionSource, countMode, selected, trialFrom, trialTo, sourceFrom, sourceTo, result.trace_enabled, retry]);
 
   if (mode === "summary") {
-    const rows = summary?.rows[category] ?? [];
+    const rows = summary?.rows[visibleCategory] ?? [];
     return <div className="page-stack"><div className="field-grid">
       <label className="compact-field">数据来源<select value={source} onChange={(event) => setSource(event.target.value as typeof source)}>
         <option value="main">主池抽取</option><option value="bonus">首次赠送抽取</option><option value="total">全部抽取</option><option value="grants">直接赠送</option><option value="acquisitions">全部角色获得</option>
       </select></label>
-      <label className="compact-field">分类<select value={category} onChange={(event) => setCategory(event.target.value as Category)}>{Object.entries(categories).map(([key, title]) => <option key={key} value={key}>{title}</option>)}</select></label>
+      <label className="compact-field">分类<select value={visibleCategory} onChange={(event) => setCategory(event.target.value as Category)}>{availableCategories.map((key) => <option key={key} value={key}>{categories[key]}</option>)}</select></label>
     </div><p className="muted">抽取统计包括抽数与概率；直接赠送没有抽取概率；全部角色获得合并抽取与赠送。</p>
-      {error && <p className="form-error" role="alert">{error}</p>}
+      {error && <><p className="form-error" role="alert">{error}</p><button type="button" onClick={() => setRetry((value) => value + 1)}>重试读取图表</button></>}
+      {!summary && !error && <p className="muted">正在读取分类统计…</p>}
       {summary?.chart_approximate && <p className="notice-note">数值超出浏览器精确图形范围，图形近似显示；数值表优先保留服务端值。</p>}
-      {summary?.specs[category] ? <VegaChart spec={summary.specs[category]} /> : <p className="muted">{category === "rewards" ? "此来源没有奖励统计。" : "暂无图表数据。"}</p>}
+      {summary && (summary.specs[visibleCategory] ? <VegaChart spec={summary.specs[visibleCategory]} /> : <p className="muted">{visibleCategory === "rewards" ? "此来源没有奖励统计。" : "暂无图表数据。"}</p>)}
       {rows.length > 0 && <div className="table-wrap"><table><thead><tr>{Object.keys(rows[0]).map((key) => <th key={key}>{key}</th>)}</tr></thead><tbody>{rows.map((row, index) => <tr key={index}>{Object.entries(row).map(([key, value]) => <td key={key}>{key === "相对误差" ? (value === null ? "不可用" : `${(Number(value) * 100).toFixed(4)}%`) : value === null || value === undefined ? "—" : String(value)}</td>)}</tr>)}</tbody></table></div>}
     </div>;
   }
@@ -145,7 +151,7 @@ export function ChartPanel({ base, result, mode }: { base: string; result: RunRe
     <label className="compact-field">来源位置起<input inputMode="numeric" value={sourceFrom} onChange={(event) => setSourceFrom(event.target.value)} /></label>
     <label className="compact-field">来源位置止（最多1000个）<input inputMode="numeric" value={sourceTo} onChange={(event) => setSourceTo(event.target.value)} /></label>
   </div><fieldset className="plain-fieldset"><legend>稀有度（可多选）</legend><div className="button-row">{rarities.map((rarity) => <label className="inline-check" key={rarity.id}><input type="checkbox" checked={selected.includes(rarity.id)} onChange={() => setSelected(selected.includes(rarity.id) ? selected.filter((id) => id !== rarity.id) : [...selected, rarity.id])} />{labels[rarity.id]}</label>)}</div></fieldset>
-    {selected.length === 0 ? <p role="status">请至少选择一种稀有度；筛选只改变图表，不会重新模拟。</p> : <>{error && <p className="form-error" role="alert">{error}</p>}{position && <>
+    {selected.length === 0 ? <p role="status">请至少选择一种稀有度；筛选只改变图表，不会重新模拟。</p> : <>{error && <><p className="form-error" role="alert">{error}</p><button type="button" onClick={() => setRetry((value) => value + 1)}>重试读取图表</button></>}{!position && !error && <p className="muted">正在读取按抽次分析…</p>}{position && <>
       {position.rows.length === 0 ? <p role="status">所选范围没有逐抽数据，请调整筛选条件。</p> : <>
         <p className="muted">悬停任意抽次附近可查看原始抽次、有效轮数和所选稀有度次数；下方数值表保留精确整数。窗口坐标用于图形定位，原始十进制抽次显示在刻度与提示中。</p>
         {position.chart_approximate && <p className="notice-note">计数轴超出浏览器精确数值范围，图形为近似显示；下方表格仍显示精确值。</p>}

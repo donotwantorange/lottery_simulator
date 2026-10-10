@@ -95,6 +95,22 @@ assert run.seed == str(2**100+1) and run.pool_revision_snapshot == pool.revision
 assert run.events.count() == 2
 rows = query_trace_for_actor(alice, run.pk, TraceFilter())
 assert rows['total'] == 2 and len(rows['items']) == 2
+from django.test import Client
+from django.utils import timezone
+client = Client()
+def logged_in(user):
+    client.force_login(user)
+    session = client.session
+    session['created_at'] = session['last_activity_at'] = timezone.now().isoformat()
+    session['auth_version'] = user.auth_version
+    session.save()
+logged_in(alice)
+for url in (f'/api/v1/runs/{run.pk}/trace/', f'/api/v1/jobs/{state.job_id}/trace/'):
+    response = client.get(url)
+    assert response.status_code == 200, response.content
+    assert response.json()['download_limit'] == '10000', response.content
+logged_in(admin)
+assert client.get(f'/api/v1/runs/{run.pk}/trace/').json()['download_limit'] is None
 assert all(item['event_type'] == 'draw' for item in rows['items'])
 for access in (lambda: get_run_for_actor(bob, run.pk),
                lambda: get_trace_reader_for_actor(bob, run.pk),
@@ -105,6 +121,52 @@ for access in (lambda: get_run_for_actor(bob, run.pk),
 assert list_runs_for_actor(bob)['items'] == []
 assert get_run_for_actor(admin, run.pk).pk == run.pk
 assert HistoryRepository().get_trace_reader(str(run.pk)).count_events(TraceFilter()) == 2
+""")
+
+    def test_same_format_legacy_sampling_history_is_read_only(self):
+        self.scenario("""
+import json
+from copy import deepcopy
+from uuid import uuid4
+from dashboard.job_models import RunParameters, JobState, read_json
+from dashboard.trace_export import export_trace, iter_jsonl
+run = get_run_for_actor(alice, state.run_id)
+legacy = deepcopy(run.result_json)
+legacy['sampling_version'] = 2
+SimulationRun.objects.filter(pk=run.pk).update(result_json=legacy)
+repository = HistoryRepository()
+assert repository.get_run(str(run.pk))['sampling_version'] == 2
+assert repository.list_runs({'owner_id': alice.pk})[0]['sampling_version'] == 2
+reader = repository.get_trace_reader(str(run.pk))
+assert reader.count_events(TraceFilter()) == 2
+lines = [json.loads(line) for line in iter_jsonl(legacy, reader, TraceFilter())]
+assert lines[0]['run']['sampling_version'] == 2 and len(lines) == 3
+export_path = get_manager().root / 'legacy.jsonl'
+export_trace(repository.path, str(run.pk), export_path)
+assert json.loads(export_path.read_text().splitlines()[0])['run']['sampling_version'] == 2
+assert SimulationRun.objects.get(pk=run.pk).result_json == legacy
+for version in (True, 1, 4, '2'):
+    invalid = {**legacy, 'sampling_version': version}
+    SimulationRun.objects.filter(pk=run.pk).update(result_json=invalid)
+    try: repository.get_run(str(run.pk))
+    except ValueError: pass
+    else: raise AssertionError(f'unknown history version accepted: {version!r}')
+    try: repository.get_trace_reader(str(run.pk))
+    except ValueError: pass
+    else: raise AssertionError(f'unknown Trace version accepted: {version!r}')
+    try: list(iter_jsonl(invalid, reader, TraceFilter()))
+    except ValueError: pass
+    else: raise AssertionError(f'unknown export version accepted: {version!r}')
+SimulationRun.objects.filter(pk=run.pk).update(result_json=legacy)
+try: repository.save_run(str(uuid4()), legacy)
+except ValueError: pass
+else: raise AssertionError('legacy sampling result accepted for new save')
+parameters = read_json(get_manager().root / state.job_id / 'parameters.json')
+for loader, data in ((RunParameters.from_dict, parameters),
+                     (JobState.from_dict, read_json(get_manager().root / state.job_id / 'state.json'))):
+    try: loader({**data, 'sampling_version': 2})
+    except ValueError: pass
+    else: raise AssertionError('legacy sampling job accepted')
 """)
 
     def test_cancelled_import_rolls_back_and_rechecks_authorization(self):

@@ -4,6 +4,7 @@ import { ApiError, apiRequest, errorMessage } from "../api/client";
 import type { ExperimentParameters, JobDetail, JobSummary, Page, Pool, Rule, RunResult, RunSummary, SimulationPreview } from "../api/types";
 import { useAuth } from "../auth/AuthProvider";
 import { ResultView } from "./Results";
+import { formatCount, jobStatusLabel } from "../formatters";
 
 export function History() {
   const { user, sessionGeneration } = useAuth();
@@ -17,6 +18,10 @@ export function History() {
   const [pendingDelete, setPendingDelete] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const [listError, setListError] = useState("");
+  const [detailError, setDetailError] = useState("");
+  const [listRetry, setListRetry] = useState(0);
+  const [detailRetry, setDetailRetry] = useState(0);
   const [message, setMessage] = useState("");
   const [submittedJobId, setSubmittedJobId] = useState("");
   const [uncertain, setUncertain] = useState(false);
@@ -28,22 +33,22 @@ export function History() {
     const search = new URLSearchParams({ page: String(page), page_size: "20" });
     if (rule) search.set("rule_name", rule);
     if (trace) search.set("trace", trace);
-    setList(null); setError("");
+    setList(null); setListError("");
     void apiRequest<Page<RunSummary>>(`runs/?${search}`, {}, controller.signal)
       .then((value) => { if (!controller.signal.aborted) setList(value); })
-      .catch((cause) => { if (!controller.signal.aborted) setError(errorMessage(cause)); });
+      .catch((cause) => { if (!controller.signal.aborted) setListError(errorMessage(cause)); });
     return () => controller.abort();
-  }, [rule, trace, page, reload, user?.id, sessionGeneration]);
+  }, [rule, trace, page, reload, listRetry, user?.id, sessionGeneration]);
 
   useEffect(() => {
-    if (!runId) { setResult(null); return; }
+    if (!runId) { setResult(null); setDetailError(""); return; }
     const controller = new AbortController();
-    setResult(null); setPendingDelete(false); setError("");
+    setResult(null); setPendingDelete(false); setDetailError("");
     void apiRequest<RunResult>(`runs/${runId}/`, {}, controller.signal)
       .then((value) => { if (!controller.signal.aborted) setResult(value); })
-      .catch((cause) => { if (!controller.signal.aborted) setError(errorMessage(cause)); });
+      .catch((cause) => { if (!controller.signal.aborted) setDetailError(errorMessage(cause)); });
     return () => controller.abort();
-  }, [runId, reload, user?.id, sessionGeneration]);
+  }, [runId, reload, detailRetry, user?.id, sessionGeneration]);
 
   async function remove() {
     if (!runId || !pendingDelete || busy) return;
@@ -136,19 +141,24 @@ export function History() {
   const pageCount = Math.max(1, Math.ceil((list?.total ?? 0) / 20));
   return <div className="page-stack"><section className="panel"><div className="section-heading"><div><h2>历史记录</h2><p className="muted">按创建时间倒序；权限由服务器逐项检查。</p></div></div>
     <div className="field-grid"><label className="compact-field">规则名称<input value={rule} onChange={(event) => { setRule(event.target.value); setPage(1); }} placeholder="全部规则" /></label><label className="compact-field">Trace<select value={trace} onChange={(event) => { setTrace(event.target.value); setPage(1); }}><option value="">全部</option><option value="true">含 Trace</option><option value="false">不含 Trace</option></select></label></div>
-    <p className="muted">{list ? `共 ${list.total} 条 · 第 ${page}/${pageCount} 页` : "正在查询历史…"}</p>
-    {list && <div className="table-wrap"><table><thead><tr><th>创建时间</th><th>角色池</th><th>规则</th><th>主抽数</th><th>轮数</th><th>过程事件</th><th>操作</th></tr></thead><tbody>{list.items.map((item) => <tr key={item.id}><td>{new Date(item.created_at).toLocaleString()}</td><td>{item.pool_name_snapshot}</td><td>{item.rule_name}</td><td>{item.draws}</td><td>{item.trials}</td><td>{item.event_count}</td><td><button onClick={() => setParams({ run: item.id })}>查看</button></td></tr>)}</tbody></table></div>}
+    <p className="muted">{list ? `共 ${formatCount(list.total)} 条 · 第 ${page}/${pageCount} 页` : listError ? "历史列表读取失败" : "正在查询历史…"}</p>
+    {listError && <p className="form-error" role="alert">{listError} <button type="button" onClick={() => setListRetry((value) => value + 1)}>重试读取列表</button></p>}
+    {list?.items.length === 0 && <p role="status">当前筛选无记录。</p>}
+    {list && <div className="table-wrap"><table><thead><tr><th>创建时间</th><th>角色池</th><th>规则</th><th>每轮主抽</th><th>轮数</th><th>过程事件</th><th>操作</th></tr></thead><tbody>{list.items.map((item) => <tr key={item.id}><td>{new Date(item.created_at).toLocaleString()}</td><td>{item.pool_name_snapshot}</td><td>{item.rule_name}</td><td>{formatCount(item.draws)}</td><td>{formatCount(item.trials)}</td><td>{formatCount(item.event_count)}</td><td><button onClick={() => setParams({ run: item.id })}>查看</button></td></tr>)}</tbody></table></div>}
     <div className="button-row"><button disabled={page <= 1} onClick={() => setPage(page - 1)}>上一页</button><button disabled={page >= pageCount} onClick={() => setPage(page + 1)}>下一页</button></div>
   </section>
+    {runId && !result && !detailError && <p className="muted">正在读取历史快照…</p>}
+    {detailError && <p className="form-error" role="alert">历史快照读取失败：{detailError} <button type="button" onClick={() => setDetailRetry((value) => value + 1)}>重试读取快照</button></p>}
     {runId && result && <><section className="panel"><div className="section-heading"><div><h2>历史快照</h2><p className="muted">{runId}</p></div></div>
-      <p>角色池：{result.pool_snapshot.name} · 修订 {result.pool_revision_snapshot} · 作者 {result.pool_original_author_snapshot || "未署名"}</p>
-      <p>规则：{result.rule_snapshot.name} · 修订 {result.rule_revision_snapshot} · 作者 {result.rule_original_author_snapshot || "未署名"}</p>
+      <p>角色池：{result.pool_name_snapshot ?? result.pool_snapshot.name} · 修订 {result.pool_revision_snapshot} · 作者 {result.pool_original_author_snapshot || "未署名"}</p>
+      <p>规则：{result.rule_name_snapshot ?? result.rule_snapshot.name} · 修订 {result.rule_revision_snapshot} · 作者 {result.rule_original_author_snapshot || "未署名"}</p>
       <p className="muted">本次初始上下文：{result.initial_context.rarity_ids.map((id) => result.pool_snapshot.rarity_labels[id] ?? result.rule_snapshot.rarities.find((rarity) => rarity.id === id)?.name ?? id).join(" → ")}；大保底目标 {result.initial_context.big_target_id ?? "未启用"}</p>
-      <div className="button-row"><button disabled={busy || uncertain} onClick={() => void rerun()}>按当前角色池重跑</button><button className="danger-button" disabled={busy} onClick={() => setPendingDelete(true)}>删除历史</button></div>
+      <p className="notice-note">重跑会使用当前角色池与其当前绑定的规则；历史快照本身不会改变。初始条件若与当前上下文冲突，提交前会明确确认调整。</p>
+      <div className="button-row"><button disabled={busy || uncertain} onClick={() => void rerun()}>按当前配置重跑</button><button className="danger-button" disabled={busy} onClick={() => setPendingDelete(true)}>删除历史</button></div>
       {pendingDelete && <div className="import-preview"><p>确认删除这条历史记录及其 Trace？此操作不可撤销。</p><div className="button-row"><button className="danger-button" disabled={busy} onClick={() => void remove()}>确认删除</button><button onClick={() => setPendingDelete(false)}>取消</button></div></div>}
     </section><ResultView key={runId} base={`runs/${runId}`} result={result} runId={runId} /></>}
     {message && <p className="success-note" role="status">{message} {submittedJobId && <Link to={`/results/?job=${submittedJobId}`}>查看新任务</Link>}</p>}
-    {uncertain && <section className="panel"><h2>本人最近任务</h2><p className="muted">空列表也不能证明提交失败，请勿自动重发。</p><button onClick={() => void lookupJobs()}>再次查询</button>{recentJobs && <div className="table-wrap"><table><thead><tr><th>接受时间</th><th>角色池</th><th>主抽数 / 轮数</th><th>状态</th><th>任务</th></tr></thead><tbody>{recentJobs.items.map((item) => <tr key={item.job_id}><td>{new Date(item.accepted_at).toLocaleString()}</td><td>{item.pool_name_snapshot}</td><td>{item.draws} / {item.trials}</td><td>{item.status}</td><td><Link to={`/results/?job=${item.job_id}`}>{item.job_id}</Link></td></tr>)}</tbody></table></div>}</section>}
+    {uncertain && <section className="panel"><h2>本人最近任务</h2><p className="muted">空列表也不能证明提交失败，请勿自动重发。</p><button onClick={() => void lookupJobs()}>再次查询</button>{recentJobs && <div className="table-wrap"><table><thead><tr><th>接受时间</th><th>角色池</th><th>主抽数 / 轮数</th><th>状态</th><th>任务</th></tr></thead><tbody>{recentJobs.items.map((item) => <tr key={item.job_id}><td>{new Date(item.accepted_at).toLocaleString()}</td><td>{item.pool_name_snapshot}</td><td>{formatCount(item.draws)} / {formatCount(item.trials)}</td><td>{jobStatusLabel(item.status)}</td><td><Link to={`/results/?job=${item.job_id}`}>{item.job_id}</Link></td></tr>)}</tbody></table></div>}</section>}
     {error && <p className="form-error" role="alert">{error}</p>}
   </div>;
 }

@@ -10,6 +10,8 @@ button { cursor: pointer; }
 .sidebar nav { display: grid; gap: 7px; }
 .sidebar nav a { padding: 11px 13px; border-radius: 9px; color: #68758a; text-decoration: none; font-size: 14px; }
 .sidebar nav a:hover, .sidebar nav a:focus-visible { color: #3458db; background: #eff3ff; outline: none; }
+.sidebar nav a[aria-current="page"] { color: #3458db; background: #e9efff; font-weight: 700; border-left: 3px solid #4568e8; }
+.sidebar nav a:focus-visible, button:focus-visible, select:focus-visible, summary:focus-visible, a:focus-visible { outline: 2px solid #3458db; outline-offset: 2px; }
 .account-card { display: flex; align-items: center; gap: 10px; margin-top: auto; padding: 12px 8px 4px; border-top: 1px solid #eef1f5; }
 .avatar { display: grid; place-items: center; width: 34px; height: 34px; flex: 0 0 auto; border-radius: 50%; color: #415fe0; background: #e9edff; font-weight: 700; }
 .account-copy { display: grid; min-width: 0; flex: 1; gap: 2px; }
@@ -17,10 +19,12 @@ button { cursor: pointer; }
 .account-copy small, .muted { color: #77849a; font-size: 13px; }
 .quiet-button { border: 0; background: transparent; color: #7a879a; font-size: 18px; }
 .workspace { margin-left: 248px; padding: 50px clamp(24px, 5vw, 76px); }
+.workspace, .panel, .section-heading, .page-heading { min-width: 0; }
 .page-heading { display: flex; justify-content: space-between; align-items: flex-end; margin-bottom: 28px; }
 .page-heading h1, .panel h1, .panel h2, .login-card h1 { margin: 4px 0 8px; letter-spacing: -.035em; }
 .eyebrow { margin: 0; color: #8591a5; font-size: 11px; font-weight: 700; letter-spacing: .12em; text-transform: uppercase; }
 .panel { min-height: 220px; padding: 28px; border: 1px solid #e5eaf1; border-radius: 14px; background: #fff; box-shadow: 0 8px 30px #18294408; }
+.panel p, .panel h2, .panel h3, .metric-card, .trace-details dd { overflow-wrap: anywhere; }
 .narrow-panel { width: min(100%, 480px); margin: 10vh auto; }
 .stack-form, .login-card { display: grid; gap: 17px; }
 .stack-form label, .login-card label { display: grid; gap: 7px; color: #536176; font-size: 13px; font-weight: 600; }
@@ -82,6 +86,13 @@ input:focus { border-color: #7188ee; box-shadow: 0 0 0 3px #4568e81c; }
 .metric-card { display: grid; gap: 7px; padding: 15px; border: 1px solid #e5eaf1; border-radius: 10px; background: #f9faff; }
 .metric-card span { color: #77849a; font-size: 12px; }
 .metric-card strong { font-size: 20px; overflow-wrap: anywhere; }
+.result-metric-group h3 { margin: 12px 0; font-size: 16px; }
+.trace-table td { vertical-align: top; }
+.trace-table .trace-details { min-width: 180px; max-width: 42rem; white-space: normal; }
+.trace-details summary { cursor: pointer; color: #3458db; font-weight: 600; }
+.trace-details dl { display: grid; grid-template-columns: minmax(90px, 11rem) minmax(180px, 1fr); gap: 8px 12px; margin: 12px 0; }
+.trace-details dt { color: #68758a; }
+.trace-details dd { margin: 0; white-space: normal; }
 .chart-box { width: 100%; min-width: 0; min-height: 320px; overflow-x: auto; }
 .chart-box.vega-embed { display: block; padding: 0; }
 .chart-box svg { display: block; }
@@ -98,3 +109,4 @@ input:focus { border-color: #7188ee; box-shadow: 0 0 0 3px #4568e81c; }
 .impact-list { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 9px 16px; padding: 14px; border-radius: 9px; background: #f7f8fb; font-size: 13px; }
 .impact-list dt { color: #68758a; }.impact-list dd { margin: 0; font-weight: 700; }
 @media (max-width: 740px) { .sidebar { z-index: 1; position: static; width: 100%; height: auto; padding: 14px; border: 0; border-bottom: 1px solid #e5eaf1; } .brand { margin: 0 4px 14px; } .sidebar nav { grid-template-columns: repeat(auto-fit, minmax(110px, 1fr)); } .sidebar nav a { padding: 9px; text-align: center; } .account-card { margin-top: 14px; } .workspace { margin: 0; padding: 28px 18px; } .narrow-panel { margin: 0; } }
+@media (max-width: 440px) { .workspace { padding: 20px 12px; } .panel { padding: 18px 14px; } .sidebar nav { grid-template-columns: repeat(2, minmax(0, 1fr)); } .metric-grid { grid-template-columns: minmax(0, 1fr); } .trace-details dl { grid-template-columns: minmax(0, 1fr); } }

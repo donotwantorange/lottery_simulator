@@ -3,12 +3,15 @@
 from dataclasses import replace
 from pathlib import Path
 import sqlite3
+import sys
 from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import patch
 from uuid import uuid4
 
+import dashboard.job_models as job_models
 from dashboard.job_models import write_json
-from scripts.upgrade_probe import check
+from scripts.upgrade_probe import check, main
 from tests.test_job_models import valid_state
 
 
@@ -29,6 +32,26 @@ class UpgradeProbeTest(unittest.TestCase):
         state = replace(valid_state(), status='cancelled', phase=None)
         write_json(self.root / 'jobs_v6' / state.job_id / 'state.json', state.to_dict())
         check(6, self.root, self.processes)
+        check(6, self.root, self.processes, target_job_format=4, target_sampling=3)
+
+    def test_old_terminal_sampling_is_rejected_for_new_target(self):
+        state = replace(valid_state(), status='cancelled', phase=None)
+        raw = state.to_dict()
+        raw['sampling_version'] = 2
+        raw['parameters']['sampling_version'] = 2
+        write_json(self.root / 'jobs_v6' / state.job_id / 'state.json', raw)
+        with patch.object(job_models, 'SAMPLING_VERSION', 2):
+            check(6, self.root, self.processes)
+            check(6, self.root, self.processes, target_job_format=4, target_sampling=2)
+            with self.assertRaisesRegex(ValueError, '目标版本.*保留原现场'):
+                check(6, self.root, self.processes, target_job_format=4, target_sampling=3)
+            with self.assertRaisesRegex(ValueError, '目标版本.*保留原现场'):
+                check(6, self.root, self.processes, target_job_format=5, target_sampling=2)
+
+    def test_existing_management_probe_keeps_optional_target(self):
+        with patch.object(sys, 'argv', ['-', 'probe', '6']), patch('scripts.upgrade_probe.check') as validator:
+            main()
+        validator.assert_called_once_with(6, target_job_format=None, target_sampling=None)
 
     def test_active_corrupt_missing_and_unsafe_tasks_block(self):
         directory = self.root / 'jobs_v6' / str(uuid4())

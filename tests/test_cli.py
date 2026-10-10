@@ -7,11 +7,12 @@ import unittest
 from io import StringIO
 from unittest.mock import patch
 
-from lottery_simulator.cli import main
+from lottery_simulator.cli import _load_rule, main
 from lottery_simulator.config_documents import (
     DEFAULT_EXPERIMENT_PATH, DEFAULT_POOL_PATH, DEFAULT_RULE_PATH,
-    read_config_json,
+    load_pool_document, read_config_json,
 )
+from lottery_simulator.rules.runtime import compile_pool
 
 
 class CliTest(unittest.TestCase):
@@ -86,6 +87,100 @@ class CliTest(unittest.TestCase):
                 main(["simulate", "--pool-config", str(DEFAULT_POOL_PATH), "--rule-config", str(path),
                       "--draws", "1"], stdout=StringIO())
             self.assertEqual(error.exception.code, 2)
+
+    def test_external_same_name_rule_requires_confirmation_and_reports_path(self):
+        pool = load_pool_document(read_config_json(DEFAULT_POOL_PATH))
+        rule = read_config_json(DEFAULT_RULE_PATH)
+        rule["id"] = "a33e8fb2-6ca9-4f89-9d7f-e4975c5c4aaa"
+
+        class TTY(StringIO):
+            def isatty(self):
+                return True
+
+        with TemporaryDirectory() as directory:
+            explicit = Path(directory, "external-rule.json")
+            explicit.write_text(json.dumps(rule), encoding="utf-8")
+            rule_directory = Path(directory, "rules")
+            rule_directory.mkdir()
+            competing = dict(rule)
+            competing["id"] = "b33e8fb2-6ca9-4f89-9d7f-e4975c5c4aaa"
+            Path(rule_directory, "competing.json").write_text(json.dumps(competing), encoding="utf-8")
+            args = type("Args", (), {"rule_config": str(explicit),
+                                     "rule_directory": str(rule_directory)})()
+            stderr = StringIO()
+            selected, updated_pool = _load_rule(pool, args, TTY("y\n"), stderr)
+            self.assertEqual(selected.id, rule["id"])
+            self.assertEqual(updated_pool.rule_ref, {"id": rule["id"], "name": rule["name"]})
+            self.assertIn(rule["name"], stderr.getvalue())
+            self.assertIn(rule["id"], stderr.getvalue())
+            self.assertIn(str(explicit), stderr.getvalue())
+            self.assertEqual(pool.rule_ref, read_config_json(DEFAULT_POOL_PATH)["rule_ref"])
+            compile_pool(selected, updated_pool)
+
+    def test_external_rule_rejects_noninteractive_denial_and_name_mismatch(self):
+        pool = load_pool_document(read_config_json(DEFAULT_POOL_PATH))
+        rule = read_config_json(DEFAULT_RULE_PATH)
+        rule["id"] = "a33e8fb2-6ca9-4f89-9d7f-e4975c5c4aaa"
+        with TemporaryDirectory() as directory:
+            explicit = Path(directory, "external-rule.json")
+            explicit.write_text(json.dumps(rule), encoding="utf-8")
+            args = type("Args", (), {"rule_config": str(explicit),
+                                     "rule_directory": str(Path(directory, "rules"))})()
+            with self.assertRaisesRegex(ValueError, "未获交互确认"):
+                _load_rule(pool, args, StringIO("y\n"), StringIO())
+
+            class TTY(StringIO):
+                def isatty(self):
+                    return True
+
+            with self.assertRaisesRegex(ValueError, "未获交互确认"):
+                _load_rule(pool, args, TTY("n\n"), StringIO())
+            rule["name"] = "different name"
+            explicit.write_text(json.dumps(rule), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "名称与池引用不符"):
+                _load_rule(pool, args, TTY("y\n"), StringIO())
+
+    def test_confirmed_external_rule_still_requires_pool_compatibility(self):
+        pool = load_pool_document(read_config_json(DEFAULT_POOL_PATH))
+        rule = read_config_json(DEFAULT_RULE_PATH)
+        rule["id"] = "a33e8fb2-6ca9-4f89-9d7f-e4975c5c4aaa"
+        replacement_id = "d33e8fb2-6ca9-4f89-9d7f-e4975c5c4aaa"
+        rule["rarities"][0]["id"] = replacement_id
+        rule["bonus"]["rarities"][0]["id"] = replacement_id
+
+        class TTY(StringIO):
+            def isatty(self):
+                return True
+
+        with TemporaryDirectory() as directory:
+            explicit = Path(directory, "external-rule.json")
+            explicit.write_text(json.dumps(rule), encoding="utf-8")
+            args = type("Args", (), {"rule_config": str(explicit),
+                                     "rule_directory": str(Path(directory, "rules"))})()
+            selected, updated_pool = _load_rule(pool, args, TTY("y\n"), StringIO())
+            with self.assertRaisesRegex(ValueError, "稀有度ID必须与规则完整对应"):
+                compile_pool(selected, updated_pool)
+
+    def test_existing_rule_id_and_corrupt_id_file_cannot_be_replaced(self):
+        pool = load_pool_document(read_config_json(DEFAULT_POOL_PATH))
+        other = read_config_json(DEFAULT_RULE_PATH)
+        other["id"] = "a33e8fb2-6ca9-4f89-9d7f-e4975c5c4aaa"
+        with TemporaryDirectory() as directory:
+            root = Path(directory, "rules")
+            root.mkdir()
+            explicit = Path(directory, "external-rule.json")
+            explicit.write_text(json.dumps(other), encoding="utf-8")
+            exact = read_config_json(DEFAULT_RULE_PATH)
+            Path(root, f"{exact['id']}.json").write_text(json.dumps(exact), encoding="utf-8")
+            args = type("Args", (), {"rule_config": str(explicit), "rule_directory": str(root)})()
+            with self.assertRaisesRegex(ValueError, "显式规则文件与池引用不匹配"):
+                _load_rule(pool, args, StringIO(), StringIO())
+            Path(root, f"{exact['id']}.json").write_text("{broken", encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "规则ID对应文件格式无效"):
+                _load_rule(pool, args, StringIO(), StringIO())
+            args.rule_directory = str(explicit)
+            with self.assertRaises(NotADirectoryError):
+                _load_rule(pool, args, StringIO(), StringIO())
 
     def test_export_trace_delegates_event_filters_to_streaming_export(self):
         with patch("dashboard.trace_export.export_trace") as export:

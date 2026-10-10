@@ -5,6 +5,7 @@ from dataclasses import dataclass, replace
 import math
 from types import MappingProxyType
 
+from lottery_simulator.probability import normalize_probabilities
 from lottery_simulator.rules.definitions import (
     ExperimentParameters, InitialContext, PoolDefinition, RuleDefinition,
     boolean, count, id_map, object_fields,
@@ -184,9 +185,8 @@ def pity_status(compiled: CompiledPool, state: DrawState) -> dict:
 
 
 def _check_distribution(probabilities):
-    if any(not math.isfinite(p) or not 0 <= p <= 1 for p in probabilities.values()) or abs(math.fsum(probabilities.values()) - 1) > 1e-12:
-        raise ValueError("运行概率必须非负、有限且合计为1")
-    return probabilities
+    normalized = normalize_probabilities(tuple(probabilities.values()))
+    return dict(zip(probabilities, normalized))
 
 
 def rarity_probabilities(compiled: CompiledPool, state: DrawState) -> dict[str, float]:

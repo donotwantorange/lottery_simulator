@@ -8,7 +8,7 @@ export interface AuthUser {
 }
 
 export interface ApiErrorPayload {
-  error: { code: string; message: string; fields?: Record<string, string[]> };
+  error: { code: string; message: string; fields?: Record<string, unknown> };
 }
 
 export interface Page<T> {
@@ -276,7 +276,7 @@ export interface RunResult {
   rule_original_author_snapshot?: string;
 }
 
-export interface TracePage<T> { items: T[]; total: string; page: number; page_size: number }
+export interface TracePage<T> { items: T[]; total: string; page: number; page_size: number; download_limit?: string | null }
 
 export interface Account {
   id: string; username: string; role: UserRole; enabled: boolean; deleting: boolean;
