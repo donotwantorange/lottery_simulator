@@ -32,7 +32,7 @@ function canEdit(rule: Rule, user: { id: string; role: string } | null): boolean
 function ruleServerIssues(fields: Record<string, string>, document: RuleDocument | null): { issues: FieldIssue[]; other: string[] } {
   const issues: FieldIssue[] = [];
   const other: string[] = [];
-  const fieldNames: Record<string, string> = { base_probability: "基础概率", soft_start: "软保底起点", soft_step: "每抽增幅", hard_pity: "硬保底抽数" };
+  const fieldNames: Record<string, string> = { base_probability: "基础概率", soft_start: "连续未获得次数", soft_step: "每抽增幅", hard_pity: "硬保底抽数" };
   const fieldSuffix: Record<string, string> = { base_probability: "probability", soft_start: "soft-start", soft_step: "soft-step", hard_pity: "hard-pity" };
   const simple: Record<string, [string, string]> = {
     name: ["rule-name", "规则名称"], "big_pity.hard_pity": ["big-pity:count", "大保底抽数"],

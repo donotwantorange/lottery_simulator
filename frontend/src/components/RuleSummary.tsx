@@ -1,6 +1,6 @@
 import { Link } from "react-router-dom";
 import type { PoolDocument, Rule } from "../api/types";
-import { formatProbability, formatQuantity } from "../formatters";
+import { formatProbability, softPityText, SOFT_PITY_CONSTRAINT } from "../formatters";
 
 interface Props { rule: Rule; pool: PoolDocument }
 
@@ -19,7 +19,7 @@ export function RuleSummary({ rule, pool }: Props) {
       : allCharacters.find((item) => item.id === pool.mechanism_targets.periodic_grant);
   const enabledPity = byRank.flatMap((rarity) => {
     const settings = rule.document.rarities.find((item) => item.id === rarity.id)!;
-    const soft = settings.soft_enabled ? `软保底第${settings.soft_start}抽起，每抽增加${formatQuantity(settings.soft_step * 100)}个百分点` : "软保底未启用";
+    const soft = softPityText({ ...settings, name: rarityName(rarity.id, rarity.name) }, rarity.id === highest.id);
     const hard = settings.hard_enabled ? `硬保底第${settings.hard_pity}抽` : "硬保底未启用";
     return [`${rarityName(rarity.id, rarity.name)}：${soft}；${hard}`];
   });
@@ -42,6 +42,7 @@ export function RuleSummary({ rule, pool }: Props) {
       <dt>基础概率</dt><dd>{byRank.slice().reverse().map((rarity) =>
         `${rarityName(rarity.id, rarity.name)} ${formatProbability(rarity.base_probability)}`).join(" · ")}</dd>
       <dt>小保底</dt><dd>{smallPity}</dd>
+      {byRank.some((item) => item.soft_enabled) && <><dt>软保底约束</dt><dd>{SOFT_PITY_CONSTRAINT}</dd></>}
       <dt>大保底目标</dt><dd>{rule.document.big_pity.enabled
         ? `第${rule.document.big_pity.hard_pity}次主抽必得目标；${bigTarget?.name ?? "未解析：需绑定最高档UP角色"}，按最高档名单顺序选中；${afterObtain}`
         : "已关闭"}</dd>

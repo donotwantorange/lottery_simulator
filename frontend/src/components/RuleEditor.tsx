@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import type { RuleDocument, RuleRarityDocument } from "../api/types";
 import { FormFeedback, ReadonlyValue, type FieldIssue } from "./FormFeedback";
 import { useNumberDrafts, type NumberDraft } from "../hooks/useEditorDraft";
+import { softStartFromMisses, softPityText, softPityTarget, SOFT_PITY_CONSTRAINT } from "../formatters";
 
 interface Props {
   value: RuleDocument;
@@ -27,6 +28,7 @@ interface NumberFieldProps {
   updateDraft(id: string, draft: NumberDraft): void;
   onCommit(value: number): void;
   hint?: string;
+  inline?: boolean;
 }
 
 function orderedNamesValid(rarities: RuleRarityDocument[]) {
@@ -36,22 +38,26 @@ function orderedNamesValid(rarities: RuleRarityDocument[]) {
 
 const safeCount = (value: number, min = 1) => Number.isSafeInteger(value) && value >= min;
 
-function NumberField({ id, label, value, min = 0, max, integer = false, positive = false, unit, disabled, draft, updateDraft, onCommit, hint }: NumberFieldProps) {
+function NumberField({ id, label, value, min = 0, max, integer = false, positive = false, unit, disabled, draft, updateDraft, onCommit, hint, inline }: NumberFieldProps) {
   const formatted = unit ? String(value * 100) : String(value);
   const text = draft?.text ?? formatted;
   const error = draft?.error ?? "";
   function commit() {
     const raw = text.trim();
+    if (raw === formatted) {
+      updateDraft(id, { text, lastLegal: value, error: "" });
+      return;
+    }
     const parsed = Number(raw);
     const next = unit ? parsed / 100 : parsed;
-    if (!/^[+]?(?:\d+(?:\.\d*)?|\.\d+)$/.test(raw) || !Number.isFinite(parsed) || (integer && (!Number.isSafeInteger(parsed) || !Number.isInteger(parsed))) || parsed < min || (positive && parsed <= 0) || (max !== undefined && parsed > max)) {
+    if (!/^[+]?(?:\d+(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?$/i.test(raw) || !Number.isFinite(parsed) || !Number.isFinite(next) || (integer && (!Number.isSafeInteger(parsed) || !Number.isInteger(parsed))) || parsed < min || (positive && next <= 0) || (max !== undefined && parsed > max)) {
       updateDraft(id, { text, lastLegal: value, error: integer ? "请输入范围内的安全整数。" : positive ? "请输入大于0的有限数值。" : `请输入${min}至${max ?? "有限范围"}之间的有限数值。` });
       return;
     }
     updateDraft(id, { text, lastLegal: next, error: "" });
     onCommit(next);
   }
-  return <label>{label}<input id={id} type="text" inputMode="decimal" aria-label={label} disabled={disabled} value={text}
+  return <label className={inline ? "sentence-field" : undefined}><span className={inline ? "sr-only" : undefined}>{label}</span><input id={id} type="text" inputMode="decimal" aria-label={label} disabled={disabled} value={text}
     aria-invalid={Boolean(error)} onChange={(event) => updateDraft(id, { text: event.target.value, lastLegal: value, error: "请完成并修正此输入。" })} onBlur={commit} />
     {error && <small className="form-error" role="alert">{error}</small>}
     {hint && <small className="muted">{hint}</small>}
@@ -79,8 +85,6 @@ export function RuleEditor({ value, onChange, structureLocked, disabled = false,
   }));
   const locked = disabled || structureLocked;
   const orderedRarities = useMemo(() => [...value.rarities].sort((a, b) => a.rank - b.rank), [value.rarities]);
-  const softExample = orderedRarities.find((item) => item.soft_enabled);
-  const softExampleProbability = softExample ? Math.min(100, (softExample.base_probability + softExample.soft_step) * 100) : undefined;
   const sum = useMemo(() => value.rarities.reduce((total, item) => total + item.base_probability, 0), [value.rarities]);
   const bonusSum = useMemo(() => value.bonus.rarities.reduce((total, item) => total + item.base_probability, 0), [value.bonus.rarities]);
   const probabilitiesValid = [...value.rarities, ...value.bonus.rarities].every((item) => Number.isFinite(item.base_probability) && item.base_probability >= 0 && item.base_probability <= 1 && Number.isFinite(item.soft_step) && item.soft_step >= 0)
@@ -153,6 +157,16 @@ export function RuleEditor({ value, onChange, structureLocked, disabled = false,
   function field(id: string, label: string, current: number, assign: (n: number) => void, options: Omit<NumberFieldProps, "id" | "label" | "value" | "draft" | "updateDraft" | "onCommit"> = {}) {
     return <NumberField key={id} id={id} label={label} value={current} disabled={disabled} draft={numberDrafts.fields[id]} updateDraft={numberDrafts.update} onCommit={assign} {...options} />;
   }
+  function softFields(rarity: RuleRarityDocument, area: "main" | "bonus", assign: (update: (item: RuleRarityDocument) => void) => void, fieldDisabled: boolean) {
+    const scope = area === "bonus" ? "赠送池" : "";
+    const highest = rarity.rank === Math.max(...value.rarities.map((item) => item.rank));
+    return <div className="soft-pity-sentence">{scope && `${scope}：`}若连续
+      {field(`${area}:${rarity.id}:soft-start`, `${rarity.name}${scope}连续未获得次数`, rarity.soft_start - 1, (n) => assign((item) => { item.soft_start = softStartFromMisses(n); }), { min: 0, max: Number.MAX_SAFE_INTEGER - 1, integer: true, disabled: fieldDisabled, inline: true })}
+      次没有获取{softPityTarget(rarity.name, highest)}，接下来每一次寻访获取{softPityTarget(rarity.name, true)}的概率将依次提高
+      {field(`${area}:${rarity.id}:soft-step`, `${rarity.name}${scope}每抽增幅（百分点）`, rarity.soft_step, (n) => assign((item) => { item.soft_step = n; }), { unit: "points", positive: rarity.soft_enabled, disabled: fieldDisabled, inline: true })}
+      个百分点。<small className="muted">{SOFT_PITY_CONSTRAINT}{!rarity.soft_enabled && "软保底未启用，这些是保留参数。"}</small>
+    </div>;
+  }
   function pending(prefix: string, visible: boolean) {
     const issues = Object.entries(numberDrafts.fields).filter(([id, draft]) => id.startsWith(prefix) && draft.error);
     if (visible || issues.length === 0) return null;
@@ -166,7 +180,7 @@ export function RuleEditor({ value, onChange, structureLocked, disabled = false,
   } }));
 
   const rarityName = (id: string) => value.rarities.find((item) => item.id === id)?.name ?? id.slice(0, 8);
-  const fieldNames: Record<string, string> = { probability: "基础概率", "soft-start": "软保底起点", "soft-step": "每抽增幅", "hard-pity": "硬保底抽数" };
+  const fieldNames: Record<string, string> = { probability: "基础概率", "soft-start": "连续未获得次数", "soft-step": "每抽增幅", "hard-pity": "硬保底抽数" };
   for (const issue of issues) {
     const [area, rarityId, fieldName] = issue.id.split(":");
     issue.label = area === "main" || area === "bonus" ? `${rarityName(rarityId)}${area === "bonus" ? "赠送池" : ""}${fieldNames[fieldName] ?? fieldName}` :
@@ -186,15 +200,14 @@ export function RuleEditor({ value, onChange, structureLocked, disabled = false,
       {!structureLocked && <button type="button" className="secondary-button" disabled={locked} onClick={addRarity}>添加稀有度</button>}
     </section>
     <section className="editor-section"><h3>基础概率与小保底</h3>
-      <p className="muted">基础概率是每次常规抽取的初始概率，各档合计100%；保底触发后概率可能改变。软保底增幅单位是百分点。{softExample && softExampleProbability !== undefined ? `当前${softExample.name}基础概率${(softExample.base_probability * 100).toFixed(3)}%，每抽增加${(softExample.soft_step * 100).toFixed(3)}个百分点，示例：${(softExample.base_probability * 100).toFixed(3)}% + ${(softExample.soft_step * 100).toFixed(3)}个百分点 = ${softExampleProbability.toFixed(3)}%（最高100%）。起点为第${softExample.soft_start}抽。实际概率还受可扣减低档概率及更高档机制约束。` : "启用后按起点和增幅计算。"}关闭的保底参数保留但不生效。</p>
+      <p className="muted">基础概率是每次常规抽取的初始概率，各档合计100%；保底触发后概率可能改变。填写连续未获得次数N，内部起点为N+1；关闭的保底参数保留但不生效。</p>
       {orderedRarities.map((rarity) => <div className="field-grid" key={rarity.id}>
         <label>稀有度名称<input disabled={disabled} value={rarity.name} onChange={(event) => updateRarity(rarity.id, (item) => { item.name = event.target.value; })} /></label>
         {field(`main:${rarity.id}:probability`, `${rarity.name}基础概率（百分比）`, rarity.base_probability, (n) => updateRarity(rarity.id, (item) => { item.base_probability = n; }), { unit: "percent", max: 100 })}
         <label className="inline-check"><input type="checkbox" disabled={disabled} checked={rarity.soft_enabled} onChange={(event) => updateRarity(rarity.id, (item) => { item.soft_enabled = event.target.checked; })} />启用软保底</label>
         {pending(`main:${rarity.id}:soft-`, rarity.soft_enabled || !!revealed[`main:${rarity.id}`])}
-        {(rarity.soft_enabled || revealed[`main:${rarity.id}`]) && field(`main:${rarity.id}:soft-start`, `${rarity.name}软保底起点`, rarity.soft_start, (n) => updateRarity(rarity.id, (item) => { item.soft_start = n; }), { min: 1, integer: true, disabled })}
-        {rarity.soft_enabled && <p className="muted">连续未抽到该档或更高档时，第{rarity.soft_start}抽开始按百分点增加概率。</p>}
-        {(rarity.soft_enabled || revealed[`main:${rarity.id}`]) && field(`main:${rarity.id}:soft-step`, `${rarity.name}每抽增幅（百分点）`, rarity.soft_step, (n) => updateRarity(rarity.id, (item) => { item.soft_step = n; }), { unit: "points", positive: rarity.soft_enabled, disabled })}
+        {(rarity.soft_enabled || revealed[`main:${rarity.id}`]) && softFields(rarity, "main", (update) => updateRarity(rarity.id, update), disabled)}
+        {!rarity.soft_enabled && <p className="muted">软保底未启用</p>}
         <label className="inline-check"><input type="checkbox" disabled={disabled} checked={rarity.hard_enabled} onChange={(event) => updateRarity(rarity.id, (item) => { item.hard_enabled = event.target.checked; })} />启用硬保底</label>
         {pending(`main:${rarity.id}:hard-`, rarity.hard_enabled || !!revealed[`main:${rarity.id}`])}
         {(rarity.hard_enabled || revealed[`main:${rarity.id}`]) && field(`main:${rarity.id}:hard-pity`, `${rarity.name}硬保底抽数`, rarity.hard_pity, (n) => updateRarity(rarity.id, (item) => { item.hard_pity = n; }), { min: 1, integer: true, disabled })}
@@ -222,8 +235,8 @@ export function RuleEditor({ value, onChange, structureLocked, disabled = false,
         {field(`bonus:${rarity.id}:probability`, `${rarity.name}赠送池概率（百分比）`, rarity.base_probability, (n) => changeBonus((bonus) => { const item = bonus.rarities.find((entry) => entry.id === rarity.id)!; item.base_probability = n; }), { unit: "percent", max: 100, disabled: disabled || (!value.bonus.enabled && !revealed["bonus:"]) })}
         <label className="inline-check"><input type="checkbox" disabled={disabled || !value.bonus.enabled} checked={rarity.soft_enabled} onChange={(event) => changeBonus((bonus) => { bonus.rarities.find((item) => item.id === rarity.id)!.soft_enabled = event.target.checked; })} />启用赠送池软保底</label>
         {pending(`bonus:${rarity.id}:soft-`, rarity.soft_enabled || !!revealed["bonus:"])}
-        {(rarity.soft_enabled || revealed["bonus:"]) && field(`bonus:${rarity.id}:soft-start`, `${rarity.name}赠送池软保底起点`, rarity.soft_start, (n) => changeBonus((bonus) => { bonus.rarities.find((item) => item.id === rarity.id)!.soft_start = n; }), { min: 1, integer: true, disabled: disabled || (!revealed["bonus:"] && (!value.bonus.enabled || !rarity.soft_enabled)) })}
-        {(rarity.soft_enabled || revealed["bonus:"]) && field(`bonus:${rarity.id}:soft-step`, `${rarity.name}赠送池每抽增幅（百分点）`, rarity.soft_step, (n) => changeBonus((bonus) => { bonus.rarities.find((item) => item.id === rarity.id)!.soft_step = n; }), { unit: "points", positive: rarity.soft_enabled, disabled: disabled || (!revealed["bonus:"] && (!value.bonus.enabled || !rarity.soft_enabled)) })}
+        {(rarity.soft_enabled || revealed["bonus:"]) && softFields(rarity, "bonus", (update) => changeBonus((bonus) => update(bonus.rarities.find((item) => item.id === rarity.id)!)), disabled)}
+        {!rarity.soft_enabled && <p className="muted">赠送池软保底未启用</p>}
         <label className="inline-check"><input type="checkbox" disabled={disabled || !value.bonus.enabled} checked={rarity.hard_enabled} onChange={(event) => changeBonus((bonus) => { bonus.rarities.find((item) => item.id === rarity.id)!.hard_enabled = event.target.checked; })} />启用赠送池硬保底</label>
         {pending(`bonus:${rarity.id}:hard-`, rarity.hard_enabled || !!revealed["bonus:"])}
         {(rarity.hard_enabled || revealed["bonus:"]) && field(`bonus:${rarity.id}:hard-pity`, `${rarity.name}赠送池硬保底抽数`, rarity.hard_pity, (n) => changeBonus((bonus) => { bonus.rarities.find((item) => item.id === rarity.id)!.hard_pity = n; }), { min: 1, integer: true, disabled: disabled || (!revealed["bonus:"] && (!value.bonus.enabled || !rarity.hard_enabled)) })}
@@ -250,7 +263,7 @@ export function RuleReadOnly({ value }: { value: RuleDocument }) {
     <section className="editor-section"><h3>稀有度及高低顺序</h3>
       {[...value.rarities].sort((a, b) => a.rank - b.rank).map((rarity) => <div key={rarity.id} className="readonly-group">
         <h4>{rarity.name}</h4><ReadonlyValue label="基础概率" value={`${rarity.base_probability * 100}%`} />
-        <ReadonlyValue label="软保底" value={rarity.soft_enabled ? `第${rarity.soft_start}抽起，每抽增加${rarity.soft_step * 100}个百分点` : "未启用"} />
+        <ReadonlyValue label="软保底" value={softPityText(rarity, rarity.rank === Math.max(...value.rarities.map((item) => item.rank)))} />
         <ReadonlyValue label="硬保底" value={rarity.hard_enabled ? `第${rarity.hard_pity}抽获得本档或更高` : "未启用"} />
       </div>)}
     </section>
@@ -261,7 +274,7 @@ export function RuleReadOnly({ value }: { value: RuleDocument }) {
       <details><summary>查看完整保留参数</summary><div className="readonly-group">
         <ReadonlyValue label="大保底抽数" value={value.big_pity.hard_pity} />
         <ReadonlyValue label="首次赠送触发及抽数" value={`${value.bonus.at_main_draw} / ${value.bonus.draws}`} />
-        {value.bonus.rarities.map((rarity) => <ReadonlyValue key={rarity.id} label={`${names.get(rarity.id) ?? rarity.id}赠送池`} value={`基础概率${rarity.base_probability * 100}%；软保底${rarity.soft_enabled ? `第${rarity.soft_start}抽起增加${rarity.soft_step * 100}个百分点` : "未启用"}；硬保底${rarity.hard_enabled ? `第${rarity.hard_pity}抽` : "未启用"}`} />)}
+        {value.bonus.rarities.map((rarity) => <ReadonlyValue key={rarity.id} label={`${names.get(rarity.id) ?? rarity.id}赠送池`} value={`基础概率${rarity.base_probability * 100}%；软保底${softPityText({ ...rarity, soft_enabled: value.bonus.enabled && rarity.soft_enabled }, rarity.rank === Math.max(...value.rarities.map((item) => item.rank)), "赠送池")}；硬保底${rarity.hard_enabled ? `第${rarity.hard_pity}抽` : "未启用"}`} />)}
         <ReadonlyValue label="周期与数量" value={`${value.grant.period} / ${value.grant.quantity}`} />
       </div></details>
     </section>

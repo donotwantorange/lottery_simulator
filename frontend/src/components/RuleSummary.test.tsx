@@ -39,10 +39,11 @@ it("shows the pool's rarity names and enabled rule parameters with the selected 
   const details = [...container.querySelectorAll("dd")].map((item) => item.textContent ?? "");
   expect(details[1]).toContain("自定义低档");
   expect(details[2]).toContain("自定义低档");
-  expect(details[3]).toContain("第90次主抽必得目标；最高档UP，按最高档名单顺序选中");
-  expect(details[3]).toContain("命中目标后重新计数");
-  expect(details[4]).toContain("主抽第30次时执行10次赠送抽");
-  expect(details[5]).toContain("每120次主抽直接赠送2名角色；最高档UP；自动目标按最高档到低档寻找第一个UP");
+  expect(details[2]).toContain("连续65次");
+  expect(details.join(" ")).toContain("第90次主抽必得目标；最高档UP，按最高档名单顺序选中");
+  expect(details.join(" ")).toContain("命中目标后重新计数");
+  expect(details.join(" ")).toContain("主抽第30次时执行10次赠送抽");
+  expect(details.join(" ")).toContain("每120次主抽直接赠送2名角色；最高档UP；自动目标按最高档到低档寻找第一个UP");
 });
 
 it("shows only off states for disabled mechanisms and disabled pity parameters", () => {

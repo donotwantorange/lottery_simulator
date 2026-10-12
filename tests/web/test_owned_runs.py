@@ -39,6 +39,29 @@ assert state.status == 'completed' and state.history_saved
 
 
 class OwnedRunTests(SimpleTestCase):
+    def test_default_pool_rename_preserves_accepted_history_names(self):
+        self.scenario("""
+from dashboard.models import Pool, ExperimentConfig
+default = Pool.objects.get(pk=read_config_json(DEFAULT_POOL_PATH)['id'])
+default.name = default.name_key = '默认角色池'
+default.config_json = {**default.config_json, 'name': default.name}
+default.save()
+saved = ExperimentConfig.objects.create(owner=admin, name='旧实验', name_key='旧实验',
+    pool=default, pool_name_hint=default.name, parameters_json=payload['parameters'])
+old_payload = {**payload, 'pool_id': str(default.pk), 'expected_pool_revision': default.revision}
+old_state = submit_job(admin, old_payload, synchronous=True)
+assert old_state.status == 'completed'
+before = SimulationRun.objects.get(owner=admin)
+assert before.pool_name_snapshot == '默认角色池'
+initialize_business_defaults()
+default.refresh_from_db(); before.refresh_from_db(); saved.refresh_from_db()
+assert default.name == 'zmd默认角色池'
+assert saved.pool_name_hint == '默认角色池'
+assert before.pool_name_snapshot == '默认角色池'
+assert before.pool_config_json['name'] == '默认角色池'
+assert before.result_json['pool_source']['name'] == '默认角色池'
+""")
+
     def scenario(self, script):
         with TemporaryDirectory(prefix="lottery-owned-runs-") as directory:
             environment = {**os.environ, "PYTHONDONTWRITEBYTECODE": "1",
