@@ -1,7 +1,7 @@
 # 稀有度规则扩展与网页显示优化设计
 
 - 日期：2026-10-10。
-- 状态：任务1—6实现与本地可执行验收完成，任务7集成中；原生200%缩放未直接验，保留工具限制。实际进度见[实施记录](2026-10-10-rarity-rule-and-display.md)。
+- 状态：任务1—7实现与本地集成完成，已合并到master（`696db4c`）；原生200%缩放未直接验，等效640px已验，保留工具限制。未推送或部署。实际进度见[实施记录](2026-10-10-rarity-rule-and-display.md)。
 - 目标：新增 `mrfz` 稀有度概率规则，统一软保底说明，修复实验预览统计卡片错位，并整理默认角色池和已有规则名称的显示约束。
 - 关联规范：[开发规范](../standards/development.md)、[架构与数据规范](../standards/architecture-data.md)、[界面与交互规范](../standards/ui-interaction.md)、[变更记录规范](../standards/change-records.md)。
 
