@@ -1,0 +1,71 @@
+{
+  "format_version": 1,
+  "id": "f393aada-16ac-4e26-bf32-8a5ba5d87176",
+  "name": "mrfz",
+  "original_author": "项目默认配置",
+  "algorithm": "dynamic_probability",
+  "rarities": [
+    {
+      "id": "0b8ff91c-cdcb-42dc-a6ca-572c75f4c553",
+      "name": "3星",
+      "rank": 0,
+      "base_probability": 0.4,
+      "soft_enabled": false,
+      "soft_start": 1,
+      "soft_step": 0,
+      "hard_enabled": false,
+      "hard_pity": 1
+    },
+    {
+      "id": "e4894a1d-eed6-4675-811f-057bfd1eac37",
+      "name": "4星",
+      "rank": 1,
+      "base_probability": 0.5,
+      "soft_enabled": false,
+      "soft_start": 1,
+      "soft_step": 0,
+      "hard_enabled": false,
+      "hard_pity": 1
+    },
+    {
+      "id": "8d181845-cd1c-4414-85ce-c0e93c7e6e05",
+      "name": "5星",
+      "rank": 2,
+      "base_probability": 0.08,
+      "soft_enabled": false,
+      "soft_start": 1,
+      "soft_step": 0,
+      "hard_enabled": false,
+      "hard_pity": 1
+    },
+    {
+      "id": "33977537-f1f5-497b-8b15-4805de836dc3",
+      "name": "6星",
+      "rank": 3,
+      "base_probability": 0.02,
+      "soft_enabled": true,
+      "soft_start": 51,
+      "soft_step": 0.02,
+      "hard_enabled": false,
+      "hard_pity": 1
+    }
+  ],
+  "big_pity": {
+    "enabled": false,
+    "hard_pity": 1,
+    "target": "first_up",
+    "after_obtain": "disable_after_obtain"
+  },
+  "bonus": {
+    "enabled": false,
+    "at_main_draw": 1,
+    "draws": 1,
+    "rarities": []
+  },
+  "grant": {
+    "enabled": false,
+    "period": 1,
+    "quantity": 1,
+    "target": "first_up"
+  }
+}

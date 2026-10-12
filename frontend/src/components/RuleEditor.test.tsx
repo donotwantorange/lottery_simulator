@@ -3,7 +3,7 @@ import type { ComponentProps } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { makeRuleDocument } from "../test-fixtures";
 import type { RuleDocument } from "../api/types";
-import { RuleEditor } from "./RuleEditor";
+import { RuleEditor, RuleReadOnly } from "./RuleEditor";
 
 afterEach(cleanup);
 
@@ -12,6 +12,37 @@ function renderRuleEditor(props: ComponentProps<typeof RuleEditor>) {
 }
 
 describe("RuleEditor", () => {
+  it("uses the current main rarity name in bonus sentence and readonly details", () => {
+    const rule = makeRuleDocument();
+    rule.rarities[2].name = "当前干员";
+    rule.bonus.rarities[2].name = "旧名称";
+    rule.bonus.rarities[2].soft_enabled = true;
+    rule.bonus.rarities[2].soft_start = 51;
+    rule.bonus.rarities[2].soft_step = 0.02;
+    const view = renderRuleEditor({ value: rule, onChange: vi.fn(), structureLocked: false });
+    expect(screen.getByRole("textbox", { name: "当前干员赠送池连续未获得次数" })).toHaveValue("50");
+    view.unmount();
+    render(<RuleReadOnly value={rule} />);
+    expect(screen.queryByText(/旧名称干员/)).toBeNull();
+    expect(screen.getByText(/赠送池：若连续50次没有获取当前干员/)).toBeInTheDocument();
+  });
+  it("converts sentence inputs without rounding untouched values", () => {
+    let current = makeRuleDocument();
+    current.rarities[2].soft_step = 0.012345678901234;
+    const originalStep = current.rarities[2].soft_step;
+    const onChange = vi.fn((next: RuleDocument) => { current = next; });
+    renderRuleEditor({ value: current, onChange, structureLocked: false });
+    fireEvent.blur(screen.getByRole("textbox", { name: "六星每抽增幅（百分点）" }));
+    expect(onChange).not.toHaveBeenCalled();
+    expect(current.rarities[2].soft_step).toBe(originalStep);
+    const count = screen.getByRole("textbox", { name: "六星连续未获得次数" });
+    fireEvent.change(count, { target: { value: "50" } });
+    fireEvent.blur(count);
+    expect(current.rarities[2].soft_start).toBe(51);
+    fireEvent.change(count, { target: { value: "0" } });
+    fireEvent.blur(count);
+    expect(current.rarities[2].soft_start).toBe(1);
+  });
   it("shows the structure lock guidance, probability units, and data-driven first-increase example", () => {
     const rule = makeRuleDocument();
     const example = rule.rarities.find((item) => item.soft_enabled)!;
@@ -22,8 +53,8 @@ describe("RuleEditor", () => {
     expect(screen.queryByRole("button", { name: "四星下移" })).toBeNull();
     expect(screen.queryByRole("button", { name: "删除稀有度" })).toBeNull();
     expect(screen.getAllByText(/百分点/).length).toBeGreaterThan(0);
-    expect(screen.getByText(new RegExp(`当前${example.name}基础概率${(example.base_probability * 100).toFixed(3)}%，每抽增加${(example.soft_step * 100).toFixed(3)}个百分点`))).toBeInTheDocument();
-    expect(screen.getByText(new RegExp(`起点为第${example.soft_start}抽`))).toBeInTheDocument();
+    expect(screen.getByRole("textbox", { name: `${example.name}连续未获得次数` })).toHaveValue(String(example.soft_start - 1));
+    expect(screen.getByRole("textbox", { name: `${example.name}每抽增幅（百分点）` })).toHaveValue(String(example.soft_step * 100));
     expect(screen.getByText(/从上到下，稀有度等级逐渐升高/)).toBeInTheDocument();
     expect(screen.getByText(/赠送抽和直接赠送不改变大保底/)).toBeInTheDocument();
     expect(screen.queryByText(/周期直接赠送已关闭/)).toBeNull();
@@ -104,7 +135,7 @@ describe("RuleEditor", () => {
     rule.bonus.enabled = false;
     rule.grant.enabled = false;
     renderRuleEditor({ value: rule, onChange: vi.fn(), structureLocked: false });
-    expect(screen.queryByRole("textbox", { name: "四星软保底起点" })).toBeNull();
+    expect(screen.queryByRole("textbox", { name: "四星连续未获得次数" })).toBeNull();
     expect(screen.queryByRole("textbox", { name: "触发主抽位置" })).toBeNull();
     expect(screen.getByText(/周期直接赠送已关闭/)).toBeTruthy();
 
@@ -134,7 +165,7 @@ describe("RuleEditor", () => {
       editor.current?.rerender(<RuleEditor value={current} onChange={onChange} structureLocked={false} />);
     };
     editor.current = renderRuleEditor({ value: current, onChange, structureLocked: false });
-    const label = `${rule.rarities[2].name}软保底起点`;
+    const label = `${rule.rarities[2].name}连续未获得次数`;
     fireEvent.change(screen.getByRole("textbox", { name: label }), { target: { value: "oops" } });
     fireEvent.blur(screen.getByRole("textbox", { name: label }));
     fireEvent.click(screen.getAllByRole("checkbox", { name: "启用软保底" })[2]);

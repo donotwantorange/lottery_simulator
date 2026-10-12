@@ -1,4 +1,31 @@
+import type { RuleRarityDocument } from "./api/types";
 type NullableText = string | null | undefined;
+
+export function softStartFromMisses(misses: number): number {
+  if (typeof misses !== "number" || !Number.isSafeInteger(misses) || misses < 0 || !Number.isSafeInteger(misses + 1)) {
+    throw new Error("连续未获得次数须为非负安全整数，且加1仍为安全整数。");
+  }
+  return misses + 1;
+}
+
+export function formatPoints(step: number): string {
+  const points = step * 100;
+  if (!Number.isFinite(points) || points < 0) return "数据无效";
+  return points > 0 && points < 0.00005 ? points.toExponential(4) : points.toFixed(4);
+}
+
+export function softPityTarget(name: string, highest: boolean): string {
+  const target = name.includes("干员") ? name : `${name}干员`;
+  return highest ? target : `${target}或更高档`;
+}
+
+export const SOFT_PITY_CONSTRAINT = "增幅单位为百分点，实际概率受低档可扣减概率、更高档机制及100%上限约束。";
+
+export function softPityText(rarity: RuleRarityDocument, highest: boolean, scope = ""): string {
+  if (!rarity.soft_enabled) return "软保底未启用";
+  const target = softPityTarget(rarity.name, highest);
+  return `${scope ? `${scope}：` : ""}若连续${rarity.soft_start - 1}次没有获取${target}，接下来每一次寻访获取${rarity.name.includes("干员") ? rarity.name : `${rarity.name}干员`}的概率将依次提高${formatPoints(rarity.soft_step)}个百分点。`;
+}
 
 const MISSING = "数据缺失";
 

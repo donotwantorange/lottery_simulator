@@ -6,14 +6,16 @@ from django.db.migrations.recorder import MigrationRecorder
 
 from dashboard.models import AppMeta, Pool, Rule, User
 from lottery_simulator.config_documents import (
-    DEFAULT_POOL_PATH, DEFAULT_RULE_PATH, load_pool_document, load_rule_document,
+    DEFAULT_POOL_PATH, DEFAULT_RULE_PATH, MRFZ_RULE_PATH, load_pool_document, load_rule_document,
     read_config_json,
 )
 from lottery_simulator.rules.runtime import compile_pool
+from lottery_simulator.rules.definitions import RuleDefinition, PoolDefinition
 
 
 def initialize_business_defaults():
     rule_doc = load_rule_document(read_config_json(DEFAULT_RULE_PATH))
+    mrfz_doc = load_rule_document(read_config_json(MRFZ_RULE_PATH))
     pool_doc = load_pool_document(read_config_json(DEFAULT_POOL_PATH))
     if pool_doc.rule_ref != {"id": rule_doc.id, "name": rule_doc.name}:
         raise CommandError("默认角色池引用与默认规则不一致")
@@ -29,8 +31,8 @@ def initialize_business_defaults():
             app="dashboard", name="0002_independent_rules_v6"
         ).exists():
             raise CommandError("请先完整迁移到数据库版本6")
-        name_conflicts = (Rule.objects.filter(kind=Rule.PUBLIC, name_key=rule_doc.name)
-                          .exclude(pk=rule_doc.id).exists() or
+        name_conflicts = (any(Rule.objects.filter(kind=Rule.PUBLIC, name_key=doc.name)
+                          .exclude(pk=doc.id).exists() for doc in (rule_doc, mrfz_doc)) or
                           Pool.objects.filter(kind=Pool.PUBLIC, name_key=pool_doc.name)
                           .exclude(pk=pool_doc.id).exists())
         if name_conflicts:
@@ -44,9 +46,20 @@ def initialize_business_defaults():
         )
         if rule.kind != Rule.PUBLIC or rule.owner_id is not None:
             raise CommandError("默认规则ID不是公共规则")
+        for doc in (rule_doc, mrfz_doc):
+            current, _ = Rule.objects.get_or_create(pk=doc.id, defaults={
+                "name": doc.name, "name_key": doc.name, "kind": Rule.PUBLIC,
+                "owner": None, "visibility": Rule.PUBLIC,
+                "original_author": doc.original_author or "项目默认配置",
+                "algorithm": doc.algorithm, "config_json": doc.to_dict(), "revision": 1,
+            })
+            if current.kind != Rule.PUBLIC or current.owner_id is not None or current.visibility != Rule.PUBLIC:
+                raise CommandError("默认规则ID不是公共规则")
+            saved = RuleDefinition.from_dict(current.config_json)
+            if saved.id != doc.id or saved.algorithm != current.algorithm:
+                raise CommandError("默认规则ID或算法与保存配置不一致")
         pool = Pool.objects.filter(pk=pool_doc.id).first()
         if pool is None:
-            from lottery_simulator.rules.definitions import RuleDefinition
             current_rule = rule_doc if created else RuleDefinition.from_dict(rule.config_json)
             compile_pool(current_rule, pool_doc)
             pool = Pool.objects.create(
@@ -55,8 +68,18 @@ def initialize_business_defaults():
                 original_author=pool_doc.original_author or "项目默认配置",
                 rule=rule, config_json=pool_data, revision=1,
             )
-        if pool.kind != Pool.PUBLIC or pool.owner_id is not None:
+        if pool.kind != Pool.PUBLIC or pool.owner_id is not None or pool.visibility != Pool.PUBLIC or str(pool.rule_id) != rule_doc.id:
             raise CommandError("默认池ID不是公共池")
+        saved_pool = PoolDefinition.from_dict(pool.config_json)
+        if saved_pool.id != pool_doc.id or saved_pool.rule_ref["id"] != rule_doc.id or saved_pool.name != pool.name:
+            raise CommandError("默认池配置与对象身份不一致")
+        if pool.name == "默认角色池":
+            pool.name = pool.name_key = pool_doc.name
+            pool.config_json = {**pool.config_json, "name": pool_doc.name}
+            pool.revision += 1
+            pool.save(update_fields=["name", "name_key", "config_json", "revision"])
+        elif pool.name != pool_doc.name:
+            raise CommandError("默认池已被改名，请人工确认，不自动覆盖")
         AppMeta.objects.update_or_create(key="initialized", defaults={"value": {"version": 6}})
 
 
