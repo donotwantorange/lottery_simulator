@@ -82,14 +82,14 @@ class BusinessDefaultsTests(TestCase):
                                  is_staff=True, is_superuser=True)
         initialize_business_defaults()
         rule = Rule.objects.get(name="zmd")
-        pool = Pool.objects.get(name="默认角色池")
+        pool = Pool.objects.get(name="zmd默认角色池")
         self.assertEqual(pool.rule_id, rule.pk)
         before = rule.config_json
-        rule.config_json = {"edited": True}
+        rule.config_json = {**before, "name": "已修改规则"}
         rule.save(update_fields=["config_json"])
         initialize_business_defaults()
         rule.refresh_from_db()
-        self.assertEqual(rule.config_json, {"edited": True})
+        self.assertEqual(rule.config_json, {**before, "name": "已修改规则"})
         self.assertEqual(AppMeta.objects.get(key="initialized").value, {"version": 6})
         self.assertEqual(before["id"], str(rule.pk))
 
@@ -97,9 +97,57 @@ class BusinessDefaultsTests(TestCase):
             visibility="public", original_author="原作者", config_json={})
         pool.rule = other_rule
         pool.save(update_fields=["rule"])
-        initialize_business_defaults()
+        with self.assertRaises(CommandError):
+            initialize_business_defaults()
         pool.refresh_from_db()
         self.assertEqual(pool.rule_id, other_rule.pk)
+
+    def test_mrfz_initialized_twice_preserves_valid_revision(self):
+        User.objects.create_user(username="admin", username_key="admin", password="!",
+                                 is_staff=True, is_superuser=True)
+        initialize_business_defaults()
+        rule = Rule.objects.get(name="mrfz")
+        self.assertEqual([r["base_probability"] for r in rule.config_json["rarities"]],
+                         [0.4, 0.5, 0.08, 0.02])
+        top = rule.config_json["rarities"][-1]
+        self.assertEqual((top["soft_start"], top["soft_step"]), (51, 0.02))
+        self.assertTrue(top["soft_enabled"])
+        self.assertFalse(any(r["hard_enabled"] for r in rule.config_json["rarities"]))
+        for mechanism in ("big_pity", "bonus", "grant"):
+            self.assertFalse(rule.config_json[mechanism]["enabled"])
+        rule.config_json["rarities"][-1]["soft_step"] = 0.03
+        rule.revision = 2
+        rule.save()
+        initialize_business_defaults()
+        rule.refresh_from_db()
+        self.assertEqual(rule.config_json["rarities"][-1]["soft_step"], 0.03)
+        self.assertEqual(rule.revision, 2)
+        self.assertEqual(Rule.objects.count(), 2)
+
+    def test_old_default_pool_rename_and_conflict_do_not_overwrite(self):
+        User.objects.create_user(username="admin", username_key="admin", password="!",
+                                 is_staff=True, is_superuser=True)
+        initialize_business_defaults()
+        pool = Pool.objects.get(name="zmd默认角色池")
+        pool.name = pool.name_key = "默认角色池"
+        pool.config_json["name"] = pool.name
+        pool.save()
+        old = dict(pool.config_json)
+        initialize_business_defaults()
+        pool.refresh_from_db()
+        self.assertEqual(pool.name, "zmd默认角色池")
+        self.assertEqual(pool.config_json, {**old, "name": "zmd默认角色池"})
+        self.assertEqual(pool.revision, 2)
+        initialize_business_defaults()
+        pool.refresh_from_db()
+        self.assertEqual(pool.revision, 2)
+        pool.name = pool.name_key = "用户改名"
+        pool.config_json["name"] = pool.name
+        pool.save()
+        with self.assertRaises(CommandError):
+            initialize_business_defaults()
+        pool.refresh_from_db()
+        self.assertEqual(pool.name, "用户改名")
 
     def test_init_business_defaults_requires_admin_and_rolls_back_name_conflict(self):
         with self.assertRaises(CommandError):
@@ -113,6 +161,17 @@ class BusinessDefaultsTests(TestCase):
             call_command("init_business_defaults")
         self.assertFalse(Pool.objects.exists())
         self.assertFalse(AppMeta.objects.filter(key="initialized").exists())
+
+    def test_mrfz_name_conflict_rolls_back_all_initialization(self):
+        User.objects.create_user(username="admin", username_key="admin", password="!",
+                                 is_staff=True, is_superuser=True)
+        foreign = Rule.objects.create(name="mrfz", name_key="mrfz", kind="public", owner=None,
+            visibility="public", original_author="someone", config_json={})
+        with self.assertRaises(CommandError):
+            initialize_business_defaults()
+        self.assertEqual(list(Rule.objects.values_list("pk", flat=True)), [foreign.pk])
+        self.assertFalse(Pool.objects.exists())
+        self.assertFalse(AppMeta.objects.exists())
 
     def test_init_admin_rolls_back_failed_defaults_and_rejects_repeat(self):
         with patch("dashboard.management.commands.init_admin.getpass",

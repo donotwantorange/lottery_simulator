@@ -64,7 +64,7 @@ class InstallerTest(unittest.TestCase):
             for name in ('deployment_checks.sh', 'deployment_resources.py'):
                 shutil.copy2(SCRIPT.parents[0] / name, root / 'scripts' / name)
             for name in ['docker-compose.yml', 'Dockerfile', 'Caddyfile', 'manage.py',
-                         'configs/pools/default.json', 'configs/rules/zmd.json',
+                         'configs/pools/default.json', 'configs/rules/zmd.json', 'configs/rules/mrfz.json',
                          'frontend/package.json', 'frontend/package-lock.json',
                          'scripts/backup_db.py', 'deploy/lottery-backup.service', 'deploy/lottery-backup.timer']:
                 target = root / name

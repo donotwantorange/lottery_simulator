@@ -10,6 +10,8 @@
 
 **依据设计：** [2026-10-10-rarity-rule-and-display-design.md](2026-10-10-rarity-rule-and-display-design.md)。
 
+**实施进度（2026-10-12）：** 任务1已完成；任务2—7待执行。验证与实际边界见[实施记录](2026-10-10-rarity-rule-and-display.md)。
+
 ## 全局约束
 
 - `mrfz`基础概率固定为3星40%、4星50%、5星8%、6星2%，合计100%。

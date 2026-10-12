@@ -115,7 +115,7 @@ class ConfigDocumentsTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "多个文件"):
                 resolve_pool_reference(ref, directory)
             Path(directory, "duplicate.json").unlink()
-            ref = dict(self.experiment["pool_ref"], id="a33e8fb2-6ca9-4f89-9d7f-e4975c5c4aaa")
+            ref = dict(self.experiment["pool_ref"], id="a33e8fb2-6ca9-4f89-9d7f-e4975c5c4aaa", name=self.pool["name"])
             with self.assertRaisesRegex(ValueError, "非交互"):
                 resolve_pool_reference(ref, directory)
             self.assertEqual(resolve_pool_reference(ref, directory, interactive=True,

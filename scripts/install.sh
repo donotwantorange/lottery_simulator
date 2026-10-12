@@ -22,7 +22,7 @@ if [[ $mode == menu ]]; then
   management_menu
   exit
 fi
-for file in docker-compose.yml Dockerfile Caddyfile manage.py configs/pools/default.json configs/rules/zmd.json frontend/package.json frontend/package-lock.json scripts/backup_db.py deploy/lottery-backup.service deploy/lottery-backup.timer; do
+for file in docker-compose.yml Dockerfile Caddyfile manage.py configs/pools/default.json configs/rules/zmd.json configs/rules/mrfz.json frontend/package.json frontend/package-lock.json scripts/backup_db.py deploy/lottery-backup.service deploy/lottery-backup.timer; do
   [[ -f $file ]] || { printf '缺少项目文件：%s；请下载完整 master 项目。\n' "$file" >&2; exit 1; }
 done
 if (( EUID == 0 )); then admin=(); else admin=(sudo); sudo -v; fi

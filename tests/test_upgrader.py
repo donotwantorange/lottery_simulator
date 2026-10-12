@@ -212,7 +212,7 @@ management_private() {
 management_legacy_ports() { :; }
 ''')
             for name in ('docker-compose.yml','Dockerfile','Caddyfile','manage.py','requirements.txt','configs/pools/default.json',
-                         'configs/rules/zmd.json','frontend/package.json','frontend/package-lock.json','scripts/backup_db.py'):
+                         'configs/rules/zmd.json','configs/rules/mrfz.json','frontend/package.json','frontend/package-lock.json','scripts/backup_db.py'):
                 p=root/name; p.parent.mkdir(parents=True,exist_ok=True); p.touch()
             formats=root/'lottery_simulator/formats.py'; formats.parent.mkdir(parents=True)
             shutil.copy2(SOURCE/'lottery_simulator/formats.py',formats)

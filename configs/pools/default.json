@@ -1,7 +1,7 @@
 {
   "format_version": 3,
   "id": "ad9e5c3a-a308-48be-8be7-6173a38e0831",
-  "name": "默认角色池",
+  "name": "zmd默认角色池",
   "original_author": "项目默认配置",
   "rule_ref": {
     "id": "fdf11d26-3e2f-4685-8492-157e22495e1b",
