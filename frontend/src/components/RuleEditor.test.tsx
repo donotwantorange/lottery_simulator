@@ -3,7 +3,7 @@ import type { ComponentProps } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { makeRuleDocument } from "../test-fixtures";
 import type { RuleDocument } from "../api/types";
-import { RuleEditor } from "./RuleEditor";
+import { RuleEditor, RuleReadOnly } from "./RuleEditor";
 
 afterEach(cleanup);
 
@@ -12,6 +12,20 @@ function renderRuleEditor(props: ComponentProps<typeof RuleEditor>) {
 }
 
 describe("RuleEditor", () => {
+  it("uses the current main rarity name in bonus sentence and readonly details", () => {
+    const rule = makeRuleDocument();
+    rule.rarities[2].name = "当前干员";
+    rule.bonus.rarities[2].name = "旧名称";
+    rule.bonus.rarities[2].soft_enabled = true;
+    rule.bonus.rarities[2].soft_start = 51;
+    rule.bonus.rarities[2].soft_step = 0.02;
+    const view = renderRuleEditor({ value: rule, onChange: vi.fn(), structureLocked: false });
+    expect(screen.getByRole("textbox", { name: "当前干员赠送池连续未获得次数" })).toHaveValue("50");
+    view.unmount();
+    render(<RuleReadOnly value={rule} />);
+    expect(screen.queryByText(/旧名称干员/)).toBeNull();
+    expect(screen.getByText(/赠送池：若连续50次没有获取当前干员/)).toBeInTheDocument();
+  });
   it("converts sentence inputs without rounding untouched values", () => {
     let current = makeRuleDocument();
     current.rarities[2].soft_step = 0.012345678901234;

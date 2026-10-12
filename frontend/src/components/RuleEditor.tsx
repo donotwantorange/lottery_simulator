@@ -159,12 +159,14 @@ export function RuleEditor({ value, onChange, structureLocked, disabled = false,
   }
   function softFields(rarity: RuleRarityDocument, area: "main" | "bonus", assign: (update: (item: RuleRarityDocument) => void) => void, fieldDisabled: boolean) {
     const scope = area === "bonus" ? "赠送池" : "";
+    const name = area === "bonus" ? value.rarities.find((item) => item.id === rarity.id)?.name ?? rarity.name : rarity.name;
+    const active = rarity.soft_enabled && (area === "main" || value.bonus.enabled);
     const highest = rarity.rank === Math.max(...value.rarities.map((item) => item.rank));
-    return <div className="soft-pity-sentence">{scope && `${scope}：`}若连续
-      {field(`${area}:${rarity.id}:soft-start`, `${rarity.name}${scope}连续未获得次数`, rarity.soft_start - 1, (n) => assign((item) => { item.soft_start = softStartFromMisses(n); }), { min: 0, max: Number.MAX_SAFE_INTEGER - 1, integer: true, disabled: fieldDisabled, inline: true })}
-      次没有获取{softPityTarget(rarity.name, highest)}，接下来每一次寻访获取{softPityTarget(rarity.name, true)}的概率将依次提高
-      {field(`${area}:${rarity.id}:soft-step`, `${rarity.name}${scope}每抽增幅（百分点）`, rarity.soft_step, (n) => assign((item) => { item.soft_step = n; }), { unit: "points", positive: rarity.soft_enabled, disabled: fieldDisabled, inline: true })}
-      个百分点。<small className="muted">{SOFT_PITY_CONSTRAINT}{!rarity.soft_enabled && "软保底未启用，这些是保留参数。"}</small>
+    return <div className="soft-pity-sentence">{scope && `${scope}：`}{active ? "若连续" : "保留参数：连续未获得次数"}
+      {field(`${area}:${rarity.id}:soft-start`, `${name}${scope}连续未获得次数`, rarity.soft_start - 1, (n) => assign((item) => { item.soft_start = softStartFromMisses(n); }), { min: 0, max: Number.MAX_SAFE_INTEGER - 1, integer: true, disabled: fieldDisabled, inline: true })}
+      {active ? `次没有获取${softPityTarget(name, highest)}，接下来每一次寻访获取${softPityTarget(name, true)}的概率将依次提高` : "次；每抽增幅"}
+      {field(`${area}:${rarity.id}:soft-step`, `${name}${scope}每抽增幅（百分点）`, rarity.soft_step, (n) => assign((item) => { item.soft_step = n; }), { unit: "points", positive: rarity.soft_enabled, disabled: fieldDisabled, inline: true })}
+      个百分点。<small className="muted">{active ? SOFT_PITY_CONSTRAINT : "软保底未启用或赠送池已关闭，保留参数当前不生效。"}</small>
     </div>;
   }
   function pending(prefix: string, visible: boolean) {
@@ -274,7 +276,7 @@ export function RuleReadOnly({ value }: { value: RuleDocument }) {
       <details><summary>查看完整保留参数</summary><div className="readonly-group">
         <ReadonlyValue label="大保底抽数" value={value.big_pity.hard_pity} />
         <ReadonlyValue label="首次赠送触发及抽数" value={`${value.bonus.at_main_draw} / ${value.bonus.draws}`} />
-        {value.bonus.rarities.map((rarity) => <ReadonlyValue key={rarity.id} label={`${names.get(rarity.id) ?? rarity.id}赠送池`} value={`基础概率${rarity.base_probability * 100}%；软保底${softPityText({ ...rarity, soft_enabled: value.bonus.enabled && rarity.soft_enabled }, rarity.rank === Math.max(...value.rarities.map((item) => item.rank)), "赠送池")}；硬保底${rarity.hard_enabled ? `第${rarity.hard_pity}抽` : "未启用"}`} />)}
+        {value.bonus.rarities.map((rarity) => <ReadonlyValue key={rarity.id} label={`${names.get(rarity.id) ?? rarity.id}赠送池`} value={`基础概率${rarity.base_probability * 100}%；软保底${softPityText({ ...rarity, name: names.get(rarity.id) ?? rarity.name, soft_enabled: value.bonus.enabled && rarity.soft_enabled }, rarity.rank === Math.max(...value.rarities.map((item) => item.rank)), "赠送池")}；硬保底${rarity.hard_enabled ? `第${rarity.hard_pity}抽` : "未启用"}`} />)}
         <ReadonlyValue label="周期与数量" value={`${value.grant.period} / ${value.grant.quantity}`} />
       </div></details>
     </section>
