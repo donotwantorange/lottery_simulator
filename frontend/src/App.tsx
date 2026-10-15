@@ -75,7 +75,7 @@ function AppShell() {
   return (
     <div className="app-frame" onClickCapture={noteClick} onChangeCapture={recordUserActivity}>
       <aside className="sidebar">
-        <div className="brand"><span className="brand-mark">L</span><span>抽卡模拟器</span></div>
+        <div className="brand"><span className="brand-mark">L</span><span>概率工具小站</span></div>
         <nav aria-label="主导航">
           <NavLink to="/experiments/new/" aria-current={location.pathname === "/experiments/new/" ? "page" : undefined}>新建实验</NavLink><NavLink to="/pools/">角色池</NavLink>
           <NavLink to="/rules/" aria-current={location.pathname.startsWith("/rules/") ? "page" : undefined}>规则</NavLink>
@@ -90,7 +90,7 @@ function AppShell() {
         </div>
       </aside>
       <main className="workspace">
-        <header className="page-heading"><div><p className="eyebrow">工作台</p><h1>{activePage?.title ?? "抽卡模拟器"}</h1><p className="muted">{activePage?.description}</p></div></header>
+        <header className="page-heading"><div><p className="eyebrow">工作台</p><h1>{activePage?.title ?? "概率工具小站"}</h1><p className="muted">{activePage?.description}</p></div></header>
         <Outlet />
       </main>
       {passwordOpen && <div className="dialog-backdrop"><ChangePassword onClose={() => setPasswordOpen(false)} /></div>}

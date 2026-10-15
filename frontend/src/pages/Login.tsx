@@ -32,7 +32,7 @@ export function Login() {
   return (
     <main className="login-page">
       <form className="login-card" onSubmit={submit}>
-        <p className="eyebrow">LOTTERY SIMULATOR</p>
+        <p className="eyebrow">概率工具小站</p>
         <h1>登录</h1>
         {notice && <p className="form-error" role="alert">{notice}</p>}
         {logoutPending && <p className="muted" role="status">正在退出登录…</p>}

@@ -16,6 +16,7 @@
 
 | 日期／主题 | 当前状态 | 设计 | 计划 | 实施／修改记录 | Git状态 |
 |---|---|---|---|---|---|
+| 2026-10-15 网页名称调整 | 网页标题、导航与登录页改为“概率工具小站”；静态核对 | — | — | [修改记录](2026-10-15-site-name.md) | 未提交、推送或部署 |
 | 2026-10-10 稀有度规则扩展与网页显示优化 | 任务1—7实现与本地集成完成；桌面/390px/等效640px通过，原生200%未直接验 | [设计](2026-10-10-rarity-rule-and-display-design.md) | [计划](2026-10-10-rarity-rule-and-display-plan.md) | [实施记录](2026-10-10-rarity-rule-and-display.md) | 本地master合并`696db4c`；未推送或部署，真实业务库未初始化或改名 |
 | 2026-10-07 部署安全、系统修复与网页易用性改进 | 2026-10-10任务1—11已合并并完成最小本地验收；真实Compose/systemd/完整恢复/公网HTTPS及原生200%缩放未验 | [设计](2026-10-07-current-update-legacy-reinstall-design.md) | [计划](2026-10-07-current-update-legacy-reinstall-plan.md) | [实施记录](2026-10-07-current-update-legacy-reinstall.md) | 本地master合并提交 `afbc891`；未推送或部署，真实环境待验 |
 | 2026-10-06 统一服务器管理菜单 | 已实现，隔离63项通过；服务器整机流程未验 | [设计](2026-10-06-server-management-design.md) | [计划](2026-10-06-server-management-plan.md) | [实施记录](2026-10-06-server-management.md) | 基于master `2612b08`，实现、测试及菜单优先文档随本提交纳入；未实际部署 |
